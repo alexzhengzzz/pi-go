@@ -1,0 +1,192 @@
+import { common } from '@kit.AbilityKit';
+import { preferences } from '@kit.ArkData';
+import { util } from '@kit.ArkTS';
+import { BusinessError } from '@kit.BasicServicesKit';
+import { cryptoFramework } from '@kit.CryptoArchitectureKit';
+import { huks } from '@kit.UniversalKeystoreKit';
+
+// Sidebar UI choices worth remembering between launches; plain state, no secrets.
+export const SIDEBAR_VIEWS: string[] = ['all', 'pinned', 'recent', 'archived'];
+export const SIDEBAR_MAX_COLLAPSED = 100;
+export const SIDEBAR_MAX_ENTRIES = 24;
+
+export interface Companion {
+  address: string;
+  token: string;
+  ca?: string;
+  pin?: string;
+}
+
+export interface ComputerBook {
+  version: number;
+  active: string;
+  computers: Companion[];
+}
+
+export interface SidebarState {
+  collapsedSpaces: string[];
+  tasksExpanded: boolean;
+  sessionView: string;
+}
+
+export interface SidebarEntry {
+  address: string;
+  state: SidebarState;
+}
+
+export interface SidebarBook {
+  version: number;
+  entries: SidebarEntry[];
+}
+
+interface StoredCompanions {
+  version?: number;
+  active?: string;
+  computers?: Companion[];
+  address?: string;
+  token?: string;
+  ca?: string;
+  pin?: string;
+}
+
+interface StoredSidebarState {
+  collapsedSpaces?: string[];
+  tasksExpanded?: boolean;
+  sessionView?: string;
+}
+
+interface StoredSidebarEntry {
+  address?: string;
+  state?: StoredSidebarState;
+}
+
+interface StoredSidebar {
+  version?: number;
+  entries?: StoredSidebarEntry[];
+}
+
+interface Sealed {
+  nonce: string;
+  data: string;
+}
+
+export class CredentialVault {
+  private readonly alias: string = 'pigo.companion.v1';
+  private readonly encoder: util.TextEncoder = new util.TextEncoder();
+  private readonly base64: util.Base64Helper = new util.Base64Helper();
+  private readonly store: preferences.Preferences;
+  private writing: Promise<void> = Promise.resolve();
+
+  private constructor(store: preferences.Preferences) { this.store = store; }
+
+  static async open(context: common.Context): Promise<CredentialVault> {
+    return new CredentialVault(await preferences.getPreferences(context, { name: 'pigo' }));
+  }
+
+  private properties(purpose: number): huks.HuksParam[] {
+    return [
+      { tag: huks.HuksTag.HUKS_TAG_ALGORITHM, value: huks.HuksKeyAlg.HUKS_ALG_AES },
+      { tag: huks.HuksTag.HUKS_TAG_PURPOSE, value: purpose },
+      { tag: huks.HuksTag.HUKS_TAG_KEY_SIZE, value: 256 },
+      { tag: huks.HuksTag.HUKS_TAG_BLOCK_MODE, value: huks.HuksCipherMode.HUKS_MODE_GCM },
+      { tag: huks.HuksTag.HUKS_TAG_PADDING, value: huks.HuksKeyPadding.HUKS_PADDING_NONE },
+      { tag: huks.HuksTag.HUKS_TAG_DIGEST, value: huks.HuksKeyDigest.HUKS_DIGEST_NONE }
+    ];
+  }
+
+  private async ensureKey(): Promise<void> {
+    let exists: boolean = false;
+    try { exists = await huks.isKeyItemExist(this.alias, { properties: [] }); }
+    catch (error) { if ((error as BusinessError).code !== 12000011) throw error as Error; }
+    if (exists) return;
+    const purposes = huks.HuksKeyPurpose.HUKS_KEY_PURPOSE_ENCRYPT | huks.HuksKeyPurpose.HUKS_KEY_PURPOSE_DECRYPT;
+    await huks.generateKeyItem(this.alias, { properties: this.properties(purposes) });
+  }
+
+  private cipher(purpose: number, nonce: Uint8Array, tag?: Uint8Array): huks.HuksParam[] {
+    const properties = this.properties(purpose);
+    properties.push({ tag: huks.HuksTag.HUKS_TAG_NONCE, value: nonce });
+    properties.push({ tag: huks.HuksTag.HUKS_TAG_ASSOCIATED_DATA, value: this.encoder.encodeInto(this.alias) });
+    if (tag) properties.push({ tag: huks.HuksTag.HUKS_TAG_AE_TAG, value: tag });
+    return properties;
+  }
+
+  async load(): Promise<ComputerBook | undefined> {
+    const raw = await this.store.get('sealed', '') as string;
+    if (!raw) return undefined;
+    const sealed = JSON.parse(raw) as Sealed;
+    const nonce = this.base64.decodeSync(sealed.nonce);
+    const bytes = this.base64.decodeSync(sealed.data);
+    if (nonce.length !== 12 || bytes.length < 17) throw new Error('invalid_vault');
+    const tagAt = bytes.length - 16;
+    const properties = this.cipher(huks.HuksKeyPurpose.HUKS_KEY_PURPOSE_DECRYPT, nonce, bytes.slice(tagAt));
+    const session = await huks.initSession(this.alias, { properties: properties });
+    const result = await huks.finishSession(session.handle, { properties: properties, inData: bytes.slice(0, tagAt) });
+    const text = new util.TextDecoder('utf-8').decodeWithStream(result.outData);
+    const stored = JSON.parse(text) as StoredCompanions;
+    if (stored.version === 2 && Array.isArray(stored.computers) && typeof stored.active === 'string') {
+      return { version: 2, active: stored.active, computers: stored.computers };
+    }
+    if (stored.version === undefined && typeof stored.address === 'string' && typeof stored.token === 'string') {
+      const legacy: Companion = { address: stored.address, token: stored.token, ca: stored.ca, pin: stored.pin };
+      return { version: 2, active: legacy.address, computers: [legacy] };
+    }
+    throw new Error('invalid_companion_book');
+  }
+
+  save(record: ComputerBook): Promise<void> {
+    const snapshot = JSON.stringify(record);
+    this.writing = this.writing.catch(() => {}).then(async () => {
+      if (!record.computers.length) await this.store.delete('sealed');
+      else {
+        await this.ensureKey();
+        const nonce = (await cryptoFramework.createRandom().generateRandom(12)).data;
+        const properties = this.cipher(huks.HuksKeyPurpose.HUKS_KEY_PURPOSE_ENCRYPT, nonce);
+        const session = await huks.initSession(this.alias, { properties: properties });
+        const inData = this.encoder.encodeInto(snapshot);
+        const result = await huks.finishSession(session.handle, { properties: properties, inData: inData });
+        const value: Sealed = { nonce: this.base64.encodeToStringSync(nonce), data: this.base64.encodeToStringSync(result.outData) };
+        await this.store.put('sealed', JSON.stringify(value));
+      }
+      await this.store.flush();
+    });
+    return this.writing;
+  }
+
+  // Collapse and filter choices are plain UI state, so they stay unsealed beside the vault.
+  async loadSidebar(): Promise<SidebarBook> {
+    const book: SidebarBook = { version: 1, entries: [] };
+    try {
+      const raw = await this.store.get('sidebar', '') as string;
+      if (!raw) return book;
+      const stored = JSON.parse(raw) as StoredSidebar;
+      if (stored.version !== 1 || !Array.isArray(stored.entries)) return book;
+      const entries: SidebarEntry[] = [];
+      stored.entries.forEach((entry: StoredSidebarEntry) => {
+        if (!entry || typeof entry.address !== 'string' || !entry.state) return;
+        const address: string = entry.address;
+        if (entries.some((kept: SidebarEntry): boolean => kept.address === address)) return;
+        const view: string = entry.state.sessionView ?? '';
+        const restored: SidebarState = {
+          collapsedSpaces: (Array.isArray(entry.state.collapsedSpaces) ? entry.state.collapsedSpaces : [])
+            .filter((path: string): boolean => typeof path === 'string').slice(0, SIDEBAR_MAX_COLLAPSED),
+          tasksExpanded: entry.state.tasksExpanded !== false,
+          sessionView: SIDEBAR_VIEWS.includes(view) ? view : 'all'
+        };
+        const kept: SidebarEntry = { address: address, state: restored };
+        entries.push(kept);
+      });
+      book.entries = entries.slice(0, SIDEBAR_MAX_ENTRIES);
+    } catch { /* a corrupted sidebar cache just falls back to defaults */ }
+    return book;
+  }
+
+  saveSidebar(book: SidebarBook): Promise<void> {
+    const snapshot = JSON.stringify(book);
+    this.writing = this.writing.catch(() => {}).then(async () => {
+      await this.store.put('sidebar', snapshot);
+      await this.store.flush();
+    });
+    return this.writing;
+  }
+}

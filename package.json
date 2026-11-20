@@ -1,0 +1,41 @@
+{
+  "name": "pi-go",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "files": [
+    "desktop/phase0.ts",
+    "desktop/local-ipc.mjs",
+    "desktop/broker.mjs",
+    "desktop/attachments.mjs",
+    "desktop/session-metadata.mjs",
+    "desktop/workspace-files.mjs",
+    "desktop/lan-tls.mjs",
+    "desktop/lan-discovery.mjs",
+    "scripts/pair-qr.swift",
+    "desktop/pairing-runtime.mjs",
+    "desktop/pairing-control.mjs",
+    "macos/PairingApp.swift",
+    "scripts/build-pairing-app.sh",
+    "desktop/computer-sessions.mjs",
+    "desktop/pi-go-host.ts",
+    "desktop/pi-desktop-v0.2.2-alpha.patch",
+    "scripts/prepare-desktop-host.sh",
+    "scripts/build-desktop-host-app.sh",
+    "scripts/install-desktop-host-app.sh"
+  ],
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./desktop/phase0.ts"
+    ]
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "build:pairing": "zsh scripts/build-pairing-app.sh",
+    "build:desktop-host": "zsh scripts/build-desktop-host-app.sh",
+    "install:desktop-host": "zsh scripts/install-desktop-host-app.sh"
+  }
+}

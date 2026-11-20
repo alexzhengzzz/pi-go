@@ -1,0 +1,258 @@
+diff --git a/src/main/extension-ui-ipc.test.ts b/src/main/extension-ui-ipc.test.ts
+index 4ca9e71..d7f2d5e 100644
+--- a/src/main/extension-ui-ipc.test.ts
++++ b/src/main/extension-ui-ipc.test.ts
+@@ -69,6 +69,8 @@ function recordingRouter(calls: RouterCall[]): PiEventRouter {
+   return {
+     attachManager: (manager) => calls.push({ method: 'attachManager', args: [manager] }),
+     respond: (id, response) => calls.push({ method: 'respond', args: [id, response] }),
++    pendingForPiGo: () => undefined,
++    respondFromPiGo: () => false,
+     flush: (workspaceId) => calls.push({ method: 'flush', args: [workspaceId] }),
+     getPendingCounts: () => {
+       calls.push({ method: 'getPendingCounts', args: [] })
+diff --git a/src/main/ipc-handlers.ts b/src/main/ipc-handlers.ts
+index fff6ac6..96470da 100644
+--- a/src/main/ipc-handlers.ts
++++ b/src/main/ipc-handlers.ts
+@@ -7,6 +7,7 @@ import { assertTrustedSender } from './ipc/validation'
+ import { registerPiHandlers } from './ipc/pi-handlers'
+ import { registerTerminalHandlers } from './ipc/terminal-handlers'
+ import { registerSessionHandlers } from './ipc/session-handlers'
++import { registerPiGoHost } from './pi-go-host'
+ import { registerModelHandlers } from './ipc/model-handlers'
+ import { registerSettingsHandlers } from './ipc/settings'
+ import { registerPermissionRulesHandlers } from './ipc/permission-rules-handlers'
+@@ -87,14 +88,16 @@ export function registerIpcHandlers(
+   // Router construction, the dialog-answer channels, the pending-prompt
+   // flush/get pair and the two workspace hooks all live in extension-ui-ipc.ts
+   // so they can be tested without Electron.
++  const extensionUiRouter = createExtensionUiRouter({
++    workspace: workspaceManager,
++    broadcast: ctx.broadcast,
++    onPendingCounts: (counts) => workspaceActivity.handlePendingCounts(counts),
++  })
++  registerPiGoHost(workspaceManager, extensionUiRouter)
+   wireExtensionUiIpc<IpcMainInvokeEvent>({
+     handle: (channel, handler) => ipcMain.handle(channel, handler),
+     assertTrustedSender,
+-    router: createExtensionUiRouter({
+-      workspace: workspaceManager,
+-      broadcast: ctx.broadcast,
+-      onPendingCounts: (counts) => workspaceActivity.handlePendingCounts(counts),
+-    }),
++    router: extensionUiRouter,
+     workspace: workspaceManager,
+     broadcast: ctx.broadcast,
+   })
+diff --git a/src/main/pi-event-router.test.ts b/src/main/pi-event-router.test.ts
+index 17bcbbb..60bbaeb 100644
+--- a/src/main/pi-event-router.test.ts
++++ b/src/main/pi-event-router.test.ts
+@@ -181,6 +181,50 @@ test('answering a dialog whose workspace is no longer active does not chain the
+   assert.deepEqual(h.broadcasts, [first, second], 'switching back delivers the held dialog')
+ })
+ 
++test('Pi Go answers only the owning manager and wins at most once against Desktop', () => {
++  const h = createHarness([WS_A, WS_B])
++  const owner = h.managers.get(WS_A)!
++  const other = h.managers.get(WS_B)!
++  const first = { type: 'extension_ui_request', method: 'confirm', id: 'mobile-first' } as const
++  owner.emit('event', first)
++  assert.equal(h.router.pendingForPiGo(other), undefined)
++  assert.equal(h.router.respondFromPiGo(other, first.id, true), false)
++  assert.equal(h.router.respondFromPiGo(owner, first.id, 'true'), false)
++  assert.equal(h.router.respondFromPiGo(owner, first.id, true), true)
++  assert.deepEqual(h.broadcasts.at(-1), { ...first, method: 'cancel', targetId: first.id })
++  h.router.respond(first.id, { confirmed: false })
++  assert.equal(h.router.respondFromPiGo(owner, first.id, true), false)
++  const second = { type: 'extension_ui_request', method: 'select', id: 'desktop-first', options: ['one', 'two'] } as const
++  owner.emit('event', second)
++  assert.equal(h.router.respondFromPiGo(owner, second.id, 'three'), false)
++  h.router.respond(second.id, { value: 'two' })
++  assert.equal(h.router.respondFromPiGo(owner, second.id, 'one'), false)
++  assert.deepEqual(h.responses, [
++    { workspaceId: WS_A, id: first.id, response: { confirmed: true } },
++    { workspaceId: WS_A, id: second.id, response: { value: 'two' } },
++  ])
++})
++
++test('Pi Go preserves editor whitespace, cancels inputs and rejects oversized or multiline input', () => {
++  const h = createHarness([WS_A])
++  const owner = h.managers.get(WS_A)!
++  owner.emit('event', { type: 'extension_ui_request', method: 'input', id: 'input', placeholder: 'Answer' })
++  assert.equal(h.router.pendingForPiGo(owner)?.placeholder, 'Answer')
++  assert.equal(h.router.respondFromPiGo(owner, 'input', 'some\ntext'), false)
++  assert.equal(h.router.respondFromPiGo(owner, 'input', 'x'.repeat(1025)), false)
++  assert.equal(h.router.respondFromPiGo(owner, 'input', false), true)
++  owner.emit('event', { type: 'extension_ui_request', method: 'editor', id: 'edit', prefill: 'original\n' })
++  assert.equal(h.router.pendingForPiGo(owner)?.prefill, 'original\n')
++  assert.equal(h.router.respondFromPiGo(owner, 'edit', '  new\n'), true)
++  owner.emit('event', { type: 'extension_ui_request', method: 'editor', id: 'long', prefill: 'x'.repeat(1025) })
++  assert.equal(h.router.pendingForPiGo(owner), undefined)
++  assert.equal(h.router.respondFromPiGo(owner, 'long', ''), false)
++  assert.deepEqual(h.responses, [
++    { workspaceId: WS_A, id: 'input', response: { cancelled: true } },
++    { workspaceId: WS_A, id: 'edit', response: { value: '  new\n' } },
++  ])
++})
++
+ test('respond with an unknown id falls back to the active manager', () => {
+   const h = createHarness([WS_A])
+   h.router.respond('ghost', { value: '' })
+diff --git a/src/main/pi-event-router.ts b/src/main/pi-event-router.ts
+index c693aec..72d7021 100644
+--- a/src/main/pi-event-router.ts
++++ b/src/main/pi-event-router.ts
+@@ -34,6 +34,7 @@ const BLOCKING_UI_METHODS: ReadonlySet<PiExtensionUiRequest['method']> = new Set
+   'input',
+   'editor',
+ ])
++const PI_GO_TEXT_LIMIT = 1024
+ 
+ interface QueuedPrompt {
+   event: PiExtensionUiRequest
+@@ -55,6 +56,8 @@ export interface PiEventRouter {
+   attachManager(manager: PiRpcManager): void
+   /** Answer an extension-UI request, routing to its origin manager. */
+   respond(id: string, response: Record<string, unknown>): void
++  pendingForPiGo(manager: PiRpcManager): PiExtensionUiRequest | undefined
++  respondFromPiGo(manager: PiRpcManager, id: string, answer: unknown): boolean
+   /** (Re-)deliver the workspace's held dialog; no-op unless it is active now. */
+   flush(workspaceId: string): void
+   /** Snapshot of held prompts; reaps timed-out ones so the figures stay honest. */
+@@ -74,6 +77,7 @@ export function createPiEventRouter(deps: PiEventRouterDeps): PiEventRouter {
+   // Every blocking dialog's asking manager, until answered or evicted.
+   const origins = new Map<string, PiRpcManager>()
+   const attached = new WeakSet<PiRpcManager>()
++  const remotelyAnswered = new Set<string>()
+ 
+   const isBlockingDialog = (event: PiRpcEvent): event is PiExtensionUiRequest =>
+     event.type === 'extension_ui_request' && BLOCKING_UI_METHODS.has(event.method)
+@@ -174,6 +178,10 @@ export function createPiEventRouter(deps: PiEventRouterDeps): PiEventRouter {
+   }
+ 
+   const handleManagerEvent = (manager: PiRpcManager, event: PiRpcEvent): void => {
++    if (event.type === 'extension_ui_request' && event.method === 'cancel' && event.targetId && origins.get(event.targetId) === manager) {
++      resolvePrompt(event.targetId, {}, false, true)
++      return
++    }
+     if (isBlockingDialog(event)) {
+       handleBlockingDialog(manager, event)
+       return
+@@ -228,7 +236,7 @@ export function createPiEventRouter(deps: PiEventRouterDeps): PiEventRouter {
+     manager.on('exit', () => evictManager(manager))
+   }
+ 
+-  const respond = (id: string, response: Record<string, unknown>): void => {
++  const resolvePrompt = (id: string, response: Record<string, unknown>, send: boolean, dismiss: boolean): void => {
+     const origin = origins.get(id) ?? null
+     origins.delete(id)
+     // Purge the id everywhere FIRST — regardless of a routing hit — so an
+@@ -248,13 +256,52 @@ export function createPiEventRouter(deps: PiEventRouterDeps): PiEventRouter {
+     // Origin miss (notify dismissal, evicted prompt): fall back to the active
+     // manager — Pi ignores unknown ids — or drop when no workspace is active.
+     const target = origin ?? deps.getActiveManager()
+-    target?.sendExtensionUiResponse(id, response)
++    if (send) target?.sendExtensionUiResponse(id, response)
+     if (purgedManager !== null && purgedManager === deps.getActiveManager()) {
++      if (dismiss) deps.broadcastEvent({ type: 'extension_ui_request', id, method: 'cancel', targetId: id })
+       deliverNext(purgedManager)
+     }
+     emitCounts()
+   }
+ 
++  const respond = (id: string, response: Record<string, unknown>): void => {
++    if (!remotelyAnswered.has(id)) resolvePrompt(id, response, true, false)
++  }
++
++  const pendingForPiGo = (manager: PiRpcManager): PiExtensionUiRequest | undefined => {
++    const entries = [delivered.get(manager), ...(queues.get(manager) ?? [])]
++    const entry = entries.find((item) => item !== undefined && !isExpired(item))
++    const event = entry?.event
++    if (!event || origins.get(event.id) !== manager || (event.title?.length ?? 0) > 512 ||
++        (event.message?.length ?? 0) > 8192) return undefined
++    if (event.method === 'confirm') return event
++    if (event.method === 'select' && event.options && event.options.length <= 20 &&
++        event.options.every((option) => typeof option === 'string' && option.length <= 400)) return event
++    if (event.method === 'input' && (event.placeholder?.length ?? 0) <= 512) return event
++    if (event.method === 'editor' && (event.prefill?.length ?? 0) <= PI_GO_TEXT_LIMIT) return event
++    return undefined
++  }
++
++  const respondFromPiGo = (manager: PiRpcManager, id: string, answer: unknown): boolean => {
++    const event = pendingForPiGo(manager)
++    if (!event || event.id !== id) return false
++    let response: Record<string, unknown>
++    if (event.method === 'confirm' && typeof answer === 'boolean') response = { confirmed: answer }
++    else if (event.method === 'select' && typeof answer === 'string' && event.options?.includes(answer)) response = { value: answer }
++    else if (event.method === 'select' && answer === false) response = { cancelled: true }
++    else if (event.method === 'input' || event.method === 'editor') {
++      if (answer === false) response = { cancelled: true }
++      else if (typeof answer === 'string' && answer.length <= PI_GO_TEXT_LIMIT &&
++        (event.method === 'editor' || !/[\r\n]/.test(answer))) response = { value: answer }
++      else return false
++    }
++    else return false
++    remotelyAnswered.add(id)
++    if (remotelyAnswered.size > 1024) remotelyAnswered.delete(remotelyAnswered.values().next().value!)
++    resolvePrompt(id, response, true, true)
++    return true
++  }
++
+   const flush = (workspaceId: string): void => {
+     // Only the active workspace and its active session runtime may be flushed:
+     // a stale flush must not resurface another session's dialog.
+@@ -283,6 +330,8 @@ export function createPiEventRouter(deps: PiEventRouterDeps): PiEventRouter {
+   return {
+     attachManager,
+     respond,
++    pendingForPiGo,
++    respondFromPiGo,
+     flush,
+     getPendingCounts,
+     handleActiveWorkspaceChanged: emitCounts,
+diff --git a/src/main/workspace-manager.ts b/src/main/workspace-manager.ts
+index a87c7f5..740dcd0 100644
+--- a/src/main/workspace-manager.ts
++++ b/src/main/workspace-manager.ts
+@@ -117,6 +117,7 @@ interface SessionRuntimeEntry {
+    * isDisposableSessionFile.
+    */
+   appCreated: boolean
++  piGoCreated?: boolean
+   /** Agent runs this runtime's engine started, so a prompt can tell whether one followed it. */
+   agentRunStarts: number
+   /**
+@@ -518,6 +519,7 @@ export class WorkspaceManager {
+     const candidates = [...this.sessionRuntimes.values()]
+       .filter((entry) =>
+         entry.info.runtimeId !== this.activeRuntimeId &&
++        !entry.piGoCreated &&
+         entry.info.sessionPath &&
+         entry.info.activity === null &&
+         entry.manager.getStatus().status !== 'starting'
+@@ -530,6 +532,7 @@ export class WorkspaceManager {
+       const current = this.sessionRuntimes.get(entry.info.runtimeId)
+       if (
+         !current ||
++        current.piGoCreated ||
+         current.info.runtimeId === this.activeRuntimeId ||
+         current.info.activity !== null ||
+         current.manager.getStatus().status === 'starting'
+@@ -609,6 +612,15 @@ export class WorkspaceManager {
+     return this.snapshotRuntime(entry)
+   }
+ 
++  preparePiGoRuntime(workspaceId: string, sessionPath?: string): SessionRuntimeInfo {
++    const existing = sessionPath ? this.getSessionRuntimeForPath(sessionPath) : null
++    if (existing && existing.workspaceId !== workspaceId) throw new Error('pi_go_workspace_mismatch')
++    if (existing) return existing
++    const entry = this.createSessionRuntime(workspaceId, sessionPath ?? null)
++    entry.piGoCreated = sessionPath === undefined
++    return this.snapshotRuntime(entry)
++  }
++
+   async startSessionRuntime(runtimeId: string, options: PiStartOptions = {}): Promise<SessionRuntimeInfo> {
+     const entry = this.sessionRuntimes.get(runtimeId)
+     if (!entry) throw new Error(t('errors.session.runtimeNotFound', { runtimeId }))

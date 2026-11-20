@@ -1,0 +1,11 @@
+node_modules/
+.DS_Store
+.hvigor/
+.idea/
+.sign/
+oh_modules/
+build/
+local.properties
+.codex-attachments/
+.pi-go/
+

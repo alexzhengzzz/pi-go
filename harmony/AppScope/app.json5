@@ -1,0 +1,10 @@
+{
+  "app": {
+    "bundleName": "com.alex.pigo",
+    "vendor": "alex",
+    "versionCode": 1,
+    "versionName": "0.1.0",
+    "icon": "$media:pigo",
+    "label": "$string:app_name"
+  }
+}

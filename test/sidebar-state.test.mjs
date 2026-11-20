@@ -1,0 +1,179 @@
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { stripTypeScriptTypes } from 'node:module';
+import { test } from 'node:test';
+
+// Exercise the real page and vault methods without requiring an ArkUI device runtime.
+const page = readFileSync(new URL('../harmony/entry/src/main/ets/pages/Index.ets', import.meta.url), 'utf8');
+const vaultSource = readFileSync(new URL('../harmony/entry/src/main/ets/CredentialVault.ets', import.meta.url), 'utf8');
+
+function method(source, name) {
+  const start = source.search(new RegExp(`  (?:private )?(?:async )?${name}\\(`));
+  assert.ok(start >= 0, `Missing method: ${name}`);
+  const end = source.indexOf('\n  }', start) + 4;
+  return source.slice(start, end);
+}
+
+const pageMethods = ['toggleSpace', 'toggleTasks', 'applySidebar', 'scheduleSidebarSave', 'flushSidebarSave'];
+const Page = new Function(stripTypeScriptTypes(
+  `const SIDEBAR_VIEWS = ['all', 'pinned', 'recent', 'archived'];\n` +
+  `const SIDEBAR_MAX_COLLAPSED = 100;\n` +
+  `const SIDEBAR_MAX_ENTRIES = 24;\n` +
+  `class Harness {\n${pageMethods.map(name => method(page, name)).join('\n')}\n}`
+) + '; return Harness;')();
+
+const vaultMethods = ['loadSidebar', 'saveSidebar'];
+const Vault = new Function(stripTypeScriptTypes(
+  `const SIDEBAR_VIEWS = ['all', 'pinned', 'recent', 'archived'];\n` +
+  `const SIDEBAR_MAX_COLLAPSED = 100;\n` +
+  `const SIDEBAR_MAX_ENTRIES = 24;\n` +
+  `class Harness {\n${vaultMethods.map(name => method(vaultSource, name)).join('\n')}\n}`
+) + '; return Harness;')();
+
+function pageFixture(book = { version: 1, entries: [] }) {
+  const state = new Page();
+  const saves = [];
+  Object.assign(state, {
+    sidebarBook: book, sidebarSaveTimer: -1, base: 'http://127.0.0.1:18977',
+    collapsedSpaces: [], tasksExpanded: true, sessionView: 'all', loadedView: 'all',
+    vault: { saveSidebar: book => { saves.push(book); return Promise.resolve(); } }
+  });
+  state.savedBooks = saves;
+  return state;
+}
+
+function vaultFixture(raw = '') {
+  const store = {
+    values: new Map([['sidebar', raw]]),
+    flushes: 0,
+    get: async (key, defaultValue) => (store.values.has(key) ? store.values.get(key) : defaultValue),
+    put: async (key, value) => { store.values.set(key, value); },
+    flush: async () => { store.flushes++; }
+  };
+  const instance = new Vault();
+  Object.assign(instance, { store, writing: Promise.resolve() });
+  return { instance, store };
+}
+
+test('collapsing a space keeps the fold and records it for persistence', () => {
+  const state = pageFixture();
+  state.toggleSpace('/repo');
+  assert.deepEqual(state.collapsedSpaces, ['/repo']);
+  assert.equal(state.savedBooks.length, 0, 'the save is debounced');
+  state.flushSidebarSave();
+  assert.equal(state.savedBooks.length, 1);
+  assert.deepEqual(state.savedBooks[0].entries, [{
+    address: 'http://127.0.0.1:18977',
+    state: { collapsedSpaces: ['/repo'], tasksExpanded: true, sessionView: 'all' }
+  }]);
+  state.toggleSpace('/repo');
+  assert.deepEqual(state.collapsedSpaces, []);
+});
+
+test('collapsing the task group is remembered too', () => {
+  const state = pageFixture();
+  state.toggleTasks();
+  assert.equal(state.tasksExpanded, false);
+  state.flushSidebarSave();
+  assert.equal(state.savedBooks[0].entries[0].state.tasksExpanded, false);
+});
+
+test('repeated toggles coalesce into one save', () => {
+  const state = pageFixture();
+  state.toggleSpace('/a');
+  state.toggleSpace('/b');
+  state.toggleTasks();
+  state.flushSidebarSave();
+  assert.equal(state.savedBooks.length, 1);
+  assert.deepEqual(state.savedBooks[0].entries[0].state.collapsedSpaces, ['/a', '/b']);
+  assert.equal(state.savedBooks[0].entries[0].state.tasksExpanded, false);
+});
+
+test('connecting restores the remembered collapse and filter state per computer', () => {
+  const state = pageFixture({ version: 1, entries: [
+    { address: 'lan://desk', state: { collapsedSpaces: ['/a', '/b'], tasksExpanded: false, sessionView: 'pinned' } }
+  ]});
+  state.applySidebar('lan://desk');
+  assert.deepEqual(state.collapsedSpaces, ['/a', '/b']);
+  assert.equal(state.tasksExpanded, false);
+  assert.equal(state.sessionView, 'pinned');
+  assert.equal(state.loadedView, 'pinned');
+  state.applySidebar('usb://other');
+  assert.deepEqual(state.collapsedSpaces, []);
+  assert.equal(state.tasksExpanded, true);
+  assert.equal(state.sessionView, 'all');
+});
+
+test('switching computers keeps each computer folds independent', () => {
+  const state = pageFixture();
+  state.applySidebar('lan://desk');
+  state.base = 'lan://desk';
+  state.toggleSpace('/work');
+  state.flushSidebarSave();
+  state.applySidebar('http://127.0.0.1:18977');
+  assert.deepEqual(state.collapsedSpaces, []);
+  state.applySidebar('lan://desk');
+  assert.deepEqual(state.collapsedSpaces, ['/work']);
+});
+
+test('toggles without a connected computer never enter the book', () => {
+  const state = pageFixture();
+  state.base = '';
+  state.toggleSpace('/repo');
+  assert.deepEqual(state.sidebarBook.entries, []);
+  state.flushSidebarSave();
+  assert.equal(state.savedBooks.length, 1);
+  assert.deepEqual(state.savedBooks[0].entries, []);
+});
+
+test('the drawer toggles route through the persisted methods', () => {
+  assert.ok(page.includes('this.toggleTasks();'), 'task group header must call toggleTasks');
+  assert.ok(/this\.sessionView = view; this\.scheduleSidebarSave\(\);/.test(page), 'filter buttons must persist');
+  assert.ok(page.includes('this.applySidebar(record.address);'), 'connecting a computer must restore its sidebar');
+});
+
+test('the vault roundtrips sidebar state through the store', async () => {
+  const { instance, store } = vaultFixture();
+  const book = { version: 1, entries: [
+    { address: 'lan://desk', state: { collapsedSpaces: ['/a'], tasksExpanded: false, sessionView: 'recent' } }
+  ]};
+  await instance.saveSidebar(book);
+  assert.equal(store.values.get('sidebar'), JSON.stringify(book));
+  assert.ok(store.flushes >= 1, 'the store is flushed');
+  assert.deepEqual(await instance.loadSidebar(), book);
+});
+
+test('a missing or corrupted cache falls back to fully expanded defaults', async () => {
+  for (const raw of ['', '{broken json', 'null', JSON.stringify({ version: 9, entries: [{ address: 'x', state: {} }] })]) {
+    const { instance } = vaultFixture(raw);
+    assert.deepEqual(await instance.loadSidebar(), { version: 1, entries: [] }, `raw=${raw}`);
+  }
+});
+
+test('stored entries are validated, deduplicated and clamped', async () => {
+  const raw = JSON.stringify({ version: 1, entries: [
+    { address: 'lan://a', state: { collapsedSpaces: ['/x', 42, null], tasksExpanded: false, sessionView: 'nonsense' } },
+    { address: 'lan://a', state: { tasksExpanded: true } },
+    { state: { tasksExpanded: true } },
+    'garbage'
+  ]});
+  const { instance } = vaultFixture(raw);
+  const book = await instance.loadSidebar();
+  assert.equal(book.entries.length, 1);
+  assert.deepEqual(book.entries[0].state.collapsedSpaces, ['/x']);
+  assert.equal(book.entries[0].state.tasksExpanded, false);
+  assert.equal(book.entries[0].state.sessionView, 'all');
+});
+
+test('a failed sidebar write does not block later saves', async () => {
+  const { instance, store } = vaultFixture();
+  const originalPut = store.put;
+  store.put = async () => { throw new Error('disk full'); };
+  await assert.rejects(() => instance.saveSidebar({ version: 1, entries: [] }));
+  store.put = originalPut;
+  await instance.saveSidebar({ version: 1, entries: [
+    { address: 'lan://ok', state: { collapsedSpaces: [], tasksExpanded: true, sessionView: 'all' } }
+  ]});
+  const book = await instance.loadSidebar();
+  assert.equal(book.entries[0].address, 'lan://ok');
+});
