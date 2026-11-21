@@ -19,6 +19,7 @@ import { ensureMicrophone, VoiceInputSession, voiceInputSupported } from '../Voi
 import { APPEARANCE_MODES, AppearanceMode, THEME_STYLES, ThemeStyle, appearanceMode, openSettings, themeStyle } from '../Appearance';
 import { HuaweiProfile, authorizeHuaweiProfile, isHuaweiProfileCurrent } from '../HuaweiProfile';
 import { AccountSync, CloudComputer, SyncRow, SyncSnapshot, SYNC_MODE, SYNC_THEME, computerSyncRow } from '../AccountSync';
+import { immersiveSurface } from '../Immersive';
 import { HISTORY_IMAGE_EXTENSIONS, isImageFile, markdownWorkspacePath, messageFileChips, normalizeWorkspacePath, safeLocalFileName, textPreviewFormat } from '../ChatPaths';
 import { decodePairingBundle, validSecureAddress, validUsb } from '../PairingCode';
 import { connectionLabel, validCompanion } from '../CompanionCheck';
@@ -317,6 +318,11 @@ function chatAction() {
   .fontSize(14)
   .fontWeight(FontWeight.Medium)
   .borderRadius(12)
+}
+
+@Extend(Button)
+function headerAction() {
+  .width(44).height(44).padding(0).borderRadius(22).backgroundColor(Color.Transparent)
 }
 
 @Entry
@@ -3666,13 +3672,30 @@ struct Index {
   }
 
   @Builder
+  glassSurface(radius: number) {
+    Stack() {
+      Row().width('100%').height('100%').borderRadius(radius).clip(true)
+        .attributeModifier(immersiveSurface(this.darkMode))
+      Row().width('100%').height('100%').borderRadius(radius)
+        .border({ width: 1, color: this.darkMode ? '#38D5E5F4' : '#D9DDE5ED' })
+    }.width('100%').height('100%').hitTestBehavior(HitTestMode.None).accessibilityLevel('no-hide-descendants')
+  }
+
+  @Builder
+  headerIcon(icon: Resource, color: ResourceColor, rotation: number = 0) {
+    Stack() {
+      this.glassSurface(22)
+      Image(icon).width(21).height(21).fillColor(color).rotate({ angle: rotation })
+    }.width('100%').height('100%').accessibilityLevel('no-hide-descendants')
+  }
+
+  @Builder
   mineHeader() {
     Row({ space: 12 }) {
       if (this.minePage) {
         Button({ type: ButtonType.Normal }) {
-          Image($r('app.media.ic_chevron')).width(20).height(20).rotate({ angle: 90 })
-            .fillColor($r('app.color.pigo_text'))
-        }.width(44).height(44).padding(0).borderRadius(12).backgroundColor($r('app.color.pigo_control'))
+          this.headerIcon($r('app.media.ic_chevron'), $r('app.color.pigo_text'), 90)
+        }.headerAction()
           .accessibilityText('返回').enabled(!this.busy).onClick(() => { this.mineBack(); })
       }
       Text(this.minePage === 'theme' ? '系统主题' : this.minePage === 'computers' ?
@@ -3797,9 +3820,12 @@ struct Index {
             .textOverflow({ overflow: TextOverflow.Ellipsis }).copyOption(CopyOptions.LocalDevice)
         }.layoutWeight(1).alignItems(HorizontalAlign.Start)
         Button({ type: ButtonType.Normal }) {
-          SymbolGlyph($r('sys.symbol.arrow_clockwise')).fontSize(19).fontColor([this.accent()])
-        }.id('file-refresh').width(44).height(44).padding(0).borderRadius(10)
-          .backgroundColor(Color.Transparent).accessibilityText('刷新工作区')
+          Stack() {
+            this.glassSurface(22)
+            SymbolGlyph($r('sys.symbol.arrow_clockwise')).fontSize(19).fontColor([$r('app.color.pigo_text')])
+              .accessibilityLevel('no')
+          }.width('100%').height('100%')
+        }.id('file-refresh').headerAction().accessibilityText('刷新工作区')
           .enabled(!this.busy && !this.openingSession && this.reachable)
           .onClick(() => { void this.loadFileDirectory(''); })
       }.width('100%').padding({ left: 14, right: 6, top: 4, bottom: 4 })
@@ -3874,8 +3900,8 @@ struct Index {
     Row({ space: 10 }) {
       if (!this.dockedSessions()) {
         Button({ type: ButtonType.Normal }) {
-          Image($r('app.media.ic_menu')).width(21).height(21).fillColor($r('app.color.pigo_text'))
-        }.id('history').width(44).height(44).padding(0).backgroundColor($r('app.color.pigo_control')).borderRadius(12)
+          this.headerIcon($r('app.media.ic_menu'), $r('app.color.pigo_text'))
+        }.id('history').headerAction()
           .accessibilityText('打开任务抽屉').enabled(!this.busy && !this.showFiles)
           .onClick(() => { this.setDrawer(true); })
       }
@@ -3892,18 +3918,16 @@ struct Index {
             .fontSize(12).fontColor($r('app.color.pigo_muted')).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
         }.width('100%').onClick(() => { if (!this.dockedSessions()) this.setDrawer(true); })
       }.layoutWeight(1).alignItems(HorizontalAlign.Start)
-      Row({ space: 0 }) {
+      Row({ space: 6 }) {
         Button({ type: ButtonType.Normal }) {
-          Image($r('app.media.ic_compose')).width(21).height(21).fillColor(this.accent())
-        }.id('new-task').width(44).height(44).padding(0).borderRadius(12)
-          .backgroundColor(Color.Transparent).accessibilityText('在当前工作区新建会话')
+          this.headerIcon($r('app.media.ic_compose'), this.accent())
+        }.id('new-task').headerAction().accessibilityText('在当前工作区新建会话')
           .enabled(this.reachable && !this.busy && !this.openingSession && this.desktopHandoff &&
             !!this.workspaceCwd && this.projects.includes(this.workspaceCwd))
           .onClick(() => { this.activeTab = 'tasks'; void this.requestAction('/new', { cwd: this.workspaceCwd }); })
         Button({ type: ButtonType.Normal }) {
-          Image($r('app.media.ic_more')).width(21).height(21).fillColor($r('app.color.pigo_muted'))
-        }.id('session-settings').width(44).height(44).padding(0).borderRadius(12)
-          .backgroundColor(Color.Transparent).accessibilityText('更多操作')
+          this.headerIcon($r('app.media.ic_more'), $r('app.color.pigo_text'))
+        }.id('session-settings').headerAction().accessibilityText('更多操作')
           .bindMenu([
             { value: this.showSettings ? '返回聊天' : '模型与会话设置', action: () => {
               if (this.showSettings) this.showSettings = false;
@@ -4441,8 +4465,22 @@ struct Index {
     return selected ? $r('sys.symbol.person_fill') : $r('sys.symbol.person');
   }
 
+  private bottomTabsHeight(): number {
+    return this.windowHeight < SHORT_WINDOW_HEIGHT ? 48 : 60;
+  }
+
   @Builder
   bottomTabs() {
+    Stack() {
+      this.glassSurface(32)
+      this.bottomTabButtons()
+    }.width('100%').height(this.bottomTabsHeight())
+      .constraintSize({ maxWidth: 520 }).alignSelf(ItemAlign.Center).borderRadius(32)
+      .shadow({ radius: 10, offsetY: 2, color: this.darkMode ? '#40000000' : '#12637587' })
+  }
+
+  @Builder
+  bottomTabButtons() {
     Row({ space: 4 }) {
       ForEach(this.isPaired ? ['tasks', 'pending', 'files', 'mine'] : ['tasks', 'mine'], (tab: string) => {
         Button({ type: ButtonType.Normal }) {
@@ -4461,10 +4499,11 @@ struct Index {
               }
             }.width(48).height(25)
             Text(tab === 'tasks' ? '任务' : tab === 'pending' ? '运行中' : tab === 'files' ? '工作区' : '我的')
-              .fontSize(11).fontWeight(this.activeTab === tab ? FontWeight.Medium : FontWeight.Regular)
+              .fontSize(11).fontWeight(this.activeTab === tab ? FontWeight.Bold : FontWeight.Medium)
               .fontColor(this.activeTab === tab ? this.accent() : $r('app.color.pigo_muted'))
           }
-        }.id(`tab-${tab}`).layoutWeight(1).height(this.windowHeight < SHORT_WINDOW_HEIGHT ? 44 : 52)
+        }.id(`tab-${tab}`).layoutWeight(1).height(this.windowHeight < SHORT_WINDOW_HEIGHT ? 44 : 54)
+          .borderRadius(24)
           .padding(0)
           .accessibilitySelected(this.activeTab === tab)
           .backgroundColor(Color.Transparent)
@@ -4497,8 +4536,7 @@ struct Index {
             this.activeTab = tab;
           })
       }, (tab: string) => tab)
-    }.width('100%').padding({ top: 4 })
-      .border({ width: { top: 1 }, color: $r('app.color.pigo_line') })
+    }.width('100%').height('100%').padding({ left: 6, right: 6 })
   }
 
   @Builder
@@ -4959,7 +4997,13 @@ struct Index {
       Row() {
         // Reserve the sidebar's space without rebuilding the conversation or moving the session list.
         Blank().width(this.dockedSessions() ? this.sessionPaneWidth() : 0)
-        Stack({ alignContent: Alignment.Top }) {
+        Stack({ alignContent: Alignment.Bottom }) {
+          if (!this.darkMode && !this.loading && !this.keyboardHeight) {
+            Row().width('100%').height(this.bottomTabsHeight() + this.bottomPad() + 18)
+              .linearGradient({ direction: GradientDirection.Bottom,
+                colors: [['#00FFFFFF', 0], ['#FFFFFF', 0.20], ['#FFFFFF', 1]] })
+              .hitTestBehavior(HitTestMode.None).accessibilityLevel('no')
+          }
           this.mainNavigation()
         }.height('100%').layoutWeight(1)
           .onGestureJudgeBegin(() => this.dockedSessions() || this.showSessions || this.holdActive || this.recording ||

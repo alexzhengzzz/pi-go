@@ -1,4 +1,4 @@
-// 沉浸式材质自 API 26 起可用。旧设备保留组件设置的背景和边框。
+// 沉浸式材质自 API 26 起可用。其他设备使用常规背景模糊。
 import { deviceInfo } from '@kit.BasicServicesKit';
 import { uiMaterial } from '@kit.ArkUI';
 
@@ -17,39 +17,32 @@ const MATERIAL_LEVEL = materialLevel();
 
 class ImmersiveSurface implements AttributeModifier<CommonAttribute> {
   private material?: uiMaterial.Material;
-
   private readonly dark: boolean;
-  private readonly glow: string;
 
-  constructor(dark: boolean, glow: string) {
+  constructor(dark: boolean) {
     this.dark = dark;
-    this.glow = glow;
   }
 
   applyNormalAttribute(instance: CommonAttribute): void {
-    if (MATERIAL_LEVEL === undefined) return;
+    const color = this.dark ? '#A01D2229' : '#EBFFFFFF';
+    if (MATERIAL_LEVEL === undefined || MATERIAL_LEVEL === uiMaterial.MaterialLevel.SMOOTH) {
+      instance.backdropBlur(20).backgroundColor(color);
+      return;
+    }
     if (!this.material) {
-      const solid = MATERIAL_LEVEL === uiMaterial.MaterialLevel.SMOOTH;
-      const color = this.dark ? '#A0233036' : '#A8FFFFFF';
       this.material = new uiMaterial.ImmersiveMaterial({
         style: uiMaterial.ImmersiveStyle.THIN,
-        materialColor: solid ? $r('app.color.pigo_panel') : color,
-        applyShadow: false,
-        lightEffect: !solid && this.glow ? { color: this.glow } : undefined
+        materialColor: color,
+        applyShadow: false
       });
     }
     instance.systemMaterial(this.material);
   }
 }
 
-const surfaces: Map<string, ImmersiveSurface> = new Map<string, ImmersiveSurface>();
+const darkSurface = new ImmersiveSurface(true);
+const lightSurface = new ImmersiveSurface(false);
 
-export function immersiveSurface(dark: boolean, glow: string = ''): ImmersiveSurface {
-  const key = `${dark}-${glow}`;
-  let surface = surfaces.get(key);
-  if (!surface) {
-    surface = new ImmersiveSurface(dark, glow);
-    surfaces.set(key, surface);
-  }
-  return surface;
+export function immersiveSurface(dark: boolean): ImmersiveSurface {
+  return dark ? darkSurface : lightSurface;
 }
