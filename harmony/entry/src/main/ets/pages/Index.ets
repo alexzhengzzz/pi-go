@@ -19,7 +19,6 @@ import { ensureMicrophone, VoiceInputSession, voiceInputSupported } from '../Voi
 import { APPEARANCE_MODES, AppearanceMode, THEME_STYLES, ThemeStyle, appearanceMode, openSettings, themeStyle } from '../Appearance';
 import { HuaweiProfile, authorizeHuaweiProfile, isHuaweiProfileCurrent } from '../HuaweiProfile';
 import { AccountSync, CloudComputer, SyncRow, SyncSnapshot, SYNC_MODE, SYNC_THEME, computerSyncRow } from '../AccountSync';
-import { immersiveSurface } from '../Immersive';
 import { HISTORY_IMAGE_EXTENSIONS, isImageFile, markdownWorkspacePath, messageFileChips, normalizeWorkspacePath, safeLocalFileName, textPreviewFormat } from '../ChatPaths';
 import { decodePairingBundle, validSecureAddress, validUsb } from '../PairingCode';
 import { connectionLabel, validCompanion } from '../CompanionCheck';
@@ -316,7 +315,8 @@ function chatAction() {
   .backgroundColor($r('app.color.pigo_control'))
   .fontColor($r('app.color.pigo_text'))
   .fontSize(14)
-  .borderRadius(14)
+  .fontWeight(FontWeight.Medium)
+  .borderRadius(12)
 }
 
 @Entry
@@ -2394,8 +2394,7 @@ struct Index {
         Text(content.split('\n').pop() ?? '').fontSize(12).fontColor($r('app.color.pigo_muted')).maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis }).width('100%')
       }
-    }.width('100%').padding(12).backgroundColor($r('app.color.pigo_panel')).borderRadius(12)
-      .border({ width: 1, color: $r('app.color.pigo_line') })
+    }.width('100%').padding(10).backgroundColor($r('app.color.pigo_control')).borderRadius(10)
   }
 
   @Builder
@@ -2417,7 +2416,8 @@ struct Index {
     Button({ type: ButtonType.Normal }) {
       Row({ space: 9 }) {
         Image(this.toolIcon(tool)).width(18).height(18).fillColor(this.accent())
-        Text(this.toolTitle(tool)).fontSize(13).fontColor($r('app.color.pigo_text'))
+        Text(this.toolTitle(tool)).fontSize(13).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
+          .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).constraintSize({ maxWidth: '38%' })
         Text(tool.detail).fontSize(12).fontColor($r('app.color.pigo_muted')).maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis }).layoutWeight(1)
         if (tool.state === 'run' && !this.idle) {
@@ -2425,10 +2425,24 @@ struct Index {
         } else if (tool.state === 'fail') {
           Text('失败').fontSize(12).fontColor($r('app.color.pigo_error'))
         }
-        Image($r('app.media.ic_chevron')).width(14).height(14).fillColor($r('app.color.pigo_text'))
+        Image($r('app.media.ic_chevron')).width(14).height(14).rotate({ angle: -90 }).fillColor($r('app.color.pigo_muted'))
       }.width('100%')
-    }.width('100%').height(44).padding({ left: 12, right: 10 }).borderRadius(10).backgroundColor($r('app.color.pigo_panel'))
+    }.width('100%').height(44).padding({ left: 10, right: 8 }).borderRadius(8).backgroundColor(Color.Transparent)
       .onClick(() => { this.openToolDetails(tool, messageId); })
+  }
+
+  @Builder
+  toolGroup(tools: LiveTool[], messageId: string) {
+    if (tools.length) {
+      Column() {
+        ForEach(tools, (tool: LiveTool, index: number) => {
+          if (index > 0) Divider().color($r('app.color.pigo_line')).margin({ left: 36, right: 8 })
+          this.toolRow(tool, messageId)
+        }, (tool: LiveTool) => this.toolKey(tool))
+      }.width('100%').padding({ left: 2, right: 2 })
+        .backgroundColor($r('app.color.pigo_panel')).borderRadius(12)
+        .border({ width: 1, color: $r('app.color.pigo_line') })
+    }
   }
 
   @Builder
@@ -2499,13 +2513,15 @@ struct Index {
   pendingCard(request: PendingInteraction) {
     Scroll() {
       Column({ space: 8 }) {
-        Text(request.title || 'Pi 等待应答').fontWeight(FontWeight.Bold).width('100%')
-        if (request.message) Text(request.message).fontSize(14).width('100%')
+        Text(request.title || 'Pi 等待应答').fontSize(16).fontWeight(FontWeight.Bold)
+          .fontColor($r('app.color.pigo_warning')).width('100%')
+        if (request.message) Text(request.message).fontSize(14).fontColor($r('app.color.pigo_text')).width('100%')
         if (request.method === 'confirm') {
           Row({ space: 10 }) {
             Button('拒绝').chatAction().id('interaction-deny').enabled(this.reachable && !this.busy && !this.openingSession)
               .onClick(() => { void this.answerInteraction(request.id, false); })
             Button('确认').chatAction().id('interaction-confirm').enabled(this.reachable && !this.busy && !this.openingSession)
+              .backgroundColor(this.accent()).fontColor(this.accentForeground())
               .onClick(() => { void this.answerInteraction(request.id, true); })
           }.width('100%')
         } else if (request.method === 'input' || request.method === 'editor') {
@@ -2520,6 +2536,7 @@ struct Index {
             Button('取消').chatAction().id('interaction-cancel').enabled(this.reachable && !this.busy && !this.openingSession)
               .onClick(() => { void this.answerInteraction(request.id, false); })
             Button('提交').chatAction().id('interaction-submit').enabled(this.reachable && !this.busy && !this.openingSession)
+              .backgroundColor(this.accent()).fontColor(this.accentForeground())
               .onClick(() => { void this.answerInteraction(request.id, this.interactionDraft); })
           }.width('100%')
         } else {
@@ -3103,7 +3120,7 @@ struct Index {
   }
 
   private headerHeight(): number {
-    return this.windowHeight < SHORT_WINDOW_HEIGHT ? 52 : 62;
+    return this.windowHeight < SHORT_WINDOW_HEIGHT ? 52 : 60;
   }
 
   private dismissKeyboard(): void {
@@ -3655,15 +3672,14 @@ struct Index {
         Button({ type: ButtonType.Normal }) {
           Image($r('app.media.ic_chevron')).width(20).height(20).rotate({ angle: 90 })
             .fillColor($r('app.color.pigo_text'))
-        }.width(42).height(42).padding(0).borderRadius(12).backgroundColor($r('app.color.pigo_panel'))
+        }.width(44).height(44).padding(0).borderRadius(12).backgroundColor($r('app.color.pigo_control'))
           .accessibilityText('返回').enabled(!this.busy).onClick(() => { this.mineBack(); })
       }
       Text(this.minePage === 'theme' ? '系统主题' : this.minePage === 'computers' ?
         (this.addingComputer ? '添加电脑' : '我的电脑') : '我的')
         .fontSize(this.minePage ? 21 : 26).fontWeight(FontWeight.Bold).fontColor($r('app.color.pigo_text'))
-    }.width('100%').height(this.headerHeight()).padding({ left: 9, right: 9 })
-    .backgroundColor($r('app.color.pigo_panel')).borderRadius(21)
-    .border({ width: 1, color: $r('app.color.pigo_line') }).attributeModifier(immersiveSurface(this.darkMode))
+    }.width('100%').height(this.headerHeight())
+      .border({ width: { bottom: 1 }, color: $r('app.color.pigo_line') })
   }
 
   @Builder
@@ -3858,32 +3874,36 @@ struct Index {
     Row({ space: 10 }) {
       if (!this.dockedSessions()) {
         Button({ type: ButtonType.Normal }) {
-          Image($r('app.media.ic_menu')).width(24).height(24).fillColor(this.accent())
-        }.id('history').width(44).height(44).padding(0).backgroundColor(this.accentTint()).borderRadius(14)
+          Image($r('app.media.ic_menu')).width(21).height(21).fillColor($r('app.color.pigo_text'))
+        }.id('history').width(44).height(44).padding(0).backgroundColor($r('app.color.pigo_control')).borderRadius(12)
           .accessibilityText('打开任务抽屉').enabled(!this.busy && !this.showFiles)
           .onClick(() => { this.setDrawer(true); })
       }
-      Column({ space: 4 }) {
+      Column({ space: 3 }) {
         Text(this.showFiles ? '工作区文件' : this.showSettings ? '会话设置' : this.activeTab === 'pending' ? '运行中' : this.chatTitle())
           .fontSize(18).fontWeight(FontWeight.Bold).fontColor($r('app.color.pigo_text')).maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis }).width('100%')
         Row({ space: 6 }) {
-          Text('').width(7).height(7).borderRadius(4).backgroundColor(this.reachable ? this.accent() : $r('app.color.pigo_warning'))
+          Blank().width(7).height(7).borderRadius(4)
+            .backgroundColor(this.reachable ? $r('app.color.pigo_success') : $r('app.color.pigo_warning'))
             .accessibilityText(this.reachable ? '电脑已连接' : '电脑离线')
-          Text(`${this.computerTitle()}${this.project ? '  |  ' + this.project : ''}`)
+          Text(this.reachable ? (this.project ? `${this.project} · ${this.computerTitle()}` : this.computerTitle()) :
+            `离线 · ${this.computerTitle()}`)
             .fontSize(12).fontColor($r('app.color.pigo_muted')).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
         }.width('100%').onClick(() => { if (!this.dockedSessions()) this.setDrawer(true); })
-      }.layoutWeight(1).alignItems(HorizontalAlign.Start).padding({ left: this.dockedSessions() ? 8 : 0 })
+      }.layoutWeight(1).alignItems(HorizontalAlign.Start)
       Row({ space: 0 }) {
         Button({ type: ButtonType.Normal }) {
-          Image($r('app.media.ic_compose')).width(25).height(25).fillColor($r('app.color.pigo_text'))
-        }.id('new-task').width(40).height(44).backgroundColor(Color.Transparent).accessibilityText('在当前工作区新建会话')
+          Image($r('app.media.ic_compose')).width(21).height(21).fillColor(this.accent())
+        }.id('new-task').width(44).height(44).padding(0).borderRadius(12)
+          .backgroundColor(Color.Transparent).accessibilityText('在当前工作区新建会话')
           .enabled(this.reachable && !this.busy && !this.openingSession && this.desktopHandoff &&
             !!this.workspaceCwd && this.projects.includes(this.workspaceCwd))
           .onClick(() => { this.activeTab = 'tasks'; void this.requestAction('/new', { cwd: this.workspaceCwd }); })
         Button({ type: ButtonType.Normal }) {
-          Image($r('app.media.ic_more')).width(24).height(24).fillColor($r('app.color.pigo_text'))
-        }.id('session-settings').width(38).height(44).backgroundColor(Color.Transparent).accessibilityText('更多操作')
+          Image($r('app.media.ic_more')).width(21).height(21).fillColor($r('app.color.pigo_muted'))
+        }.id('session-settings').width(44).height(44).padding(0).borderRadius(12)
+          .backgroundColor(Color.Transparent).accessibilityText('更多操作')
           .bindMenu([
             { value: this.showSettings ? '返回聊天' : '模型与会话设置', action: () => {
               if (this.showSettings) this.showSettings = false;
@@ -3892,9 +3912,8 @@ struct Index {
             { value: '切换电脑', action: () => { if (!this.busy) this.openComputers(); } }
           ])
       }
-    }.width('100%').height(this.headerHeight()).padding({ left: 8, right: 4 }).borderRadius(21)
-      .backgroundColor($r('app.color.pigo_panel')).border({ width: 1, color: $r('app.color.pigo_line') })
-      .attributeModifier(immersiveSurface(this.darkMode, `#50${this.accent().slice(1)}`))
+    }.width('100%').height(this.headerHeight())
+      .border({ width: { bottom: 1 }, color: $r('app.color.pigo_line') })
   }
 
   @Builder
@@ -3918,6 +3937,7 @@ struct Index {
     } else if (this.noSession) {
       this.welcome()
     } else {
+      if (!this.reachable && !this.offlineDismissed) this.offlineNotice(false)
       if (this.interaction) this.pendingCard(this.interaction)
       if (this.pendingSend && !this.busy) {
         Row({ space: 8 }) {
@@ -3931,12 +3951,14 @@ struct Index {
       }
       ForEach([this.currentId], (transcriptId: string) => {
         Scroll(this.transcript) {
-          Column({ space: 8 }) {
+          Column({ space: 10 }) {
             if (this.historyCursor) {
               Button('更早的消息').chatAction().id('history-more').enabled(this.reachable && !this.busy)
                 .onClick(() => { void this.loadHistory(); })
             }
-            if (!this.messages.length && !this.liveText && !this.liveTools.length) this.welcome()
+            if (!this.messages.length && !this.liveText && !this.liveTools.length && !this.liveThinking && this.idle) {
+              this.welcome(true)
+            }
             ForEach(this.messages, (message: ChatMessage) => {
               if (message.text || message.thinking || message.imageCount) {
                 Row() {
@@ -3966,21 +3988,18 @@ struct Index {
                         this.historyImages(message.imageCount, this.currentId, message.id)
                       }.id(`image-message-${message.id}`).width('100%')
                     }
-                  }.alignItems(HorizontalAlign.Start).padding(message.role === 'user' ? 13 : 0)
+                  }.alignItems(HorizontalAlign.Start).padding(message.role === 'user' ?
+                    { left: 14, right: 14, top: 10, bottom: 10 } : 0)
                     .width(message.role === 'user' ? undefined : '100%')
                     .constraintSize({ maxWidth: message.role === 'user' ? '88%' : '100%' })
                     .backgroundColor(message.role === 'user' ? this.accentTint() : Color.Transparent)
                     .borderRadius({ topLeft: 17, topRight: 6, bottomLeft: 17, bottomRight: 17 })
                 }.width('100%').justifyContent(message.role === 'user' ? FlexAlign.End : FlexAlign.Start)
-                  .padding({ top: 10, bottom: 4 })
+                  .padding({ top: message.role === 'user' ? 14 : 8, bottom: 4 })
               }
-              ForEach(message.tools ?? [], (tool: LiveTool) => {
-                this.toolRow(tool, message.id)
-              }, (tool: LiveTool) => this.toolKey(tool))
+              this.toolGroup(message.tools ?? [], message.id)
             }, (message: ChatMessage) => this.transcriptMessageKey(message))
-            ForEach(this.unlistedLiveTools(), (tool: LiveTool) => {
-              this.toolRow(tool, '')
-            }, (tool: LiveTool) => this.toolKey(tool))
+            this.toolGroup(this.unlistedLiveTools(), '')
             if (this.liveThinking) this.thinkingCard('', this.liveThinking, -1, this.liveThinkingOpen)
             if (this.liveText) {
               Column({ space: 8 }) {
@@ -4006,11 +4025,12 @@ struct Index {
                     .backgroundColor(this.accentTint()).borderRadius({ topLeft: 17, topRight: 6, bottomLeft: 17, bottomRight: 17 })
                 }.width('100%').justifyContent(FlexAlign.End).padding({ top: 10, bottom: 4 })
               }, (message: QueuedSteering) => message.id)
-          }.width('100%').padding({ top: 6, bottom: 6 })
+          }.width('100%').padding({ top: 10, right: 10, bottom: 8 })
             .onAreaChange((_oldArea: Area, newArea: Area) => {
               this.positionTranscript(transcriptId, Number(newArea.height));
             })
         }.layoutWeight(1).width('100%').align(Alignment.TopStart)
+          .scrollBar(BarState.Auto).scrollBarWidth(4)
           .onTouch((event: TouchEvent) => {
             // 点击手势会被带 copyOption 的消息文本夺走，改用触摸广播：手指一按下就收键盘。
             if (event.type === TouchType.Down && this.keyboardHeight > 0) this.dismissKeyboard();
@@ -4035,51 +4055,14 @@ struct Index {
             }
           })
       }, (transcriptId: string) => transcriptId)
-      if (this.attachments.length) {
-        Scroll() {
-          Row({ space: 10 }) {
-            ForEach(this.attachments, (item: DraftAttachment, index: number) => {
-              Stack({ alignContent: Alignment.TopEnd }) {
-                if (item.kind === 'image' && item.image) {
-                  Image(item.image.preview).id(`attachment-${index}`).width(64).height(64).borderRadius(10)
-                    .objectFit(ImageFit.Cover)
-                } else if (item.kind === 'file') {
-                  Column({ space: 3 }) {
-                    Text(item.file ? this.fileIcon(item.file.name) : '文件').fontSize(15).fontColor($r('app.color.pigo_muted'))
-                    Text(item.name).fontSize(12).fontColor($r('app.color.pigo_text')).maxLines(1)
-                      .textOverflow({ overflow: TextOverflow.Ellipsis }).constraintSize({ maxWidth: 150 })
-                    Text(this.fileSize(item.size)).fontSize(11).fontColor($r('app.color.pigo_muted'))
-                  }.justifyContent(FlexAlign.Center).width('100%').height('100%')
-                }
-                Button({ type: ButtonType.Circle }) {
-                  Text('×').fontSize(13).fontColor($r('app.color.pigo_text'))
-                }.id(`remove-attachment-${index}`).width(20).height(20).backgroundColor($r('app.color.pigo_selected'))
-                  .enabled(!this.busy && !this.pendingSend)
-                  .onClick(() => { this.removeAttachment(index); })
-              }.width(item.kind === 'image' ? 64 : 170).height(64)
-                .borderRadius(item.kind === 'image' ? 10 : 12)
-                .backgroundColor(item.kind === 'image' ? Color.Transparent : $r('app.color.pigo_control'))
-                .padding(item.kind === 'file' ? 6 : 0)
-            }, (item: DraftAttachment, index: number) => `${index}-${item.kind}-${item.name}-${item.size}`)
-          }.padding({ bottom: 2 })
-        }.scrollable(ScrollDirection.Horizontal).width('100%').height(70)
+      if (!this.transcriptFollow) {
+        Row() {
+          Button({ type: ButtonType.Normal }) {
+            Image($r('app.media.ic_chevron')).width(22).height(22).fillColor($r('app.color.pigo_text'))
+          }.id('scroll-bottom').width(44).height(44).borderRadius(12).backgroundColor($r('app.color.pigo_control'))
+            .accessibilityText('滚动到最新消息').onClick(() => { this.transcriptFollow = true; this.transcript.scrollEdge(Edge.Bottom); })
+        }.width('100%').justifyContent(FlexAlign.End)
       }
-      Row({ space: 8 }) {
-        Button({ type: ButtonType.Normal }) {
-          Text(this.modelLabel || '选择模型').fontSize(12).fontColor(this.modelLabel ? $r('app.color.pigo_text') : $r('app.color.pigo_muted'))
-            .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).constraintSize({ maxWidth: 190 })
-        }.id('model-pill').height(34).padding({ left: 12, right: 12 }).borderRadius(17).backgroundColor(this.accentTint())
-          .accessibilityText('切换模型')
-          .enabled(this.reachable && !this.busy && !this.openingSession && !!this.currentId && this.idle && !this.queued)
-          .onClick(() => { void this.openModelMenu(); })
-        Blank()
-        Button({ type: ButtonType.Normal }) {
-          Image($r('app.media.ic_chevron')).width(22).height(22).fillColor($r('app.color.pigo_text'))
-        }.id('scroll-bottom').width(38).height(38).borderRadius(12).backgroundColor($r('app.color.pigo_control'))
-          .visibility(this.transcriptFollow ? Visibility.Hidden : Visibility.Visible)
-          .accessibilityText('滚动到最新消息').onClick(() => { this.transcriptFollow = true; this.transcript.scrollEdge(Edge.Bottom); })
-      }.width('100%').height(38)
-      if (!this.reachable && !this.offlineDismissed) this.offlineNotice(false)
       if (this.commandPalette && this.commandPaletteActive()) {
         Column({ space: 2 }) {
           if (!this.commandMatches().length) {
@@ -4111,41 +4094,77 @@ struct Index {
                   .onClick(() => { this.pickCommand(row); })
                 }, (row: CommandRow) => row.name)
               }.width('100%')
-            }.constraintSize({ maxHeight: 216 }).width('100%').edgeEffect(EdgeEffect.Spring)
+            }.constraintSize({ maxHeight: this.keyboardHeight || this.windowHeight < SHORT_WINDOW_HEIGHT ? 132 : 216 })
+              .width('100%').edgeEffect(EdgeEffect.Spring)
           }
         }.width('100%').padding(4)
         .backgroundColor($r('app.color.pigo_panel')).border({ width: 1, color: $r('app.color.pigo_line') }).borderRadius(14)
         .id('command-palette')
       }
+      this.composer()
+    }
+  }
+
+  @Builder
+  composer() {
+    Column({ space: 2 }) {
+      if (this.attachments.length) {
+        Scroll() {
+          Row({ space: 10 }) {
+            ForEach(this.attachments, (item: DraftAttachment, index: number) => {
+              Stack({ alignContent: Alignment.TopEnd }) {
+                if (item.kind === 'image' && item.image) {
+                  Image(item.image.preview).id(`attachment-${index}`).width(64).height(64).borderRadius(10)
+                    .objectFit(ImageFit.Cover)
+                } else if (item.kind === 'file') {
+                  Column({ space: 3 }) {
+                    Text(item.file ? this.fileIcon(item.file.name) : '文件').fontSize(15).fontColor($r('app.color.pigo_muted'))
+                    Text(item.name).fontSize(12).fontColor($r('app.color.pigo_text')).maxLines(1)
+                      .textOverflow({ overflow: TextOverflow.Ellipsis }).constraintSize({ maxWidth: 150 })
+                    Text(this.fileSize(item.size)).fontSize(11).fontColor($r('app.color.pigo_muted'))
+                  }.justifyContent(FlexAlign.Center).width('100%').height('100%')
+                }
+                Button({ type: ButtonType.Circle }) {
+                  Text('×').fontSize(13).fontColor($r('app.color.pigo_text'))
+                }.id(`remove-attachment-${index}`).width(26).height(26).backgroundColor($r('app.color.pigo_selected'))
+                  .accessibilityText(`移除附件 ${item.name}`)
+                  .enabled(!this.busy && !this.pendingSend)
+                  .onClick(() => { this.removeAttachment(index); })
+              }.width(item.kind === 'image' ? 64 : 170).height(64)
+                .borderRadius(item.kind === 'image' ? 10 : 12)
+                .backgroundColor(item.kind === 'image' ? Color.Transparent : $r('app.color.pigo_control'))
+                .padding(item.kind === 'file' ? 6 : 0)
+            }, (item: DraftAttachment, index: number) => `${index}-${item.kind}-${item.name}-${item.size}`)
+          }.padding({ bottom: 2 })
+        }.scrollable(ScrollDirection.Horizontal).scrollBar(BarState.Off).width('100%').height(70)
+      }
+      if (this.voiceMode) {
+        Button({ type: ButtonType.Normal }) {
+          Text(this.voicePreparing ? '正在准备…' : this.voiceFinishing ? (this.voiceCancelling ? '按住说话' : '正在转文字…') : this.recording ? (this.holdCancel ? '松开取消' : '松开发送') : '按住说话')
+            .fontSize(16).fontColor(this.holdCancel ? $r('app.color.pigo_error') : $r('app.color.pigo_text')).maxLines(1)
+        }.id('hold-to-talk').width('100%').height(44).borderRadius(12)
+          .backgroundColor(this.recording ? (this.holdCancel ? $r('app.color.pigo_error_panel') : $r('app.color.pigo_selected')) : $r('app.color.pigo_control'))
+          .enabled(!!this.currentId && this.reachable && !this.pendingSend && !this.busy && !this.openingSession)
+          .onTouch((event: TouchEvent) => { this.holdTouch(event); })
+      } else {
+        TextArea({ placeholder: !this.reachable ? '设备离线' : this.windowWidth < 360 ? '输入消息' : '输入消息，/ 唤起命令',
+          text: this.draft })
+          .id('draft').width('100%').constraintSize({ minHeight: 42, maxHeight: 108 }).onFocus(() => { this.armTranscriptFollow(); })
+          .fontSize(16).fontColor($r('app.color.pigo_text')).placeholderColor($r('app.color.pigo_muted')).backgroundColor(Color.Transparent)
+          .padding({ left: 6, right: 6, top: 8, bottom: 8 })
+          .enabled(!this.pendingSend).onChange((value: string) => { this.draft = value; this.syncCommandPalette(); })
+      }
       Row({ space: 6 }) {
         Button({ type: ButtonType.Normal }) {
           Image(this.voiceMode ? $r('app.media.ic_keyboard') : $r('app.media.ic_mic')).width(22).height(22)
             .fillColor(this.voiceMode ? this.accent() : $r('app.color.pigo_muted'))
-            .fillColor($r('app.color.pigo_text'))
-        }.id('voice-toggle').width(38).height(42).backgroundColor(Color.Transparent).borderRadius(19)
+        }.id('voice-toggle').width(44).height(44).padding(0).backgroundColor(Color.Transparent).borderRadius(12)
           .accessibilityText(this.voiceMode ? '切换到文字输入' : '切换到语音输入')
           .enabled(!!this.currentId && !this.pendingSend && !this.busy && !this.recording && !this.voicePreparing && !this.voiceFinishing)
-          .opacity(this.voiceMode ? 1 : 0.65)
           .onClick(() => { this.voiceMode = !this.voiceMode; this.liveVoiceText = ''; this.status = ''; if (this.voiceMode) this.dismissKeyboard(); })
-        if (this.voiceMode) {
-          Button({ type: ButtonType.Normal }) {
-            Text(this.voicePreparing ? '正在准备…' : this.voiceFinishing ? (this.voiceCancelling ? '按住 说话' : '正在转文字…') : this.recording ? (this.holdCancel ? '松开 取消' : '松开 发送') : '按住 说话')
-              .fontSize(16).fontColor(this.holdCancel ? $r('app.color.pigo_error') : $r('app.color.pigo_text')).maxLines(1)
-          }.id('hold-to-talk').layoutWeight(1).height(58).borderRadius(28)
-            .backgroundColor(this.recording ? (this.holdCancel ? $r('app.color.pigo_error_panel') : $r('app.color.pigo_selected')) : $r('app.color.pigo_control'))
-            .enabled(!!this.currentId && this.reachable && !this.pendingSend && !this.busy && !this.openingSession)
-            .onTouch((event: TouchEvent) => { this.holdTouch(event); })
-        } else {
-          TextArea({ placeholder: !this.reachable ? '设备离线' : this.windowWidth < 360 ? '输入消息' : '输入消息，/ 唤起命令',
-            text: this.draft })
-            .id('draft').layoutWeight(1).constraintSize({ minHeight: 46, maxHeight: 118 }).onFocus(() => { this.armTranscriptFollow(); })
-            .fontSize(16).fontColor($r('app.color.pigo_text')).placeholderColor($r('app.color.pigo_muted')).backgroundColor(Color.Transparent)
-            .padding({ left: 0, right: 2, top: 13, bottom: 11 })
-            .enabled(!this.pendingSend).onChange((value: string) => { this.draft = value; this.syncCommandPalette(); })
-        }
         Button({ type: ButtonType.Normal }) {
-          Image($r('app.media.ic_plus')).width(25).height(25).fillColor($r('app.color.pigo_text'))
-        }.id('attach-image').width(40).height(42).backgroundColor(Color.Transparent).borderRadius(20)
+          Image($r('app.media.ic_plus')).width(22).height(22).fillColor($r('app.color.pigo_muted'))
+        }.id('attach-image').width(44).height(44).padding(0).backgroundColor(Color.Transparent).borderRadius(12)
           .accessibilityText('添加图片或文件').enabled(this.reachable && !this.busy && !this.openingSession && !this.pendingSend && !this.recording)
           .bindMenu(this.acceptsImage ? [
             { value: '拍摄照片', action: (): void => { void this.attachImage('camera'); } },
@@ -4154,24 +4173,37 @@ struct Index {
           ] : [
             { value: '选择文件', action: (): void => { void this.attachFile(); } }
           ])
+        Button({ type: ButtonType.Normal }) {
+          Row({ space: 5 }) {
+            Text(this.modelLabel || '选择模型').fontSize(12).fontWeight(FontWeight.Medium)
+              .fontColor($r('app.color.pigo_muted')).maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis }).constraintSize({ maxWidth: '85%' })
+            Image($r('app.media.ic_chevron')).width(12).height(12).fillColor($r('app.color.pigo_muted'))
+          }
+        }.id('model-pill').height(44).padding({ left: 6, right: 4 }).borderRadius(10)
+          .constraintSize({ maxWidth: '45%' }).backgroundColor(Color.Transparent)
+          .accessibilityText(this.modelLabel ? `切换模型，当前为${this.modelLabel}` : '切换模型')
+          .enabled(this.reachable && !this.busy && !this.openingSession && !!this.currentId && this.idle && !this.queued)
+          .onClick(() => { void this.openModelMenu(); })
+        Blank()
         if (this.idle || this.hasDraft()) {
           Button({ type: ButtonType.Normal }) {
             Image($r('app.media.ic_send')).width(22).height(22)
               .fillColor(this.canSend() ? this.accentForeground() : $r('app.color.pigo_text'))
-          }.id('send').width(42).height(42).padding(0).borderRadius(13)
+          }.id('send').width(44).height(44).padding(0).borderRadius(13)
             .backgroundColor(this.canSend() ? this.accent() : $r('app.color.pigo_control'))
             .accessibilityText(this.idle ? '发送消息' : '发送消息以引导当前任务').enabled(this.canSend())
             .onClick(() => { void this.send(); })
         } else {
           Button({ type: ButtonType.Normal }) {
             Rect().width(12).height(12).fill(this.accentForeground()).radius(2)
-          }.id('abort').width(42).height(42).borderRadius(13).backgroundColor(this.accent())
+          }.id('abort').width(44).height(44).borderRadius(13).backgroundColor(this.accent())
             .accessibilityText('停止生成').enabled(this.reachable && !this.busy && !this.openingSession)
             .onClick(() => { void this.requestAction('/abort', { id: this.currentId }); })
         }
-      }.width('100%').padding({ left: 6, right: 7, top: 5, bottom: 5 }).backgroundColor($r('app.color.pigo_panel'))
-        .border({ width: 1, color: $r('app.color.pigo_line') }).borderRadius(22)
-    }
+      }.width('100%')
+    }.width('100%').padding({ left: 7, right: 7, top: 6, bottom: 6 }).backgroundColor($r('app.color.pigo_panel'))
+      .border({ width: 1, color: $r('app.color.pigo_line') }).borderRadius(18)
   }
 
   private cacheChat(session: SessionState): void {
@@ -4341,10 +4373,10 @@ struct Index {
 
   @Builder
   modelSheet() {
-    Column({ space: 10 }) {
+    Column({ space: 12 }) {
       Row({ space: 10 }) {
-        Text('切换模型').fontSize(17).fontWeight(FontWeight.Bold).fontColor($r('app.color.pigo_text')).layoutWeight(1)
-        Button('关闭').chatAction().height(32).fontSize(13)
+        Text('切换模型').fontSize(20).fontWeight(FontWeight.Bold).fontColor($r('app.color.pigo_text')).layoutWeight(1)
+        Button('关闭').chatAction().height(44).fontSize(13)
           .onClick(() => { this.showModelMenu = false; })
       }.width('100%')
       if (!this.idle || this.queued) Text('等待当前任务和队列结束后可切换模型。').fontSize(13).fontColor($r('app.color.pigo_warning')).width('100%')
@@ -4352,11 +4384,19 @@ struct Index {
         Column({ space: 6 }) {
           ForEach(this.models, (model: ModelOption, index: number) => {
             Button({ type: ButtonType.Normal }) {
-              Text(`${this.isCurrentModel(model) ? '✓ ' : ''}${model.name} · ${model.provider}${model.image ? ' · 图片' : ''}`)
-                .fontSize(15).fontColor($r('app.color.pigo_text')).maxLines(1)
-                .textOverflow({ overflow: TextOverflow.Ellipsis }).width('100%').textAlign(TextAlign.Start)
-            }.id(`model-option-${index}`).width('100%').height(46).padding({ left: 16, right: 16 })
-              .borderRadius(14).backgroundColor(this.isCurrentModel(model) ? $r('app.color.pigo_selected') : $r('app.color.pigo_control'))
+              Row({ space: 10 }) {
+                Column({ space: 3 }) {
+                  Text(model.name).fontSize(15).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
+                    .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+                  Text(`${model.provider}${model.image ? ' · 支持图片' : ''}`)
+                    .fontSize(12).fontColor($r('app.color.pigo_muted')).maxLines(1)
+                    .textOverflow({ overflow: TextOverflow.Ellipsis })
+                }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+                if (this.isCurrentModel(model)) Text('✓').fontSize(17).fontColor(this.accent())
+              }.width('100%')
+            }.id(`model-option-${index}`).width('100%').height(52).padding({ left: 12, right: 12 })
+              .borderRadius(11).backgroundColor(this.isCurrentModel(model) ? this.accentTint() : $r('app.color.pigo_control'))
+              .accessibilitySelected(this.isCurrentModel(model))
               .enabled(this.reachable && this.idle && !this.queued && !this.busy)
               .onClick(() => { this.showModelMenu = false; void this.applyModelFromMenu(index); })
           }, (model: ModelOption) => `${model.provider}-${model.id}`)
@@ -4394,22 +4434,40 @@ struct Index {
       .backgroundColor(compact ? $r('app.color.pigo_warning_panel') : $r('app.color.pigo_panel'))
   }
 
+  private tabSymbol(tab: string, selected: boolean): Resource {
+    if (tab === 'tasks') return selected ? $r('sys.symbol.message_fill') : $r('sys.symbol.message');
+    if (tab === 'pending') return selected ? $r('sys.symbol.play_circle_fill') : $r('sys.symbol.play_circle');
+    if (tab === 'files') return selected ? $r('sys.symbol.folder_fill') : $r('sys.symbol.folder');
+    return selected ? $r('sys.symbol.person_fill') : $r('sys.symbol.person');
+  }
+
   @Builder
   bottomTabs() {
     Row({ space: 4 }) {
       ForEach(this.isPaired ? ['tasks', 'pending', 'files', 'mine'] : ['tasks', 'mine'], (tab: string) => {
         Button({ type: ButtonType.Normal }) {
-          Column({ space: 5 }) {
-            Image(tab === 'tasks' ? $r('app.media.ic_tasks') : tab === 'pending' ? $r('app.media.ic_pending') :
-              tab === 'files' ? $r('app.media.ic_folder') : $r('app.media.ic_person')).width(22).height(22)
-              .fillColor(this.activeTab === tab ? this.accent() : $r('app.color.pigo_muted'))
+          Column({ space: 3 }) {
+            Stack({ alignContent: Alignment.TopEnd }) {
+              Row() {
+                SymbolGlyph(this.tabSymbol(tab, this.activeTab === tab)).fontSize(23)
+                  .fontColor([this.activeTab === tab ? this.accent() : $r('app.color.pigo_muted')])
+                  .accessibilityLevel('no')
+              }.width('100%').height('100%').justifyContent(FlexAlign.Center)
+              if (tab === 'pending' && this.reachable && this.allRunningRows().length) {
+                Text(this.allRunningRows().length > 9 ? '9+' : `${this.allRunningRows().length}`)
+                  .fontSize(9).fontWeight(FontWeight.Medium).fontColor(this.accentForeground())
+                  .textAlign(TextAlign.Center).constraintSize({ minWidth: 14 }).height(14)
+                  .padding({ left: 2, right: 2 }).backgroundColor(this.accent()).borderRadius(7)
+              }
+            }.width(48).height(25)
             Text(tab === 'tasks' ? '任务' : tab === 'pending' ? '运行中' : tab === 'files' ? '工作区' : '我的')
-              .fontSize(11).fontColor(this.activeTab === tab ? this.accent() : $r('app.color.pigo_muted'))
+              .fontSize(11).fontWeight(this.activeTab === tab ? FontWeight.Medium : FontWeight.Regular)
+              .fontColor(this.activeTab === tab ? this.accent() : $r('app.color.pigo_muted'))
           }
-        }.id(`tab-${tab}`).layoutWeight(1).height(this.windowHeight < SHORT_WINDOW_HEIGHT ? 42 : 48)
-          .padding(0).borderRadius(17)
+        }.id(`tab-${tab}`).layoutWeight(1).height(this.windowHeight < SHORT_WINDOW_HEIGHT ? 44 : 52)
+          .padding(0)
           .accessibilitySelected(this.activeTab === tab)
-          .backgroundColor(this.activeTab === tab ? this.accentTint() : Color.Transparent)
+          .backgroundColor(Color.Transparent)
           .enabled(!this.busy).onClick(() => {
             this.dismissKeyboard();
             if (this.editingPath && this.fileText !== this.fileOriginal) {
@@ -4439,27 +4497,33 @@ struct Index {
             this.activeTab = tab;
           })
       }, (tab: string) => tab)
-    }.width('100%').padding(5).borderRadius(23).backgroundColor($r('app.color.pigo_panel'))
-      .border({ width: 1, color: $r('app.color.pigo_line') })
+    }.width('100%').padding({ top: 4 })
+      .border({ width: { top: 1 }, color: $r('app.color.pigo_line') })
   }
 
   @Builder
-  welcome() {
+  welcome(inTranscript: boolean = false) {
     Column({ space: 12 }) {
       Stack() {
         Image($r('app.media.ic_terminal')).width(33).height(33).fillColor(this.accent())
-      }.width(68).height(68).borderRadius(23).backgroundColor(this.accentTint())
-        .border({ width: 1, color: $r('app.color.pigo_line') }).accessibilityLevel('no')
-      Text('Pi Go').fontSize(36).fontWeight(FontWeight.Bold).fontColor($r('app.color.pigo_text'))
+      }.width(60).height(60).borderRadius(18).backgroundColor(this.accentTint()).accessibilityLevel('no')
+      Text(!this.isPaired || this.loading ? 'Pi Go' : inTranscript ? '开始新任务' : '选择一个任务')
+        .fontSize(this.isPaired && !this.loading ? 24 : 36).fontWeight(FontWeight.Bold)
+        .fontColor($r('app.color.pigo_text')).textAlign(TextAlign.Center)
       Text(this.loading ? '正在读取已配对的电脑…' : !this.isPaired ? '连接电脑后查看和继续任务。' :
-        this.noSession || '继续电脑上的任务，或开始一个新任务。')
+        this.noSession || (this.reachable ? '输入你的目标，或添加文件作为上下文。' : '电脑重新连接后即可发送消息。'))
         .fontSize(15).fontColor($r('app.color.pigo_muted')).textAlign(TextAlign.Center).lineHeight(23)
+        .constraintSize({ maxWidth: 320 })
       if (!this.loading && !this.isPaired) {
-        Button('连接电脑').chatAction().height(44).padding({ left: 24, right: 24 })
+        Button('连接电脑').chatAction().height(46).padding({ left: 24, right: 24 })
           .backgroundColor(this.accent()).fontColor(this.accentForeground()).onClick(() => { this.openComputers(); })
+      } else if (!this.loading && this.noSession && !this.dockedSessions()) {
+        Button('打开任务列表').chatAction().height(44).padding({ left: 18, right: 18 })
+          .backgroundColor(this.accent()).fontColor(this.accentForeground()).onClick(() => { this.setDrawer(true); })
       }
-    }.width('100%').padding({ top: this.windowHeight < SHORT_WINDOW_HEIGHT ? 8 : 76,
-      bottom: this.windowHeight < SHORT_WINDOW_HEIGHT ? 8 : 48, left: 20, right: 20 }).layoutWeight(1)
+    }.width('100%').padding({ top: inTranscript && this.windowHeight >= SHORT_WINDOW_HEIGHT ? 36 : 8,
+      bottom: inTranscript && this.windowHeight >= SHORT_WINDOW_HEIGHT ? 24 : 8, left: 16, right: 16 })
+      .layoutWeight(inTranscript ? 0 : 1).justifyContent(FlexAlign.Center)
   }
 
   @Builder
@@ -4507,7 +4571,8 @@ struct Index {
           { value: session.pinned ? '取消置顶' : '置顶', action: () => { void this.updateSessionMeta(session, true); } },
           { value: session.archived ? '取消归档' : '归档', action: () => { void this.updateSessionMeta(session, false); } }
         ])
-    }.width('100%').borderRadius(12).backgroundColor(session.id === this.currentId ? $r('app.color.pigo_control') : Color.Transparent)
+    }.width('100%').borderRadius(9)
+      .backgroundColor(session.id === this.currentId ? this.accentTint() : Color.Transparent)
       .onAreaChange((_oldArea: Area, newArea: Area) => {
         if (session.id !== this.currentId) return;
         this.libraryRowY = Number(newArea.globalPosition.y);
@@ -4580,6 +4645,7 @@ struct Index {
                 Text('').width(6).height(6).borderRadius(3)
                   .backgroundColor(this.stateColor(this.sessionState(row.id)))
                 Text(row.name || '后台任务').fontSize(13).fontColor($r('app.color.pigo_text')).maxLines(1)
+                  .textOverflow({ overflow: TextOverflow.Ellipsis }).constraintSize({ maxWidth: 152 })
                 Text(this.stateLabel(this.sessionState(row.id))).fontSize(11)
                   .fontColor(this.stateColor(this.sessionState(row.id)))
               }
@@ -4641,14 +4707,14 @@ struct Index {
           ForEach(this.spacePaths(), (path: string) => {
             Row({ space: 4 }) {
               Row({ space: this.compactSessionPane() ? 4 : 9 }) {
-                Image($r('app.media.ic_folder')).width(this.compactSessionPane() ? 17 : 23)
-                  .height(this.compactSessionPane() ? 17 : 23).fillColor($r('app.color.pigo_text'))
-                Text(path.split('/').pop() || path).fontSize(this.compactSessionPane() ? 14 : 18).fontColor($r('app.color.pigo_text'))
+                Image($r('app.media.ic_folder')).width(18).height(18).fillColor(this.accent())
+                Text(path.split('/').pop() || path).fontSize(14).fontWeight(FontWeight.Medium)
+                  .fontColor($r('app.color.pigo_text'))
                   .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).layoutWeight(1)
                 Image($r('app.media.ic_chevron')).width(this.compactSessionPane() ? 12 : 18)
                   .height(this.compactSessionPane() ? 12 : 18).fillColor($r('app.color.pigo_text'))
                   .rotate({ angle: this.expandedSpaces.includes(path) ? 0 : -90 }).opacity(0.6)
-              }.layoutWeight(1).height(48).onClick(() => { this.toggleSpace(path); })
+              }.layoutWeight(1).height(44).onClick(() => { this.toggleSpace(path); })
               Button({ type: ButtonType.Normal }) {
                 SymbolGlyph($r('sys.symbol.plus')).fontSize(20).fontColor([$r('app.color.pigo_text')])
               }.id(`space-actions-${path}`).width(this.compactSessionPane() ? 40 : 44).height(44).padding(0).borderRadius(10)
@@ -4656,7 +4722,7 @@ struct Index {
                 .accessibilityText(`${path.split('/').pop() || path}空间操作`)
                 .enabled(!this.busy && !this.openingSession)
                 .onClick(() => { void this.openSpaceActions(path); })
-            }.width('100%').padding({ left: this.compactSessionPane() ? 4 : 12 })
+            }.width('100%').padding({ left: this.compactSessionPane() ? 4 : 8 })
               .onAreaChange((_oldArea: Area, newArea: Area) => {
                 if (path !== this.workspaceCwd) return;
                 this.librarySpaceY = Number(newArea.globalPosition.y);
@@ -4681,35 +4747,35 @@ struct Index {
 
   @Builder
   sessionDrawer() {
-    Column({ space: this.compactSessionPane() || this.windowHeight < SHORT_WINDOW_HEIGHT ? 8 : 14 }) {
+    Column({ space: this.compactSessionPane() || this.windowHeight < SHORT_WINDOW_HEIGHT ? 8 : 12 }) {
       Row({ space: this.compactSessionPane() ? 6 : 10 }) {
-        Image($r('app.media.ic_computer')).width(this.compactSessionPane() ? 20 : 26)
-          .height(this.compactSessionPane() ? 20 : 26).fillColor($r('app.color.pigo_text'))
+        Stack() {
+          Image($r('app.media.ic_computer')).width(20).height(20).fillColor(this.accent())
+        }.width(34).height(34).borderRadius(10).backgroundColor(this.accentTint())
         Button({ type: ButtonType.Normal }) {
           Row({ space: 6 }) {
-            Text(this.computerTitle()).fontSize(this.compactSessionPane() ? 16 : 20)
+            Text(this.computerTitle()).fontSize(this.compactSessionPane() ? 14 : 17)
               .fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
               .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).layoutWeight(1)
-            Image($r('app.media.ic_chevron')).width(16).height(16).fillColor($r('app.color.pigo_text'))
+            Image($r('app.media.ic_chevron')).width(14).height(14).fillColor($r('app.color.pigo_muted'))
           }
         }.id('computers').layoutWeight(1).height(48).padding(0).backgroundColor(Color.Transparent)
           .accessibilityText('切换电脑').enabled(!this.busy).onClick(() => { this.openComputers(); })
         if (!this.dockedSessions()) {
           Button({ type: ButtonType.Normal }) {
-            Image($r('app.media.ic_menu')).width(24).height(24).fillColor($r('app.color.pigo_text'))
-          }.width(40).height(44).backgroundColor(Color.Transparent).accessibilityText('关闭任务抽屉')
+            Image($r('app.media.ic_close')).width(20).height(20).fillColor($r('app.color.pigo_muted'))
+          }.width(44).height(44).padding(0).backgroundColor(Color.Transparent).accessibilityText('关闭任务抽屉')
             .onClick(() => { this.setDrawer(false); })
         }
-      }.width('100%').padding({ left: this.compactSessionPane() ? 4 : 12 })
+      }.width('100%').padding({ left: 2 })
       Button({ type: ButtonType.Normal }) {
         Row({ space: this.compactSessionPane() ? 6 : 10 }) {
-          Image($r('app.media.ic_compose')).width(this.compactSessionPane() ? 20 : 25)
-            .height(this.compactSessionPane() ? 20 : 25).fillColor($r('app.color.pigo_text'))
-          Text('新建任务').fontSize(this.compactSessionPane() ? 15 : 19).fontColor($r('app.color.pigo_text')).maxLines(1)
+          Image($r('app.media.ic_compose')).width(19).height(19).fillColor(this.accentForeground())
+          Text('新建任务').fontSize(15).fontWeight(FontWeight.Medium).fontColor(this.accentForeground()).maxLines(1)
         }.justifyContent(FlexAlign.Center).width('100%')
-      }.id('drawer-new-task').width('100%').height(this.compactSessionPane() ? 42 : 50).padding(0)
-        .backgroundColor($r('app.color.pigo_panel'))
-        .border({ width: 1, color: $r('app.color.pigo_line') }).borderRadius(18).enabled(this.reachable && !this.busy && this.desktopHandoff && this.projects.length > 0)
+      }.id('drawer-new-task').width('100%').height(44).padding(0)
+        .backgroundColor(this.accent()).borderRadius(12)
+        .enabled(this.reachable && !this.busy && this.desktopHandoff && this.projects.length > 0)
         .bindMenu(this.projects.map((path: string): MenuElement => ({ value: path.split('/').pop() || path,
           action: () => { this.activeTab = 'tasks'; void this.requestAction('/new', { cwd: path }); } })))
       if (!this.reachable) this.offlineNotice(true, this.compactSessionPane())
@@ -4717,15 +4783,16 @@ struct Index {
         ForEach(['all', 'pinned', 'recent', 'archived'], (view: string) => {
           Button({ type: ButtonType.Normal }) {
             Text(view === 'all' ? '全部' : view === 'pinned' ? '置顶' : view === 'recent' ? '最近' : '归档')
-              .fontSize(14).fontColor($r('app.color.pigo_text')).maxLines(1)
+              .fontSize(13).fontColor(this.sessionView === view ? this.accent() : $r('app.color.pigo_muted')).maxLines(1)
               .fontWeight(this.sessionView === view ? FontWeight.Medium : FontWeight.Regular)
           }.id(`session-view-${view}`).width(this.compactSessionPane() ? '49%' : '24%')
             .height(36).padding(0).borderRadius(8)
-            .backgroundColor(this.sessionView === view ? $r('app.color.pigo_selected') : Color.Transparent)
+            .backgroundColor(this.sessionView === view ? this.accentTint() : Color.Transparent)
             .accessibilitySelected(this.sessionView === view).enabled(!this.busy && !this.sessionLoading && this.reachable)
             .onClick(() => { this.sessionView = view; this.scheduleSidebarSave(); void this.loadSessions(); })
         }, (view: string) => view)
       }.width('100%').height(this.compactSessionPane() ? 76 : 36)
+      Divider().color($r('app.color.pigo_line'))
       this.sessionLibrary()
       Text(this.base.split('://')[1] || '').id('active-computer').fontSize(11).fontColor($r('app.color.pigo_muted'))
         .width('100%').padding({ left: this.compactSessionPane() ? 4 : 12 })
@@ -4734,9 +4801,9 @@ struct Index {
       .constraintSize({ maxWidth: 420 }).height('100%')
       .padding({ left: this.compactSessionPane() ? 8 : 12, right: 12,
         top: this.statusBarHeight + (this.compactSessionPane() ? 8 : 12), bottom: this.bottomPad() + 18 })
-      .borderRadius(this.dockedSessions() ? 0 : { topRight: 26, bottomRight: 26 })
+      .borderRadius(this.dockedSessions() ? 0 : { topRight: 20, bottomRight: 20 })
       .border({ width: { right: this.dockedSessions() ? 1 : 0 }, color: $r('app.color.pigo_line') })
-      .backgroundColor($r('app.color.pigo_panel'))
+      .backgroundColor($r('app.color.pigo_sidebar'))
       .transition(TransitionEffect.move(TransitionEdge.START))
       .onGestureJudgeBegin(() => this.dockedSessions() ? GestureJudgeResult.REJECT : GestureJudgeResult.CONTINUE)
       .gesture(PanGesture({ direction: PanDirection.Horizontal }).onActionEnd((event: GestureEvent) => { this.swipeDrawer(event); }))
@@ -4899,11 +4966,7 @@ struct Index {
             this.voicePreparing || this.voiceFinishing || !this.isPaired || this.activeTab === 'mine'
             ? GestureJudgeResult.REJECT : GestureJudgeResult.CONTINUE)
           .gesture(PanGesture({ direction: PanDirection.Horizontal }).onActionEnd((event: GestureEvent) => { this.swipeDrawer(event); }))
-      }.width('100%').height('100%').linearGradient({
-        direction: GradientDirection.LeftTop,
-        colors: [[this.accentTint(), 0], [$r('app.color.launch_background'), 0.48],
-          [$r('app.color.launch_background'), 0.80], [this.accentTint(), 1]]
-      })
+      }.width('100%').height('100%').backgroundColor($r('app.color.launch_background'))
       if (this.showSessions && this.isPaired && !this.dockedSessions()) {
         Button({ type: ButtonType.Normal }).chatAction().width('100%').height('100%').backgroundColor('#66000000').borderRadius(0)
           .accessibilityText('关闭会话列表').onClick(() => { this.setDrawer(false); })
