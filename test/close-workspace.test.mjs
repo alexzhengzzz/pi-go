@@ -32,12 +32,12 @@ function fakeWorker(context, ipc, { id, cwd, idle, name }) {
 
 // A Pi Desktop host that records close requests and shuts the matching fake workers down,
 // mirroring how removing a workspace stops its Pi processes.
-function fakeHost(context, ipc, workers, onClosed) {
+function fakeHost(context, ipc, workers, onClosed, onCreated) {
   const path = join(ipc, `host-${process.pid}.sock`);
   const closed = [];
   const server = createServer(async (req, res) => {
     const reply = (status, data) => { res.writeHead(status, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); };
-    if (req.method === "GET" && req.url === "/health") return reply(200, { protocol: "pi-go-desktop-host/1", profile });
+    if (req.method === "GET" && req.url === "/health") return reply(200, { protocol: "pi-go-desktop-host/1", profile, canCreateWorkspace: Boolean(onCreated) });
     if (req.method !== "POST") return reply(404, { error: "not_found" });
     let body = "";
     for await (const chunk of req) body += chunk;
@@ -45,6 +45,7 @@ function fakeHost(context, ipc, workers, onClosed) {
     if (req.url === "/authorize") return reply(200, { cwd: input.cwd, profile });
     if (req.url === "/catalog") return reply(200, { sessions: [] });
     if (req.url === "/projects") return reply(200, { projects: [] });
+    if (req.url === "/create-workspace" && onCreated) return reply(200, onCreated(input));
     if (req.url === "/close-workspace") {
       closed.push(input.cwd);
       if (onClosed?.(input, reply)) return;
@@ -92,6 +93,32 @@ async function reservePort() {
   return port;
 }
 
+test("creating a space requires pairing, computer access and Desktop support", { timeout: 30000 }, async (context) => {
+  const ipc = await mkdtemp(join(tmpdir(), "pigo-create-"));
+  context.after(async () => { await rm(ipc, { force: true, recursive: true }); });
+  const port = await reservePort();
+  const requests = [];
+  const host = fakeHost(context, ipc, [], undefined, (input) => {
+    requests.push(input);
+    return { cwd: join(ipc, input.name) };
+  });
+  await host.ready;
+  const phone = await pairBroker(context, ipc, port);
+  const input = { name: "测试 空间" };
+
+  assert.equal((await phone.post("/create-workspace", input, {})).status, 401);
+  assert.equal((await phone.get("/sessions")).canCreateWorkspace, false);
+  assert.deepEqual(await phone.post("/create-workspace", input), { status: 403, data: { error: "computer_access_required" } });
+  assert.deepEqual(requests, []);
+
+  assert.equal((await localRequest(join(ipc, `bridge-${port}.sock`), "POST", "/computer-access")).status, 200);
+  assert.equal((await phone.get("/sessions")).canCreateWorkspace, true);
+  assert.equal((await phone.post("/create-workspace", { cwd: "/other" })).status, 400);
+  assert.deepEqual(await phone.post("/create-workspace", { ...input, cwd: "/other" }),
+    { status: 200, data: { cwd: join(ipc, input.name) } });
+  assert.deepEqual(requests, [input]);
+});
+
 test("phone closes workspaces on the host, forgets grants and stops hosting sessions", { timeout: 30000 }, async (context) => {
   const ipc = await mkdtemp(join(tmpdir(), "pigo-close-"));
   context.after(async () => { await rm(ipc, { force: true, recursive: true }); });
@@ -108,6 +135,10 @@ test("phone closes workspaces on the host, forgets grants and stops hosting sess
   await Promise.all([a.ready, b.ready, host.ready]);
 
   const phone = await pairBroker(context, ipc, port);
+
+  assert.equal((await localRequest(join(ipc, `bridge-${port}.sock`), "POST", "/computer-access")).status, 200);
+  assert.equal((await phone.get("/sessions")).canCreateWorkspace, false);
+  assert.equal((await phone.post("/create-workspace", { name: "new" })).data.error, "desktop_workspace_creation_unsupported");
 
   // Unauthenticated and malformed requests never reach the host.
   assert.equal((await phone.post("/close-workspace", { cwd: projectDir }, {})).status, 401);

@@ -1,4 +1,4 @@
-import { FrameCallback, KeyboardAvoidMode, window } from '@kit.ArkUI';
+import { KeyboardAvoidMode, window } from '@kit.ArkUI';
 import { inputMethod } from '@kit.IMEKit';
 import { ChatContent } from '../ChatContent';
 import { ChatImage } from '../ChatImage';
@@ -212,6 +212,8 @@ interface BridgeReply {
   interaction?: PendingInteraction;
   state?: string;
   desktopHandoff?: boolean;
+  canCreateWorkspace?: boolean;
+  cwd?: string;
   projects?: string[];
   token?: string;
   error?: string;
@@ -296,13 +298,6 @@ const SHORT_WINDOW_HEIGHT = 480;
 const MAX_DOWNLOAD_ERROR_BYTES = 4096;
 const MAX_TEXT_PREVIEW_BYTES = 128 * 1024;
 
-class CachePaintFrame extends FrameCallback {
-  private started: number;
-  constructor(started: number) { super(); this.started = started; }
-  onFrame(_time: number): void {}
-  onIdle(_time: number): void { console.info(`[DEBUG-chat-cache] painted ${Date.now() - this.started}ms`); }
-}
-
 class BridgeFailure extends Error {
   status: number;
   constructor(status: number, message: string) {
@@ -344,8 +339,8 @@ struct Index {
   private currentLevel: string = 'off';
   private pendingBottom: boolean = false;
   @State private openingSession: boolean = false;
+  @State private openingSessionId: string = '';
   private pendingSessionReveal: string = '';
-  private navigationStarted: number = 0;
   @State private ticket: string = '';
   @State private pairingMode: string = 'usb';
   @State private pairingBundle: string = '';
@@ -361,6 +356,8 @@ struct Index {
   @State private queued: boolean = false;
   @State private acceptsImage: boolean = false;
   @State private attachments: DraftAttachment[] = [];
+  @State private showComposerMenu: boolean = false;
+  @State private showSkillPicker: boolean = false;
   @State private project: string = '';
   private workspaceCwd: string = '';
   private imageQueue: Promise<void> = Promise.resolve();
@@ -435,7 +432,6 @@ struct Index {
   @State private sessionPaneDragging: boolean = false;
   private sessionPaneDragStart: number = 0;
   @State private expandedSpaces: string[] = [];
-  @State private tasksExpanded: boolean = true;
   @State private offlineDismissed: boolean = false;
   @State private activeTab: string = 'tasks';
   @State private minePage: string = '';
@@ -460,16 +456,16 @@ struct Index {
   private cloudRevision: number = 0;
   private readonly pendingCloudRows: Map<string, SyncRow> = new Map<string, SyncRow>();
 
-  @State private sessionQuery: string = '';
-  @State private sessionTotal: number = 0;
-  @State private sessionCursor?: number = undefined;
-  private loadedQuery: string = '';
   @State private sessionView: string = 'all';
-  private loadedView: string = 'all';
+  @State private loadedView: string = 'all';
   @State private interaction?: PendingInteraction = undefined;
   @State private interactionDraft: string = '';
   @State private pendingSend?: PendingSend = undefined;
   @State private desktopHandoff: boolean = false;
+  @State private canCreateWorkspace: boolean = false;
+  @State private showNewSpace: boolean = false;
+  @State private newSpaceName: string = '';
+  @State private newSpaceError: string = '';
   @State private voiceMode: boolean = false;
   @State private recording: boolean = false;
   @State private recordSeconds: number = 0;
@@ -497,6 +493,7 @@ struct Index {
   private visible: boolean = false;
   private polling: boolean = false;
   @State private sessionLoading: boolean = false;
+  @State private sessionCatalogFailed: boolean = false;
   private sessionCatalogLoaded: boolean = false;
   private sessionCatalogUpdatedAt: number = 0;
   @State private commandRows: CommandRow[] = [];
@@ -536,7 +533,8 @@ struct Index {
     if (this.recording || this.voicePreparing || this.voiceFinishing) { this.resetVoice(); return true; }
     if (this.showToolDetails) { this.closeToolDetails(); return true; }
     if (this.showModelMenu) { this.showModelMenu = false; return true; }
-    if (this.showSessions) { this.showSessions = false; return true; }
+    if (this.showNewSpace) { this.closeNewSpace(); return true; }
+    if (this.showSessions) { this.setDrawer(false); return true; }
     if (this.showSettings) { this.showSettings = false; return true; }
     if (this.showFiles) { this.fileBack(); return true; }
     if (this.activeTab === 'mine' && this.minePage) {
@@ -695,7 +693,7 @@ struct Index {
         usingProxy: false,
         maxRedirects: 0,
         connectTimeout: 2500,
-        readTimeout: path === '/open' || path === '/new' || path === '/close-workspace' ? 16000 : 6500
+        readTimeout: path === '/open' || path === '/new' || path === '/create-workspace' || path === '/close-workspace' ? 16000 : 6500
       };
       if (ca && pin) {
         opts.caData = ca;
@@ -1036,12 +1034,9 @@ struct Index {
     this.chatCache.clear();
     this.runningSessionIds = [];
     this.runningSessions = [];
-    this.sessionQuery = '';
-    this.loadedQuery = '';
     this.sessionView = 'all';
     this.loadedView = 'all';
-    this.sessionTotal = 0;
-    this.sessionCursor = undefined;
+    this.sessionCatalogFailed = false;
     this.draft = '';
     this.showSessions = false;
     this.showSettings = false;
@@ -1050,6 +1045,10 @@ struct Index {
     this.setInteraction();
     this.pendingSend = undefined;
     this.desktopHandoff = false;
+    this.canCreateWorkspace = false;
+    this.showNewSpace = false;
+    this.newSpaceName = '';
+    this.newSpaceError = '';
     this.projects = [];
     this.isPaired = false;
     this.runId = '';
@@ -1172,7 +1171,9 @@ struct Index {
       this.reachable = true;
       this.offlineDismissed = false;
       const libraryVisible = this.showSessions || this.dockedSessions();
-      if (libraryVisible && (!this.sessionCatalogLoaded || connected) && !this.busy) void this.loadSessions();
+      if (libraryVisible && (connected || (!this.sessionCatalogLoaded && !this.sessionCatalogFailed)) && !this.busy) {
+        void this.loadSessions();
+      }
       if (libraryVisible) {
         this.sessionStatusAt = Date.now();
         void this.loadSessionStatus();
@@ -1417,35 +1418,41 @@ struct Index {
     return '运行中';
   }
 
-  private async loadSessions(more: boolean = false): Promise<void> {
-    if (this.busy || this.openingSession || this.sessionLoading || (more && this.sessionCursor === undefined)) return;
+  private async loadSessions(): Promise<void> {
+    if (this.busy || this.openingSession || this.sessionLoading) return;
     const epoch = this.epoch;
     const version = this.sessionCatalogVersion;
-    const query = more ? this.loadedQuery : this.sessionQuery.trim();
-    const cursor = more ? this.sessionCursor : 0;
-    const view = more ? this.loadedView : this.sessionView;
+    const view = this.sessionView;
     this.sessionLoading = true;
+    this.sessionCatalogFailed = false;
     try {
-      const result = await this.request(`/sessions?limit=30&cursor=${cursor}&view=${view}&query=${encodeURIComponent(query)}`);
-      if (epoch !== this.epoch || version !== this.sessionCatalogVersion) return;
+      const sessions: SessionRow[] = [];
+      const ids = new Set<string>();
+      let cursor: number | undefined = 0;
+      let result: BridgeReply;
+      do {
+        result = await this.request(`/sessions?limit=100&cursor=${cursor}&view=${view}`);
+        if (epoch !== this.epoch || version !== this.sessionCatalogVersion) return;
+        // The live catalog can move between pages; keep one row per session.
+        for (const row of result.sessions ?? []) {
+          if (ids.has(row.id)) continue;
+          ids.add(row.id);
+          sessions.push(row);
+        }
+        const next = result.nextCursor;
+        cursor = next !== undefined && next > cursor ? next : undefined;
+      } while (cursor !== undefined);
       this.sessionCatalogLoaded = true;
       this.sessionCatalogUpdatedAt = Date.now();
-      const incoming = result.sessions ?? [];
-      if (more) {
-        // The live catalog can move between pages; keep one row per session.
-        const ids = new Set<string>(this.sessions.map((row: SessionRow): string => row.id));
-        this.sessions = this.sessions.concat(incoming.filter((row: SessionRow): boolean => !ids.has(row.id)));
-      } else this.sessions = incoming;
-      this.loadedQuery = query;
+      this.sessions = sessions;
       this.loadedView = view;
-      this.sessionTotal = result.total ?? this.sessions.length;
-      this.sessionCursor = result.nextCursor;
       this.desktopHandoff = result.desktopHandoff ?? false;
+      this.canCreateWorkspace = result.canCreateWorkspace ?? false;
       this.projects = result.projects ?? [];
     } catch (error) {
       if (epoch !== this.epoch || version !== this.sessionCatalogVersion) return;
       if (error instanceof BridgeFailure && error.status === 401) this.leaveComputer(true);
-      else this.status = '会话列表加载失败，请重试。';
+      else this.sessionCatalogFailed = true;
     } finally { this.sessionLoading = false; }
   }
 
@@ -2192,39 +2199,104 @@ struct Index {
     if (await this.requestAction('/session-meta', payload)) await this.loadSessions();
   }
 
-  private async openSpaceActions(path: string): Promise<void> {
-    const epoch = this.epoch;
-    const prompt = this.getUIContext().getPromptAction();
-    let selected: number;
-    try {
-      const result = await prompt.showActionMenu({
-        title: path.split('/').pop() || path,
-        buttons: [
-          { text: '新建任务', color: $r('app.color.pigo_text') },
-          { text: '移除空间', color: $r('app.color.pigo_error') }
-        ]
+  private createSpaceTask(path: string): void {
+    if (!this.projects.includes(path)) return;
+    if (!this.reachable || !this.desktopHandoff) {
+      this.getUIContext().getPromptAction().showToast({
+        message: this.reachable ? '此电脑未启用 Pi Go 集成，无法新建任务。' : '请先连接电脑再新建任务。'
       });
-      selected = result.index;
-    } catch { return; }
-    if (epoch !== this.epoch || !this.projects.includes(path)) return;
-    if (selected === 1) {
-      this.confirmCloseSpace(path);
-    } else if (selected === 0) {
-      if (!this.reachable || !this.desktopHandoff) {
-        prompt.showToast({ message: this.reachable ? '此电脑未启用 Pi Go 集成，无法新建任务。' : '请先连接电脑再新建任务。' });
+      return;
+    }
+    this.activeTab = 'tasks';
+    void this.requestAction('/new', { cwd: path });
+  }
+
+  private newTaskOptions(): MenuElement[] {
+    const options = this.projects.map((path: string): MenuElement => ({
+      value: path.split('/').pop() || path,
+      action: () => { this.createSpaceTask(path); }
+    }));
+    if (this.canCreateWorkspace) {
+      options.push({ value: '新空间', action: () => {
+        if (!this.reachable || this.busy || this.openingSession || !this.canCreateWorkspace) return;
+        this.newSpaceName = '';
+        this.newSpaceError = '';
+        this.showNewSpace = true;
+      } });
+    }
+    return options;
+  }
+
+  private closeNewSpace(): void {
+    if (this.busy) return;
+    this.dismissKeyboard();
+    this.showNewSpace = false;
+  }
+
+  private async createWorkspaceTask(): Promise<void> {
+    if (!this.showNewSpace || !this.reachable || !this.canCreateWorkspace || this.busy || this.openingSession) return;
+    const rawName = this.newSpaceName;
+    const name = rawName.trim();
+    if (!name || name.length > 80 || name === '.' || name === '..' || /[\x00-\x1f\x7f/\\]/.test(rawName)) {
+      this.newSpaceError = '请输入 1–80 个字符，名称不能是「.」「..」或包含路径分隔符和控制字符。';
+      return;
+    }
+    const epoch = this.epoch;
+    this.newSpaceError = '';
+    this.busy = true;
+    let cwd = '';
+    let refresh = false;
+    try {
+      const result = await this.request('/create-workspace', { name: name });
+      if (epoch !== this.epoch) return;
+      if (!result.cwd) throw new Error('workspace_not_confirmed');
+      cwd = result.cwd;
+    } catch (error) {
+      if (epoch !== this.epoch) return;
+      if (error instanceof BridgeFailure && error.status === 401) {
+        this.leaveComputer(true);
         return;
       }
-      this.activeTab = 'tasks';
-      void this.requestAction('/new', { cwd: path });
+      const code = error instanceof BridgeFailure ? error.message : '';
+      if (code === 'workspace_exists') this.newSpaceError = '已有同名文件夹，请换一个名称。';
+      else if (code === 'desktop_busy') this.newSpaceError = '电脑端正在处理其他操作，请稍后再试。';
+      else if (code === 'desktop_workspace_creation_unsupported' || code === 'not_found') this.newSpaceError = '请更新电脑端 Pi Go 后再创建空间。';
+      else if (code === 'computer_access_required') this.newSpaceError = '此连接需要启用整机访问才能创建空间。';
+      else if (code === 'desktop_create_workspace_failed') this.newSpaceError = '电脑端创建空间失败，请检查默认目录。';
+      else {
+        refresh = true;
+        this.newSpaceError = '电脑端未确认结果，请先查看空间列表。';
+      }
+    } finally {
+      this.busy = false;
+    }
+    if (refresh) {
+      this.sessionCatalogLoaded = false;
+      this.sessionCatalogVersion += 1;
+      void this.loadSessions();
+      return;
+    }
+    if (!cwd) return;
+    this.closeNewSpace();
+    if (!this.projects.includes(cwd)) this.projects = this.projects.concat([cwd]).sort();
+    if (!this.expandedSpaces.includes(cwd)) this.expandedSpaces = this.expandedSpaces.concat([cwd]);
+    this.sessionCatalogLoaded = false;
+    this.sessionCatalogVersion += 1;
+    this.scheduleSidebarSave();
+    this.activeTab = 'tasks';
+    if (!(await this.requestAction('/new', { cwd: cwd })) && this.epoch === epoch + 1) {
+      this.getUIContext().getPromptAction().showToast({
+        message: `空间已创建。${this.status || '暂时无法打开任务。'}`
+      });
     }
   }
 
-  private confirmCloseSpace(path: string): void {
+  private confirmCloseSpace(path: string, epoch: number): void {
+    if (epoch !== this.epoch || !this.projects.includes(path)) return;
     const name = path.split('/').pop() || path;
     const prompt = this.getUIContext().getPromptAction();
     if (!this.isPaired || !this.reachable) { prompt.showToast({ message: '请先连接电脑再移除空间。' }); return; }
     if (this.busy || this.openingSession) { prompt.showToast({ message: '请等待当前操作结束后再移除空间。' }); return; }
-    const epoch = this.epoch;
     this.getUIContext().showAlertDialog({
       title: '移除空间',
       message: `「${name}」将从 Pi Desktop 的侧边栏移除，进行中的任务会停止。文件和会话历史会保留。`,
@@ -2237,7 +2309,9 @@ struct Index {
       secondaryButton: {
         value: '移除空间',
         fontColor: $r('app.color.pigo_error'),
-        action: () => { if (epoch === this.epoch) void this.closeWorkspace(path); }
+        action: () => {
+          if (epoch === this.epoch && this.projects.includes(path)) void this.closeWorkspace(path);
+        }
       }
     });
   }
@@ -2269,10 +2343,9 @@ struct Index {
     let navigationConfirmed = false;
     const epoch = navigation ? ++this.epoch : this.epoch;
     if (navigation) {
-      this.navigationStarted = Date.now();
-      console.info(`[DEBUG-chat-cache] start cached=${!!cached}`);
       this.resetVoice();
       this.openingSession = true;
+      this.openingSessionId = path === '/open' ? input?.id ?? '' : '';
       this.pendingSessionReveal = '';
       this.cancelSchedule();
       if (cached) this.presentChat(cached, true);
@@ -2280,7 +2353,6 @@ struct Index {
     this.status = '';
     try {
       const result = await this.request(path, input);
-      if (navigation) console.info(`[DEBUG-chat-cache] open ${Date.now() - this.navigationStarted}ms`);
       if (epoch !== this.epoch) return false;
       if (path === '/new' || path === '/rename' || path === '/session-meta' || path === '/close-workspace') {
         this.sessionCatalogLoaded = false;
@@ -2346,10 +2418,14 @@ struct Index {
       else if (error instanceof BridgeFailure && error.message === 'invalid_name') this.status = '名称须为 1–200 字且不含换行。';
       else if (error instanceof BridgeFailure && error.status === 409) this.status = 'Pi 正在处理任务或会话已变化，请刷新后再试。';
       else this.status = '操作未确认，请查看桌面；不会自动重试。';
+      if (path === '/open' && this.showSessions && this.status) {
+        this.getUIContext().getPromptAction().showToast({ message: this.status });
+      }
       return false;
     } finally {
       if (navigation) {
         this.openingSession = false;
+        this.openingSessionId = '';
         if (epoch === this.epoch) {
           this.syncCommandPalette();
           this.schedule(this.reachable && !this.idle ? 650 : 1500);
@@ -2584,6 +2660,7 @@ struct Index {
     this.commandPalette = false;
     this.commandRows = [];
     this.commandsLoadedAt = 0;
+    this.showComposerMenu = false;
   }
 
   private async loadCommands(): Promise<void> {
@@ -2610,9 +2687,30 @@ struct Index {
     }
   }
 
-  private pickCommand(row: CommandRow): void {
-    this.draft = `${row.invoke ?? `/${row.name}`} `;
+  private pickCommand(row: CommandRow, prompt: string = ''): void {
+    this.draft = `${row.invoke ?? `/${row.name}`} ${prompt}`;
     this.commandPalette = false;
+  }
+
+  private openComposerMenu(): void {
+    this.dismissKeyboard();
+    this.showSkillPicker = false;
+    this.showComposerMenu = true;
+  }
+
+  private openSkillPicker(): void {
+    this.showSkillPicker = true;
+    if (!this.commandsLoadedAt || Date.now() - this.commandsLoadedAt >= 60000) void this.loadCommands();
+  }
+
+  private availableSkills(): CommandRow[] {
+    return this.commandRows.filter((row: CommandRow): boolean => row.source === 'skill');
+  }
+
+  private pickSkill(row: CommandRow): void {
+    this.pickCommand(row, this.draft.replace(/^\s*\/skill:\S*\s*/, ''));
+    this.voiceMode = false;
+    this.showComposerMenu = false;
   }
 
   private commandSourceLabel(source: string): string {
@@ -4010,7 +4108,7 @@ struct Index {
                     if (message.imageCount) {
                       Column({ space: 6 }) {
                         this.historyImages(message.imageCount, this.currentId, message.id)
-                      }.id(`image-message-${message.id}`).width('100%')
+                      }.id(`image-message-${message.id}`).alignItems(HorizontalAlign.Start)
                     }
                   }.alignItems(HorizontalAlign.Start).padding(message.role === 'user' ?
                     { left: 14, right: 14, top: 10, bottom: 10 } : 0)
@@ -4130,6 +4228,99 @@ struct Index {
   }
 
   @Builder
+  composerMenuAction(label: string, symbol: Resource, id: string, enabled: boolean, action: () => void) {
+    Button({ type: ButtonType.Normal }) {
+      Column({ space: 8 }) {
+        SymbolGlyph(symbol).fontSize(26).fontColor([$r('app.color.pigo_text')])
+        Text(label).fontSize(14).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
+      }.width('100%').justifyContent(FlexAlign.Center)
+    }.id(id).layoutWeight(1).height(86).padding(0).borderRadius(14)
+      .backgroundColor($r('app.color.pigo_control')).enabled(enabled).onClick(action)
+  }
+
+  @Builder
+  skillPicker() {
+    Row({ space: 8 }) {
+      Button({ type: ButtonType.Normal }) {
+        Image($r('app.media.ic_chevron')).width(20).height(20).rotate({ angle: 90 })
+          .fillColor($r('app.color.pigo_text'))
+      }.width(44).height(44).borderRadius(12).padding(0).backgroundColor(Color.Transparent)
+        .accessibilityText('返回添加菜单').onClick(() => { this.showSkillPicker = false; })
+      Text('技能').fontSize(20).fontWeight(FontWeight.Bold).fontColor($r('app.color.pigo_text'))
+    }.width('100%')
+    if (this.attachments.length) {
+      Text('使用技能前请先移除附件。').fontSize(13).fontColor($r('app.color.pigo_muted')).width('100%')
+    }
+    if (this.commandsLoading) {
+      Text('正在加载技能…').fontSize(14).fontColor($r('app.color.pigo_muted')).width('100%')
+    } else if (this.commandError) {
+      Button(this.commandError).chatAction().width('100%')
+        .onClick(() => { void this.loadCommands(); })
+    } else if (!this.availableSkills().length) {
+      Text('当前会话没有可用技能。').fontSize(14).fontColor($r('app.color.pigo_muted')).width('100%')
+    } else {
+      Scroll() {
+        Column({ space: 6 }) {
+          ForEach(this.availableSkills(), (row: CommandRow) => {
+            Button({ type: ButtonType.Normal }) {
+              Column({ space: 4 }) {
+                Text(row.name.replace(/^skill:/, '')).fontSize(15).fontWeight(FontWeight.Medium)
+                  .fontColor($r('app.color.pigo_text')).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+                if (row.description) {
+                  Text(row.description).fontSize(13).fontColor($r('app.color.pigo_muted'))
+                    .maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis })
+                }
+              }.width('100%').alignItems(HorizontalAlign.Start)
+            }.id(`composer-skill-${row.name}`).width('100%').constraintSize({ minHeight: 48 })
+              .padding({ left: 12, right: 12, top: 10, bottom: 10 }).borderRadius(12)
+              .backgroundColor($r('app.color.pigo_control'))
+              .enabled(this.reachable && !this.openingSession && !this.pendingSend)
+              .onClick(() => { this.pickSkill(row); })
+          }, (row: CommandRow) => row.name)
+        }.width('100%')
+      }.width('100%').align(Alignment.TopStart)
+        .constraintSize({ maxHeight: Math.min(320, Math.max(72, this.windowHeight - 180)) })
+    }
+  }
+
+  @Builder
+  composerMenu() {
+    Column({ space: 12 }) {
+      if (this.showSkillPicker) {
+        this.skillPicker()
+      } else {
+        Row({ space: 8 }) {
+          this.composerMenuAction('拍照', $r('sys.symbol.camera'), 'composer-camera', this.acceptsImage, () => {
+            this.showComposerMenu = false;
+            void this.attachImage('camera');
+          })
+          this.composerMenuAction('照片', $r('sys.symbol.picture'), 'composer-photos', this.acceptsImage, () => {
+            this.showComposerMenu = false;
+            void this.attachImage('gallery');
+          })
+          this.composerMenuAction('添加文件', $r('sys.symbol.paperclip'), 'composer-files', true, () => {
+            this.showComposerMenu = false;
+            void this.attachFile();
+          })
+        }.width('100%')
+        if (!this.acceptsImage) {
+          Text('当前模型不支持图片输入。').fontSize(13).fontColor($r('app.color.pigo_muted')).width('100%')
+        }
+        Button({ type: ButtonType.Normal }) {
+          Row({ space: 10 }) {
+            SymbolGlyph($r('sys.symbol.wand_and_stars')).fontSize(22).fontColor([$r('app.color.pigo_text')])
+            Text('技能').fontSize(16).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text')).layoutWeight(1)
+            Image($r('app.media.ic_chevron')).width(18).height(18).rotate({ angle: -90 })
+              .fillColor($r('app.color.pigo_muted'))
+          }.width('100%')
+        }.id('composer-skills').width('100%').height(48).padding({ left: 10, right: 10 })
+          .borderRadius(12).backgroundColor(Color.Transparent).onClick(() => { this.openSkillPicker(); })
+      }
+    }.id('composer-menu').width('100%').constraintSize({ maxWidth: 560 })
+      .padding({ left: 16, right: 16, top: 14, bottom: 16 })
+  }
+
+  @Builder
   composer() {
     Column({ space: 2 }) {
       if (this.attachments.length) {
@@ -4160,7 +4351,8 @@ struct Index {
                 .padding(item.kind === 'file' ? 6 : 0)
             }, (item: DraftAttachment, index: number) => `${index}-${item.kind}-${item.name}-${item.size}`)
           }.padding({ bottom: 2 })
-        }.scrollable(ScrollDirection.Horizontal).scrollBar(BarState.Off).width('100%').height(70)
+        }.scrollable(ScrollDirection.Horizontal).scrollBar(BarState.Off).align(Alignment.Start)
+          .width('100%').height(70).padding({ left: 6, right: 6 })
       }
       if (this.voiceMode) {
         Button({ type: ButtonType.Normal }) {
@@ -4187,17 +4379,6 @@ struct Index {
           .enabled(!!this.currentId && !this.pendingSend && !this.busy && !this.recording && !this.voicePreparing && !this.voiceFinishing)
           .onClick(() => { this.voiceMode = !this.voiceMode; this.liveVoiceText = ''; this.status = ''; if (this.voiceMode) this.dismissKeyboard(); })
         Button({ type: ButtonType.Normal }) {
-          Image($r('app.media.ic_plus')).width(22).height(22).fillColor($r('app.color.pigo_muted'))
-        }.id('attach-image').width(44).height(44).padding(0).backgroundColor(Color.Transparent).borderRadius(12)
-          .accessibilityText('添加图片或文件').enabled(this.reachable && !this.busy && !this.openingSession && !this.pendingSend && !this.recording)
-          .bindMenu(this.acceptsImage ? [
-            { value: '拍摄照片', action: (): void => { void this.attachImage('camera'); } },
-            { value: '从相册选择', action: (): void => { void this.attachImage('gallery'); } },
-            { value: '选择文件', action: (): void => { void this.attachFile(); } }
-          ] : [
-            { value: '选择文件', action: (): void => { void this.attachFile(); } }
-          ])
-        Button({ type: ButtonType.Normal }) {
           Row({ space: 5 }) {
             Text(this.modelLabel || '选择模型').fontSize(12).fontWeight(FontWeight.Medium)
               .fontColor($r('app.color.pigo_muted')).maxLines(1)
@@ -4210,6 +4391,17 @@ struct Index {
           .enabled(this.reachable && !this.busy && !this.openingSession && !!this.currentId && this.idle && !this.queued)
           .onClick(() => { void this.openModelMenu(); })
         Blank()
+        Button({ type: ButtonType.Normal }) {
+          Image($r('app.media.ic_plus')).width(22).height(22).fillColor($r('app.color.pigo_muted'))
+        }.id('attach-image').width(44).height(44).padding(0).backgroundColor(Color.Transparent).borderRadius(12)
+          .accessibilityText('添加附件或技能')
+          .enabled(!!this.currentId && this.reachable && !this.busy && !this.openingSession && !this.pendingSend &&
+            !this.recording && !this.voicePreparing && !this.voiceFinishing)
+          .onClick(() => { this.openComposerMenu(); })
+          .bindSheet($$this.showComposerMenu, this.composerMenu(), {
+            height: SheetSize.FIT_CONTENT, preferType: SheetType.BOTTOM, showClose: false,
+            backgroundColor: $r('app.color.pigo_panel'), maskColor: '#66000000'
+          })
         if (this.idle || this.hasDraft()) {
           Button({ type: ButtonType.Normal }) {
             Image($r('app.media.ic_send')).width(22).height(22)
@@ -4273,7 +4465,6 @@ struct Index {
     if (this.pendingSessionReveal === id) {
       this.pendingSessionReveal = '';
       this.showSessions = false;
-      this.getUIContext().postFrameCallback(new CachePaintFrame(this.navigationStarted));
     }
   }
 
@@ -4295,13 +4486,21 @@ struct Index {
     // Reuse the catalog for quick drawer toggles; stale data stays usable during refresh.
     if (open && this.reachable && (!this.sessionCatalogLoaded ||
       Date.now() - this.sessionCatalogUpdatedAt >= 30000 ||
-      this.loadedQuery !== this.sessionQuery.trim() || this.loadedView !== this.sessionView)) {
+      this.loadedView !== this.sessionView)) {
       void this.loadSessions();
     }
   }
 
   private dockedSessions(): boolean {
     return this.isPaired && this.activeTab !== 'mine' && this.windowWidth >= SPLIT_WINDOW_WIDTH;
+  }
+
+  private drawerOpen(): boolean {
+    return this.showSessions && this.isPaired && !this.dockedSessions();
+  }
+
+  private drawerWidth(): number {
+    return Math.min(420, this.windowWidth * 0.82);
   }
 
   private sessionPaneWidth(preferred: number | undefined = this.preferredSessionPaneWidth): number {
@@ -4311,7 +4510,7 @@ struct Index {
 
   private compactSessionPane(): boolean {
     if (this.dockedSessions()) return this.sessionPaneWidth() < 208;
-    return this.windowWidth > 0 && this.windowWidth * 0.84 < 208;
+    return this.windowWidth > 0 && this.drawerWidth() < 208;
   }
 
   private onWindowWidthChange(): void {
@@ -4338,15 +4537,6 @@ struct Index {
     return validUsb(this.base) ? 'USB 电脑' : (this.base.split('://')[1] || '我的电脑');
   }
 
-  // Spaces mirror the desktop project list only; sessions in unshared directories stay under Tasks.
-  private spacePaths(): string[] {
-    return this.projects.slice();
-  }
-
-  private unfiledSessions(): SessionRow[] {
-    return this.sessions.filter((session: SessionRow): boolean => !session.cwd || !this.projects.includes(session.cwd));
-  }
-
   private spaceSessions(path: string): SessionRow[] {
     return this.sessions.filter((session: SessionRow): boolean => (session.cwd || '') === path);
   }
@@ -4357,16 +4547,27 @@ struct Index {
     this.scheduleSidebarSave();
   }
 
-  private toggleTasks(): void {
-    this.tasksExpanded = !this.tasksExpanded;
+  private sessionViewLabel(view: string): string {
+    return view === 'all' ? '空间' : view === 'pinned' ? '置顶' : view === 'recent' ? '最近' : '归档';
+  }
+
+  private selectSessionView(view: string): void {
+    if (this.busy || this.sessionLoading || !this.reachable) return;
+    this.sessionView = view;
     this.scheduleSidebarSave();
+    void this.loadSessions();
+  }
+
+  private sessionViewOptions(): MenuElement[] {
+    return SIDEBAR_VIEWS.map((view: string): MenuElement => ({
+      value: this.sessionViewLabel(view), action: (): void => { this.selectSessionView(view); }
+    }));
   }
 
   // Sidebar choices are per computer: folders stay collapsed on connect unless the user opened them.
   private applySidebar(address: string): void {
     const entry = this.sidebarBook.entries.find((kept: SidebarEntry): boolean => kept.address === address);
     this.expandedSpaces = entry ? entry.state.expandedSpaces.slice() : [];
-    this.tasksExpanded = entry ? entry.state.tasksExpanded : true;
     this.sessionView = entry && SIDEBAR_VIEWS.includes(entry.state.sessionView) ? entry.state.sessionView : 'all';
     this.loadedView = this.sessionView;
   }
@@ -4375,7 +4576,6 @@ struct Index {
     if (!this.base) return;
     const state: SidebarState = {
       expandedSpaces: this.expandedSpaces.slice(0, SIDEBAR_MAX_EXPANDED),
-      tasksExpanded: this.tasksExpanded,
       sessionView: SIDEBAR_VIEWS.includes(this.sessionView) ? this.sessionView : 'all'
     };
     const entry: SidebarEntry = { address: this.base, state: state };
@@ -4581,7 +4781,10 @@ struct Index {
                 .fontSize(16).fontColor($r('app.color.pigo_text')).maxLines(1)
             }.scrollable(ScrollDirection.Horizontal).scrollBar(BarState.Off).layoutWeight(1).align(Alignment.Start)
           }
-          if (this.sessionRunning(session.id)) {
+          if (session.id === this.openingSessionId) {
+            Text('正在打开…').id('session-opening').fontSize(11).fontColor(this.accent()).maxLines(1)
+              .margin({ left: this.compactSessionPane() ? 0 : 8, top: this.compactSessionPane() ? 2 : 0 })
+          } else if (this.sessionRunning(session.id)) {
             Row({ space: 4 }) {
               Text('').width(6).height(6).borderRadius(3)
                 .backgroundColor(this.stateColor(this.sessionState(session.id)))
@@ -4592,13 +4795,14 @@ struct Index {
           }
         }.width('100%').height('100%')
       }.id(`session-${session.id}`).layoutWeight(1)
-        .height(this.compactSessionPane() && this.sessionRunning(session.id) ? 54 : 46)
+        .height(this.compactSessionPane() && (session.id === this.openingSessionId || this.sessionRunning(session.id)) ? 54 : 46)
         .padding({ left: this.compactSessionPane() ? (nested ? 16 : 6) : (nested ? 40 : 12), right: 2 })
         .backgroundColor(Color.Transparent).enabled(!this.busy && (this.reachable || session.id === this.currentId))
+        .accessibilitySelected(session.id === this.currentId)
         .onClick(() => {
           if (this.openingSession) return;
           this.activeTab = 'tasks'; this.showSettings = false; this.showFiles = false;
-          if (session.id === this.currentId) this.showSessions = false;
+          if (session.id === this.currentId) this.setDrawer(false);
           else void this.requestAction('/open', { id: session.id });
         })
       Button({ type: ButtonType.Normal }) {
@@ -4609,8 +4813,9 @@ struct Index {
           { value: session.pinned ? '取消置顶' : '置顶', action: () => { void this.updateSessionMeta(session, true); } },
           { value: session.archived ? '取消归档' : '归档', action: () => { void this.updateSessionMeta(session, false); } }
         ])
-    }.width('100%').borderRadius(9)
-      .backgroundColor(session.id === this.currentId ? this.accentTint() : Color.Transparent)
+    }.width('100%').borderRadius(this.dockedSessions() ? 9 : 12)
+      .backgroundColor(session.id === this.openingSessionId || (session.id === this.currentId && this.dockedSessions()) ?
+        this.accentTint() : session.id === this.currentId ? $r('app.color.pigo_selected') : Color.Transparent)
       .onAreaChange((_oldArea: Area, newArea: Area) => {
         if (session.id !== this.currentId) return;
         this.libraryRowY = Number(newArea.globalPosition.y);
@@ -4704,45 +4909,19 @@ struct Index {
   }
 
   @Builder
+  spaceMenu(path: string, epoch: number) {
+    Menu() {
+      MenuItem({ content: '移除空间' }).id('space-remove').contentFontColor($r('app.color.pigo_error'))
+        .onClick(() => { this.confirmCloseSpace(path, epoch); })
+    }
+  }
+
+  @Builder
   sessionLibrary() {
-    Row({ space: 4 }) {
-      TextInput({ placeholder: '搜索任务', text: this.sessionQuery }).id('session-query').maxLength(100)
-        .layoutWeight(1).height(36).fontSize(13).fontColor($r('app.color.pigo_text')).placeholderColor($r('app.color.pigo_muted'))
-        .padding({ left: 8, right: 8 }).borderRadius(10)
-        .backgroundColor(this.compactSessionPane() ? $r('app.color.pigo_control') : $r('app.color.pigo_panel'))
-        .enabled(!this.busy && !this.sessionLoading)
-        .onChange((value: string) => { this.sessionQuery = value; }).onSubmit(() => { void this.loadSessions(); })
-      Button({ type: ButtonType.Normal }) {
-        Image($r('app.media.ic_search')).width(18).height(18).fillColor($r('app.color.pigo_text'))
-      }.id('session-search').width(36).height(36).padding(0).borderRadius(10)
-        .backgroundColor(this.compactSessionPane() ? $r('app.color.pigo_control') : $r('app.color.pigo_panel'))
-        .accessibilityText('搜索任务').enabled(this.reachable && !this.busy && !this.sessionLoading).onClick(() => { void this.loadSessions(); })
-    }.width('100%')
     Scroll(this.library) {
       Column({ space: 5 }) {
-        if (this.unfiledSessions().length || this.loadedQuery || this.sessionView !== 'all') {
-        Row({ space: 6 }) {
-          Text(this.loadedQuery ? '搜索结果' : '任务').fontSize(14).fontColor($r('app.color.pigo_muted'))
-          Image($r('app.media.ic_chevron')).width(14).height(14).fillColor($r('app.color.pigo_text')).rotate({ angle: this.tasksExpanded ? 0 : -90 }).opacity(0.5)
-          Blank()
-          Text(`${this.sessionTotal}`).fontSize(12).fontColor($r('app.color.pigo_muted'))
-        }.width('100%').height(this.compactSessionPane() ? 36 : 42)
-          .padding({ left: this.compactSessionPane() ? 4 : 12, right: this.compactSessionPane() ? 4 : 12 })
-          .onClick(() => { this.toggleTasks(); })
-        }
-        if (this.tasksExpanded) {
-          ForEach(this.unfiledSessions(), (session: SessionRow) => { this.taskRow(session, false) }, (session: SessionRow) => session.id)
-          if (this.loadedQuery || this.sessionView !== 'all') {
-            ForEach(this.sessions.filter((session: SessionRow): boolean => !!session.cwd && this.projects.includes(session.cwd)), (session: SessionRow) => {
-              this.taskRow(session, false)
-            }, (session: SessionRow) => session.id)
-          }
-        }
-        if (!this.loadedQuery && this.sessionView === 'all') {
-          Text(`空间 (${this.spacePaths().length})`).fontSize(14).fontColor($r('app.color.pigo_muted')).width('100%')
-            .padding({ left: this.compactSessionPane() ? 4 : 12, top: this.compactSessionPane() ? 12 : 24,
-              bottom: this.compactSessionPane() ? 4 : 12 })
-          ForEach(this.spacePaths(), (path: string) => {
+        if (this.sessionView === 'all') {
+          ForEach(this.projects, (path: string) => {
             Row({ space: 4 }) {
               Row({ space: this.compactSessionPane() ? 4 : 9 }) {
                 Image($r('app.media.ic_folder')).width(18).height(18).fillColor(this.accent())
@@ -4752,29 +4931,32 @@ struct Index {
                 Image($r('app.media.ic_chevron')).width(this.compactSessionPane() ? 12 : 18)
                   .height(this.compactSessionPane() ? 12 : 18).fillColor($r('app.color.pigo_text'))
                   .rotate({ angle: this.expandedSpaces.includes(path) ? 0 : -90 }).opacity(0.6)
-              }.layoutWeight(1).height(44).onClick(() => { this.toggleSpace(path); })
+              }.id(`space-${path}`).layoutWeight(1).height(44).onClick(() => { this.toggleSpace(path); })
+                .bindContextMenu(this.spaceMenu(path, this.epoch), ResponseType.LongPress, { placement: Placement.BottomLeft })
               Button({ type: ButtonType.Normal }) {
-                SymbolGlyph($r('sys.symbol.plus')).fontSize(20).fontColor([$r('app.color.pigo_text')])
-              }.id(`space-actions-${path}`).width(this.compactSessionPane() ? 40 : 44).height(44).padding(0).borderRadius(10)
-                .backgroundColor($r('app.color.pigo_control'))
-                .accessibilityText(`${path.split('/').pop() || path}空间操作`)
+                SymbolGlyph($r('sys.symbol.plus')).fontSize(16).fontColor([$r('app.color.pigo_muted')])
+              }.id(`space-new-task-${path}`).width(40).height(44).padding(0).borderRadius(10)
+                .backgroundColor(Color.Transparent)
+                .accessibilityText(`在${path.split('/').pop() || path}空间新建任务`)
                 .enabled(!this.busy && !this.openingSession)
-                .onClick(() => { void this.openSpaceActions(path); })
+                .onClick(() => { this.createSpaceTask(path); })
             }.width('100%').padding({ left: this.compactSessionPane() ? 4 : 8 })
               .onAreaChange((_oldArea: Area, newArea: Area) => {
                 if (path !== this.workspaceCwd) return;
                 this.librarySpaceY = Number(newArea.globalPosition.y);
                 if (this.pendingLibraryReveal) this.revealLibraryAnchor();
               })
-            if (this.expandedSpaces.includes(path)) {
+            if (this.expandedSpaces.includes(path) && this.loadedView === 'all') {
               ForEach(this.spaceSessions(path), (session: SessionRow) => { this.taskRow(session, true) }, (session: SessionRow) => session.id)
             }
           }, (path: string) => path)
+          if (!this.projects.length && !this.sessionLoading && !this.sessionCatalogFailed) Text(this.reachable ? '暂无空间' : '连接电脑后加载空间')
+            .fontSize(14).fontColor($r('app.color.pigo_muted')).width('100%').padding(this.compactSessionPane() ? 6 : 16)
+        } else if (this.loadedView === this.sessionView) {
+          ForEach(this.sessions, (session: SessionRow) => { this.taskRow(session, false) }, (session: SessionRow) => session.id)
+          if (!this.sessions.length && !this.sessionLoading && !this.sessionCatalogFailed) Text(this.reachable ? '暂无任务' : '连接电脑后加载任务')
+            .fontSize(14).fontColor($r('app.color.pigo_muted')).width('100%').padding(this.compactSessionPane() ? 6 : 16)
         }
-        if (!this.sessions.length) Text(this.loadedQuery ? '没有找到匹配的任务' : this.reachable ? '暂无任务，点击上方新建' : '连接电脑后加载任务')
-          .fontSize(14).fontColor($r('app.color.pigo_muted')).width('100%').padding(this.compactSessionPane() ? 6 : 16)
-        if (this.sessionCursor !== undefined) Button('加载更多').chatAction().id('session-more').width('100%').height(38)
-          .enabled(this.reachable && !this.busy && !this.sessionLoading).onClick(() => { void this.loadSessions(true); })
       }.width('100%').alignItems(HorizontalAlign.Start).padding({ bottom: 20 })
     }.layoutWeight(1).width('100%').align(Alignment.TopStart).scrollBar(BarState.Off)
       .onAreaChange((_oldArea: Area, newArea: Area) => {
@@ -4785,18 +4967,25 @@ struct Index {
 
   @Builder
   sessionDrawer() {
-    Column({ space: this.compactSessionPane() || this.windowHeight < SHORT_WINDOW_HEIGHT ? 8 : 12 }) {
+    Column({ space: !this.dockedSessions() || this.compactSessionPane() || this.windowHeight < SHORT_WINDOW_HEIGHT ? 8 : 12 }) {
       Row({ space: this.compactSessionPane() ? 6 : 10 }) {
-        Stack() {
-          Image($r('app.media.ic_computer')).width(20).height(20).fillColor(this.accent())
-        }.width(34).height(34).borderRadius(10).backgroundColor(this.accentTint())
+        if (this.dockedSessions()) {
+          Stack() {
+            Image($r('app.media.ic_computer')).width(20).height(20).fillColor(this.accent())
+          }.width(34).height(34).borderRadius(10).backgroundColor(this.accentTint())
+        }
         Button({ type: ButtonType.Normal }) {
-          Row({ space: 6 }) {
-            Text(this.computerTitle()).fontSize(this.compactSessionPane() ? 14 : 17)
+          Row({ space: this.dockedSessions() ? 6 : 8 }) {
+            if (!this.dockedSessions()) {
+              Image($r('app.media.ic_computer')).width(23).height(23).fillColor($r('app.color.pigo_text'))
+            }
+            Text(this.computerTitle()).fontSize(this.compactSessionPane() ? 14 : this.dockedSessions() ? 17 : 20)
               .fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
-              .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).layoutWeight(1)
+              .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+              .layoutWeight(this.dockedSessions() ? 1 : 0)
+              .constraintSize({ maxWidth: this.dockedSessions() ? '100%' : '65%' })
             Image($r('app.media.ic_chevron')).width(14).height(14).fillColor($r('app.color.pigo_muted'))
-          }
+          }.width('100%')
         }.id('computers').layoutWeight(1).height(48).padding(0).backgroundColor(Color.Transparent)
           .accessibilityText('切换电脑').enabled(!this.busy).onClick(() => { this.openComputers(); })
         if (!this.dockedSessions()) {
@@ -4805,41 +4994,62 @@ struct Index {
           }.width(44).height(44).padding(0).backgroundColor(Color.Transparent).accessibilityText('关闭任务抽屉')
             .onClick(() => { this.setDrawer(false); })
         }
-      }.width('100%').padding({ left: 2 })
+      }.width('100%').padding({ left: this.dockedSessions() ? 2 : 10 })
       Button({ type: ButtonType.Normal }) {
         Row({ space: this.compactSessionPane() ? 6 : 10 }) {
-          Image($r('app.media.ic_compose')).width(19).height(19).fillColor(this.accentForeground())
-          Text('新建任务').fontSize(15).fontWeight(FontWeight.Medium).fontColor(this.accentForeground()).maxLines(1)
+          Image($r('app.media.ic_compose')).width(19).height(19)
+            .fillColor(this.dockedSessions() ? this.accentForeground() : $r('app.color.pigo_text'))
+          Text('新建任务').fontSize(this.dockedSessions() ? 15 : 16).fontWeight(FontWeight.Medium)
+            .fontColor(this.dockedSessions() ? this.accentForeground() : $r('app.color.pigo_text')).maxLines(1)
         }.justifyContent(FlexAlign.Center).width('100%')
-      }.id('drawer-new-task').width('100%').height(44).padding(0)
-        .backgroundColor(this.accent()).borderRadius(12)
-        .enabled(this.reachable && !this.busy && this.desktopHandoff && this.projects.length > 0)
-        .bindMenu(this.projects.map((path: string): MenuElement => ({ value: path.split('/').pop() || path,
-          action: () => { this.activeTab = 'tasks'; void this.requestAction('/new', { cwd: path }); } })))
+      }.id('drawer-new-task').width('100%').height(this.dockedSessions() ? 44 : 48).padding(0)
+        .backgroundColor(this.dockedSessions() ? this.accent() : $r('app.color.pigo_panel'))
+        .border({ width: this.dockedSessions() ? 0 : 1, radius: this.dockedSessions() ? 12 : 16,
+          color: $r('app.color.pigo_line') })
+        .enabled(this.reachable && !this.busy && !this.openingSession && this.desktopHandoff &&
+          (this.projects.length > 0 || this.canCreateWorkspace))
+        .bindMenu(this.newTaskOptions())
       if (!this.reachable) this.offlineNotice(true, this.compactSessionPane())
-      Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.SpaceBetween, alignContent: FlexAlign.SpaceBetween }) {
-        ForEach(['all', 'pinned', 'recent', 'archived'], (view: string) => {
+      if (this.dockedSessions()) {
+        Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.SpaceBetween, alignContent: FlexAlign.SpaceBetween }) {
+          ForEach(SIDEBAR_VIEWS, (view: string) => {
+            Button({ type: ButtonType.Normal }) {
+              Text(this.sessionViewLabel(view))
+                .fontSize(13).fontColor(this.sessionView === view ? this.accent() : $r('app.color.pigo_muted')).maxLines(1)
+                .fontWeight(this.sessionView === view ? FontWeight.Medium : FontWeight.Regular)
+            }.id(`session-view-${view}`).width(this.compactSessionPane() ? '49%' : '24%')
+              .height(36).padding(0).borderRadius(8)
+              .backgroundColor(this.sessionView === view ? this.accentTint() : Color.Transparent)
+              .accessibilitySelected(this.sessionView === view).enabled(!this.busy && !this.sessionLoading && this.reachable)
+              .onClick(() => { this.selectSessionView(view); })
+          }, (view: string) => view)
+        }.width('100%').height(this.compactSessionPane() ? 76 : 36)
+        Divider().color($r('app.color.pigo_line'))
+      } else {
+        Row() {
+          Text(this.sessionViewLabel(this.sessionView)).fontSize(14).fontColor($r('app.color.pigo_muted'))
+            .layoutWeight(1)
           Button({ type: ButtonType.Normal }) {
-            Text(view === 'all' ? '全部' : view === 'pinned' ? '置顶' : view === 'recent' ? '最近' : '归档')
-              .fontSize(13).fontColor(this.sessionView === view ? this.accent() : $r('app.color.pigo_muted')).maxLines(1)
-              .fontWeight(this.sessionView === view ? FontWeight.Medium : FontWeight.Regular)
-          }.id(`session-view-${view}`).width(this.compactSessionPane() ? '49%' : '24%')
-            .height(36).padding(0).borderRadius(8)
-            .backgroundColor(this.sessionView === view ? this.accentTint() : Color.Transparent)
-            .accessibilitySelected(this.sessionView === view).enabled(!this.busy && !this.sessionLoading && this.reachable)
-            .onClick(() => { this.sessionView = view; this.scheduleSidebarSave(); void this.loadSessions(); })
-        }, (view: string) => view)
-      }.width('100%').height(this.compactSessionPane() ? 76 : 36)
-      Divider().color($r('app.color.pigo_line'))
+            Image($r('app.media.ic_menu')).width(20).height(20).fillColor($r('app.color.pigo_muted'))
+          }.id('session-view-menu').width(44).height(36).padding(0).backgroundColor(Color.Transparent)
+            .accessibilityText(`筛选任务，当前为${this.sessionViewLabel(this.sessionView)}`)
+            .enabled(!this.busy && !this.sessionLoading && this.reachable).bindMenu(this.sessionViewOptions())
+        }.width('100%').padding({ left: 12, right: 4 })
+          .margin({ top: this.windowHeight < SHORT_WINDOW_HEIGHT ? 0 : 8 })
+      }
+      if (this.sessionLoading && (!this.sessionCatalogLoaded || this.loadedView !== this.sessionView)) {
+        Text('正在加载任务…').fontSize(13).fontColor($r('app.color.pigo_muted')).width('100%')
+      } else if (this.sessionCatalogFailed) {
+        Button('任务加载失败，重试').chatAction().id('session-retry').width('100%').height(38)
+          .enabled(this.reachable && !this.busy && !this.openingSession).onClick(() => { void this.loadSessions(); })
+      }
       this.sessionLibrary()
       Text(this.base.split('://')[1] || '').id('active-computer').fontSize(11).fontColor($r('app.color.pigo_muted'))
         .width('100%').padding({ left: this.compactSessionPane() ? 4 : 12 })
         .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
-    }.id('session-sidebar').width(this.dockedSessions() ? this.sessionPaneWidth() : '84%')
-      .constraintSize({ maxWidth: 420 }).height('100%')
+    }.id('session-sidebar').width(this.dockedSessions() ? this.sessionPaneWidth() : this.drawerWidth()).height('100%')
       .padding({ left: this.compactSessionPane() ? 8 : 12, right: 12,
         top: this.statusBarHeight + (this.compactSessionPane() ? 8 : 12), bottom: this.bottomPad() + 18 })
-      .borderRadius(this.dockedSessions() ? 0 : { topRight: 20, bottomRight: 20 })
       .border({ width: { right: this.dockedSessions() ? 1 : 0 }, color: $r('app.color.pigo_line') })
       .backgroundColor($r('app.color.pigo_sidebar'))
       .transition(TransitionEffect.move(TransitionEdge.START))
@@ -4992,6 +5202,34 @@ struct Index {
       .padding({ left: 16, right: 16, top: this.statusBarHeight + 8 })
   }
 
+  @Builder
+  newSpaceDialog() {
+    Stack() {
+      Button({ type: ButtonType.Normal }).width('100%').height('100%').borderRadius(0).backgroundColor('#66000000')
+        .accessibilityText('取消新建空间').enabled(!this.busy).onClick(() => { this.closeNewSpace(); })
+      Column({ space: 12 }) {
+        Text('新空间').fontSize(19).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
+        TextInput({ text: this.newSpaceName, placeholder: '空间名称' }).id('new-space-name').width('100%')
+          .backgroundColor($r('app.color.pigo_control')).fontColor($r('app.color.pigo_text'))
+          .maxLength(80).enterKeyType(EnterKeyType.Done).enabled(!this.busy)
+          .onChange((value: string) => { this.newSpaceName = value; this.newSpaceError = ''; })
+          .onSubmit(() => { if (this.newSpaceName.trim()) void this.createWorkspaceTask(); })
+        if (this.newSpaceError) {
+          Text(this.newSpaceError).fontSize(13).fontColor($r('app.color.pigo_error')).width('100%')
+        }
+        Row({ space: 8 }) {
+          Button('取消').layoutWeight(1).backgroundColor($r('app.color.pigo_control')).fontColor($r('app.color.pigo_text'))
+            .enabled(!this.busy).onClick(() => { this.closeNewSpace(); })
+          Button(this.busy ? '正在创建…' : '创建并打开任务').id('new-space-submit').layoutWeight(2)
+            .backgroundColor(this.accent()).fontColor(this.accentForeground())
+            .enabled(!this.busy && this.reachable && !!this.newSpaceName.trim())
+            .onClick(() => { void this.createWorkspaceTask(); })
+        }.width('100%')
+      }.width('90%').constraintSize({ maxWidth: 360 }).padding(18).borderRadius(20)
+        .backgroundColor($r('app.color.pigo_panel'))
+    }.id('new-space-dialog').width('100%').height('100%')
+  }
+
   build() {
     Stack({ alignContent: Alignment.TopStart }) {
       Row() {
@@ -5011,12 +5249,19 @@ struct Index {
             ? GestureJudgeResult.REJECT : GestureJudgeResult.CONTINUE)
           .gesture(PanGesture({ direction: PanDirection.Horizontal }).onActionEnd((event: GestureEvent) => { this.swipeDrawer(event); }))
       }.width('100%').height('100%').backgroundColor($r('app.color.launch_background'))
-      if (this.showSessions && this.isPaired && !this.dockedSessions()) {
-        Button({ type: ButtonType.Normal }).chatAction().width('100%').height('100%').backgroundColor('#66000000').borderRadius(0)
+        .borderRadius({ topLeft: this.drawerOpen() ? 24 : 0, bottomLeft: this.drawerOpen() ? 24 : 0 })
+        .clip(true).translate({ x: this.drawerOpen() ? this.drawerWidth() : 0 })
+        .shadow({ radius: 24, offsetX: -5,
+          color: this.drawerOpen() ? (this.darkMode ? '#A0000000' : '#50627085') : Color.Transparent })
+        .opacity(this.drawerOpen() ? (this.darkMode ? 0.48 : 0.38) : 1)
+        .accessibilityLevel(this.drawerOpen() ? 'no-hide-descendants' : 'auto')
+      if (this.drawerOpen()) {
+        Button({ type: ButtonType.Normal }).width('100%').height('100%').padding(0)
+          .backgroundColor(Color.Transparent).borderRadius(0)
           .accessibilityText('关闭会话列表').onClick(() => { this.setDrawer(false); })
           .gesture(PanGesture({ direction: PanDirection.Horizontal }).onActionEnd((event: GestureEvent) => { this.swipeDrawer(event); }))
       }
-      if (this.dockedSessions() || (this.showSessions && this.isPaired)) {
+      if (this.dockedSessions() || this.drawerOpen()) {
         this.sessionDrawer()
       }
       if (this.dockedSessions()) this.sessionPaneHandle()
@@ -5065,8 +5310,10 @@ struct Index {
           .hitTestBehavior(HitTestMode.BLOCK_HIERARCHY)
       }
       if (this.markdownTableReader) this.markdownTableReaderPage(this.markdownTableReader)
+      if (this.showNewSpace) this.newSpaceDialog()
     }.width('100%').height('100%').padding({ left: this.leftInset, right: this.rightInset })
-      .backgroundColor($r('app.color.launch_background'))
+      .backgroundColor(this.drawerOpen() ? $r('app.color.pigo_sidebar') : $r('app.color.launch_background'))
+      .clip(true)
       .bindSheet(this.showToolDetails, this.toolDetailsSheet(), {
         detents: ['65%', SheetSize.LARGE], dragBar: true, showClose: true,
         backgroundColor: $r('app.color.pigo_panel'), maskColor: '#99000000',

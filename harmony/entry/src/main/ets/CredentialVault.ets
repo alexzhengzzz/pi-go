@@ -25,7 +25,6 @@ export interface ComputerBook {
 
 export interface SidebarState {
   expandedSpaces: string[];
-  tasksExpanded: boolean;
   sessionView: string;
 }
 
@@ -51,7 +50,6 @@ interface StoredCompanions {
 
 interface StoredSidebarState {
   expandedSpaces?: string[];
-  tasksExpanded?: boolean;
   sessionView?: string;
 }
 
@@ -170,7 +168,6 @@ export class CredentialVault {
         const restored: SidebarState = {
           expandedSpaces: (Array.isArray(entry.state.expandedSpaces) ? entry.state.expandedSpaces : [])
             .filter((path: string): boolean => typeof path === 'string').slice(0, SIDEBAR_MAX_EXPANDED),
-          tasksExpanded: entry.state.tasksExpanded !== false,
           sessionView: SIDEBAR_VIEWS.includes(view) ? view : 'all'
         };
         const kept: SidebarEntry = { address: address, state: restored };

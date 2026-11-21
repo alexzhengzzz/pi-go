@@ -1,5 +1,8 @@
 import { fileIo, fileUri } from '@kit.CoreFileKit';
 
+const PREVIEW_MAX_WIDTH = 240;
+const PREVIEW_MAX_HEIGHT = 180;
+
 @Component
 export struct ChatImage {
   @Prop label: string = '图片';
@@ -9,6 +12,7 @@ export struct ChatImage {
   @State private source: string = '';
   @State private loading: boolean = false;
   @State private error: string = '';
+  @State private imageRatio: number = PREVIEW_MAX_WIDTH / PREVIEW_MAX_HEIGHT;
   private started: boolean = false;
   private disposed: boolean = false;
 
@@ -45,9 +49,15 @@ export struct ChatImage {
     Column() {
       if (this.source) {
         Image(this.remoteUrl ? this.source : fileUri.getUriFromPath(this.source))
-          .width('100%').height(180).objectFit(ImageFit.Contain).borderRadius(10)
+          .width(Math.min(PREVIEW_MAX_WIDTH, PREVIEW_MAX_HEIGHT * this.imageRatio))
+          .aspectRatio(this.imageRatio).objectFit(ImageFit.Contain).borderRadius(10)
           .accessibilityText(this.label)
           .onClick(() => { this.open(this.source, this.label); })
+          .onComplete((event) => {
+            if (event && event.width > 0 && event.height > 0) {
+              this.imageRatio = event.width / event.height;
+            }
+          })
           .onError(() => {
             if (!this.remoteUrl && this.source) {
               try { fileIo.unlinkSync(this.source); } catch {}
@@ -62,8 +72,8 @@ export struct ChatImage {
           .fontSize(13).type(ButtonType.Normal).backgroundColor($r('app.color.pigo_control'))
           .fontColor($r('app.color.pigo_text')).onClick(() => { void this.show(); })
       }
-    }.width('100%').constraintSize({ minHeight: 52 }).justifyContent(FlexAlign.Center)
-      .backgroundColor($r('app.color.pigo_panel')).borderRadius(10)
+    }.constraintSize({ minHeight: this.source ? 0 : 52 }).justifyContent(FlexAlign.Center)
+      .backgroundColor(this.source ? Color.Transparent : $r('app.color.pigo_panel')).borderRadius(10)
       .onVisibleAreaChange([0, 0.01], (visible: boolean, ratio: number) => {
         if (visible && ratio > 0 && !this.started && !this.remoteUrl) void this.show();
       })

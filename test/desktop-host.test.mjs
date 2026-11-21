@@ -87,9 +87,7 @@ test('real Desktop automatically trusts restored projects for subsequent authori
       headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: value ? JSON.stringify(value) : undefined });
     return { status: response.status, data: await response.json() };
   };
-  const directory = await phone('/sessions');
-  assert.equal(directory.data.sessions.some((s) => s.id === a.sessionId), true);
-  assert.equal(directory.data.sessions.some((s) => s.id === b.sessionId), true);
+  // The first open must resolve a native history ID before any directory request.
   for (const [state, text] of [[a, 'History from project A'], [b, 'History from project B'], [a, 'History from project A']]) {
     const result = await phone('/open', { id: state.sessionId });
     assert.equal(result.status, 200, JSON.stringify(result));
@@ -97,6 +95,9 @@ test('real Desktop automatically trusts restored projects for subsequent authori
     assert.equal(chat.data.session.id, state.sessionId);
     assert.equal(chat.data.messages.some((m) => m.text === text), true);
   }
+  const directory = await phone('/sessions');
+  assert.equal(directory.data.sessions.some((s) => s.id === a.sessionId), true);
+  assert.equal(directory.data.sessions.some((s) => s.id === b.sessionId), true);
   await localRequest(admin, 'POST', '/stop');
   const openedA = await localRequest(socket, 'POST', '/open', { cwd: first, id: a.sessionId }, 15000);
   assert.equal(openedA.status, 200, JSON.stringify(openedA));

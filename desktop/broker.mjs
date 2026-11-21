@@ -10,7 +10,7 @@ import { newLanIdentity, newPublicIdentity, privateIPv4, publicAddress } from '.
 import { startDiscovery } from './lan-discovery.mjs';
 import { listFiles, previewFile, saveFile, openWorkspaceDownload, findWorkspaceFileByName } from './workspace-files.mjs';
 import { SessionMetadata, stateDirectory } from './session-metadata.mjs';
-import { computerSessions } from './computer-sessions.mjs';
+import { computerSessions, findComputerSession } from './computer-sessions.mjs';
 import { maxFileBytes, maxHistoryImageBase64, maxImageBytes, maxPromptBody, safeAttachmentName } from './attachments.mjs';
 
 const remote = process.argv[3] === '--remote';
@@ -242,7 +242,7 @@ function selectionFor(live) {
   return selected && live.find(({ socket, session }) => socket === selected.socket && session.id === selected.id && session.cwd === selected.cwd);
 }
 
-async function catalog(live, hostSocket, granted = []) {
+async function catalog(live, hostSocket, granted = [], includeComputerHistory = true) {
   const counts = new Map();
   for (const { session } of live) counts.set(session.id, (counts.get(session.id) ?? 0) + 1);
   const rows = new Map(live.map(({ session }) => [session.id, {
@@ -274,7 +274,7 @@ async function catalog(live, hostSocket, granted = []) {
       if (!rows.has(record.id)) rows.set(record.id, { ...record, cwd, active: false });
     }
   }));
-  if (computerAccess) {
+  if (computerAccess && includeComputerHistory) {
     for (const record of await computerSessions()) {
       if (!rows.has(record.id)) rows.set(record.id, record);
     }
@@ -293,7 +293,7 @@ async function hostContext() {
     const projects = await localRequest(socket, 'POST', '/projects', {}).catch(() => undefined);
     if (projects?.status === 200 && Array.isArray(projects.data.projects)) granted = [...new Set([...granted, ...projects.data.projects])];
   }
-  return { socket, profile, granted };
+  return { socket, profile, granted, canCreateWorkspace: computerAccess && result?.data.canCreateWorkspace === true };
 }
 
 async function nativeHandoff(request, response, route, cwd, id, context, hasLiveProject) {
@@ -357,7 +357,7 @@ const publicHandler = async (request, response) => {
     if (remote && !acceptRemoteRequest(response)) return;
     lastSeen = Date.now();
     if (route === 'GET /health') return reply(response, 200, { protocol: 'pi-go-bridge/1' });
-    if (!['GET /session', 'GET /chat', 'GET /history', 'GET /tool-detail', 'GET /message-image', 'GET /message-text', 'GET /sessions', 'GET /sessions/status', 'GET /models', 'GET /commands', 'GET /events', 'GET /files/download', 'POST /open', 'POST /new', 'POST /prompt', 'POST /upload', 'POST /abort', 'POST /answer', 'POST /receipt', 'POST /model', 'POST /rename', 'POST /session-meta', 'POST /close-workspace', 'POST /files/list', 'POST /files/read', 'POST /files/save'].includes(route)) return error(response, 404, 'not_found');
+    if (!['GET /session', 'GET /chat', 'GET /history', 'GET /tool-detail', 'GET /message-image', 'GET /message-text', 'GET /sessions', 'GET /sessions/status', 'GET /models', 'GET /commands', 'GET /events', 'GET /files/download', 'POST /open', 'POST /new', 'POST /prompt', 'POST /upload', 'POST /abort', 'POST /answer', 'POST /receipt', 'POST /model', 'POST /rename', 'POST /session-meta', 'POST /create-workspace', 'POST /close-workspace', 'POST /files/list', 'POST /files/read', 'POST /files/save'].includes(route)) return error(response, 404, 'not_found');
     if (route === 'GET /events') {
       if (streams.size >= 4) return error(response, 429, 'too_many_streams');
       request.socket.setTimeout(0);
@@ -423,6 +423,19 @@ const publicHandler = async (request, response) => {
     }
     const input = request.method === 'POST' ? await body(request, route === 'POST /prompt' ? maxPromptBody :
       route === 'POST /files/save' ? 512 * 1024 : undefined) : undefined;
+    if (route === 'POST /create-workspace') {
+      if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
+      if (!computerAccess) return error(response, 403, 'computer_access_required');
+      if (typeof input.name !== 'string') return error(response, 400, 'invalid_workspace_name');
+      const context = await hostContext();
+      if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
+      if (context.ambiguous) return error(response, 409, 'desktop_host_ambiguous');
+      if (!context.socket || !context.canCreateWorkspace) return error(response, 409, 'desktop_workspace_creation_unsupported');
+      const result = await localRequest(context.socket, 'POST', '/create-workspace', { name: input.name }, 12000).catch(() => undefined);
+      if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
+      if (!result) return error(response, 409, 'desktop_handoff_unconfirmed');
+      return reply(response, result.status, result.data);
+    }
     const live = await workerList();
     if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
     const current = selectionFor(live);
@@ -506,7 +519,7 @@ const publicHandler = async (request, response) => {
       const start = Number.isInteger(cursor) && cursor >= 0 ? Math.min(cursor, filtered.length) : 0;
       return reply(response, 200, { current: current?.session, sessions: filtered.slice(start, start + limit),
         total: filtered.length, nextCursor: start + limit < filtered.length ? start + limit : undefined,
-        desktopHandoff: Boolean(context.socket),
+        desktopHandoff: Boolean(context.socket), canCreateWorkspace: context.canCreateWorkspace === true,
         projects: [...new Set([...live.map(({ session }) => session.cwd), ...context.granted])].sort() });
     }
     if (route === 'POST /open') {
@@ -515,7 +528,8 @@ const publicHandler = async (request, response) => {
       const targets = live.filter(({ session }) => session.id === input.id);
       if (targets.length === 0) {
         const context = await hostContext();
-        const row = (await catalog(live, context.socket, context.granted)).find(({ id }) => id === input.id);
+        const native = computerAccess ? await findComputerSession(input.id) : undefined;
+        const row = native ?? (await catalog(live, context.socket, context.granted, false)).find(({ id }) => id === input.id);
         if (!row) return error(response, 409, 'desktop_handoff_required');
         return await nativeHandoff(request, response, '/open', row.cwd, row.id, context, live.some(({ session }) => session.cwd === row.cwd));
       }

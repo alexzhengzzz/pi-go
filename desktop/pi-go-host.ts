@@ -1,5 +1,5 @@
 import { existsSync, lstatSync, mkdirSync } from 'node:fs'
-import { readdir, realpath, stat } from 'node:fs/promises'
+import { lstat, mkdir, readdir, realpath, rmdir, stat } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
@@ -50,6 +50,15 @@ async function history(cwd: string, id?: string) {
   return rows
 }
 
+async function ensureSpaceParent(path: string): Promise<void> {
+  try {
+    await mkdir(path, { mode: 0o700 })
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+  }
+  if (!(await lstat(path)).isDirectory()) throw new Error('invalid_space_parent')
+}
+
 type PiGoNotes = { reassignToGlobal(workspaceId: string): Promise<void> }
 
 export function registerPiGoHost(workspaces: WorkspaceManager, dialogs: PiEventRouter, notes?: PiGoNotes): void {
@@ -76,11 +85,11 @@ export function registerPiGoHost(workspaces: WorkspaceManager, dialogs: PiEventR
       response.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
       response.end(JSON.stringify(data))
     }
-    if (request.method === 'GET' && request.url === '/health') return reply(200, { protocol: 'pi-go-desktop-host/1', profile })
-    if (request.method !== 'POST' || !['/open', '/new', '/catalog', '/projects', '/authorize', '/pending', '/answer', '/close-workspace'].includes(request.url ?? '') || request.headers.origin !== undefined) {
+    if (request.method === 'GET' && request.url === '/health') return reply(200, { protocol: 'pi-go-desktop-host/1', profile, canCreateWorkspace: true })
+    if (request.method !== 'POST' || !['/open', '/new', '/catalog', '/projects', '/authorize', '/pending', '/answer', '/create-workspace', '/close-workspace'].includes(request.url ?? '') || request.headers.origin !== undefined) {
       return reply(404, { error: 'not_found' })
     }
-    const mutating = request.url === '/open' || request.url === '/new' || request.url === '/close-workspace'
+    const mutating = ['/open', '/new', '/create-workspace', '/close-workspace'].includes(request.url ?? '')
     if (quitting || (mutating && pending)) return reply(409, { error: 'desktop_busy' })
     if (mutating) pending = true
     try {
@@ -92,7 +101,7 @@ export function registerPiGoHost(workspaces: WorkspaceManager, dialogs: PiEventR
         chunks.push(chunk)
       }
       const input = JSON.parse(Buffer.concat(chunks).toString('utf8')) as {
-        cwd?: unknown; id?: unknown; pid?: unknown; pendingId?: unknown; answer?: unknown
+        cwd?: unknown; name?: unknown; id?: unknown; pid?: unknown; pendingId?: unknown; answer?: unknown
       }
       if (request.url === '/pending' || request.url === '/answer') {
         const runtime = workspaces.getSessionRuntimes().find((entry) => entry.status === 'running' &&
@@ -115,6 +124,44 @@ export function registerPiGoHost(workspaces: WorkspaceManager, dialogs: PiEventR
         const projects = await Promise.all(workspaces.getWorkspaces()
           .map((workspace) => realpath(workspace.path).catch(() => undefined)))
         return reply(200, { projects: [...new Set(projects.filter((path): path is string => path !== undefined))] })
+      }
+      if (request.url === '/create-workspace') {
+        const rawName = typeof input.name === 'string' ? input.name : ''
+        const name = rawName.trim()
+        if (!name || name.length > 80 || name === '.' || name === '..' || /[\x00-\x1f\x7f/\\]/.test(rawName)) {
+          return reply(400, { error: 'invalid_workspace_name' })
+        }
+        const home = await realpath(app.getPath('home')).catch(() => undefined)
+        if (!home) return reply(500, { error: 'desktop_create_workspace_failed' })
+        const container = join(home, 'Pi Go')
+        const parent = join(container, 'Spaces')
+        const cwd = join(parent, name)
+        let registeredPath = cwd
+        try {
+          await ensureSpaceParent(container)
+          await ensureSpaceParent(parent)
+          if (workspaces.getWorkspaces().some((workspace) => resolve(workspace.path) === cwd)) {
+            return reply(409, { error: 'workspace_exists' })
+          }
+          try {
+            await mkdir(cwd, { mode: 0o700 })
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code === 'EEXIST') return reply(409, { error: 'workspace_exists' })
+            throw error
+          }
+          try {
+            registeredPath = await realpath(cwd)
+            await workspaces.createWorkspace(name, registeredPath)
+          } catch (error) {
+            if (!workspaces.getWorkspaces().some((workspace) => workspace.path === registeredPath)) {
+              await rmdir(cwd).catch(() => undefined)
+            }
+            throw error
+          }
+        } catch {
+          return reply(500, { error: 'desktop_create_workspace_failed' })
+        }
+        return reply(200, { cwd: registeredPath })
       }
       if (request.url === '/close-workspace') {
         // Pi Go mirrors Desktop's own "remove workspace": the folder leaves the
@@ -156,11 +203,11 @@ export function registerPiGoHost(workspaces: WorkspaceManager, dialogs: PiEventR
         return reply(403, { error: 'desktop_workspace_untrusted' })
       }
       if (opening && !sessionPath) return reply(404, { error: 'desktop_session_not_found' })
-      await workspaceTrustStore.trust(workspace.path)
-      if (request.url === '/authorize') return reply(200, { cwd, profile })
       if (request.url === '/catalog') {
         return reply(200, { sessions: (await history(cwd)).map(({ id, name, modified }) => ({ id, name, modified })) })
       }
+      await workspaceTrustStore.trust(workspace.path)
+      if (request.url === '/authorize') return reply(200, { cwd, profile })
       const settings = await loadAppSettings(workspaces)
       if (quitting || response.destroyed) return
       let runtime = workspaces.preparePiGoRuntime(workspace.id, sessionPath)

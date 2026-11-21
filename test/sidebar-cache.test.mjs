@@ -12,17 +12,17 @@ function method(name) {
   return page.slice(start, end);
 }
 const methods = ['setDrawer', 'loadSessions', 'requestAction', 'positionTranscript', 'poll', 'loadSessionStatus', 'applyRunningStatus', 'backgroundRunning', 'backgroundActive', 'sessionState', 'sessionRunning'];
+methods.push('spaceSessions');
 methods.push('cacheChat', 'presentChat', 'send', 'mergeTranscript', 'sameMessage', 'applyLiveSnapshot',
   'handleFrame', 'queueStreamPaint', 'flushStreamDeltas', 'finishSend', 'reconcileSteering');
 methods.push('chooseComputer', 'leaveComputer', 'persistComputers', 'pair', 'resetFileTree', 'closeFileEditor');
 methods.push('appendFileTreeRows', 'updateFileTree', 'toggleFileDirectory', 'loadFileDirectory');
-methods.push('openSpaceActions', 'confirmCloseSpace', 'closeWorkspace', 'armTranscriptFollow', 'onKeyboardChange');
+methods.push('newTaskOptions', 'closeNewSpace', 'createWorkspaceTask', 'createSpaceTask', 'confirmCloseSpace', 'closeWorkspace', 'armTranscriptFollow', 'onKeyboardChange');
 methods.push('dockedSessions', 'sessionPaneWidth', 'compactSessionPane', 'onWindowWidthChange');
 const splitWidth = page.match(/^const SPLIT_WINDOW_WIDTH = \d+;$/m)[0];
-const Page = new Function('Curve', 'BridgeFailure', 'CachePaintFrame', 'validUsb', 'MAX_COMPUTERS', 'Edge', '$r', 'DialogAlignment', stripTypeScriptTypes(`${splitWidth}\nconst STREAM_PAINT_INTERVAL_MS = 32;\nconst MAX_LIVE_TEXT_LENGTH = 16000;\nclass Harness {\n${methods.map(method).join('\n')}\n}`) + '; return Harness;')(
+const Page = new Function('Curve', 'BridgeFailure', 'validUsb', 'MAX_COMPUTERS', 'Edge', '$r', 'DialogAlignment', stripTypeScriptTypes(`${splitWidth}\nconst STREAM_PAINT_INTERVAL_MS = 32;\nconst MAX_LIVE_TEXT_LENGTH = 16000;\nclass Harness {\n${methods.map(method).join('\n')}\n}`) + '; return Harness;')(
   { EaseOut: 0 },
   class BridgeFailure extends Error {},
-  class CachePaintFrame { constructor(at) { this.at = at; } },
   (address) => address === 'http://127.0.0.1:18977',
   12,
   { Bottom: 'bottom' },
@@ -41,10 +41,11 @@ function fixture() {
     deltaPaintTimer: -1, pendingLiveText: '', pendingLiveThinking: '',
     sessionCatalogLoaded: true, sessionCatalogUpdatedAt: Date.now(), sessionCatalogVersion: 0,
     sessions: [{ id: 'one', cwd: '/project', name: 'Cached task' }], projects: ['/project'],
-    sessionQuery: '', loadedQuery: '', sessionView: 'all', loadedView: 'all',
-    showSessions: false, sessionCursor: 30, chatCache: new Map(),
+    sessionView: 'all', loadedView: 'all',
+    showSessions: false, chatCache: new Map(),
     draftKey: id => id, loadSessionStatus: async () => {}, dismissKeyboard: () => {},
-    getUIContext: () => ({ animateTo: (_options, change) => change(), postFrameCallback: () => {} })
+    getUIContext: () => ({ animateTo: (_options, change) => change(),
+      getPromptAction: () => ({ showToast: () => {} }) })
   });
   return state;
 }
@@ -247,62 +248,125 @@ test('stale catalog refresh keeps cached rows interactive and respects closing t
 });
 
 
-test('repeated opens share one stale refresh and preserve cached pagination', async () => {
+test('repeated opens share one stale refresh and reuse the loaded catalog', async () => {
   const state = fixture();
   state.sessionCatalogUpdatedAt = 0;
   let requests = 0;
   let finish;
-  state.request = () => { requests++; return new Promise(resolve => { finish = resolve; }); };
+  state.request = () => {
+    if (++requests === 1) return new Promise(resolve => { finish = resolve; });
+    return Promise.resolve({ sessions: [{ id: 'page-two' }] });
+  };
   clickHistory.call(state);
   state.setDrawer(false);
   clickHistory.call(state);
   assert.equal(requests, 1);
   assert.equal(state.busy, false);
-  finish({ sessions: [{ id: 'one' }], nextCursor: 30 });
+  finish({ sessions: [{ id: 'one' }], nextCursor: 100 });
   await new Promise(resolve => setImmediate(resolve));
-  state.sessions.push({ id: 'page-two' });
   state.setDrawer(false);
   clickHistory.call(state);
-  assert.equal(requests, 1);
-  assert.equal(state.sessions.length, 2);
+  assert.equal(requests, 2);
+  assert.deepEqual(state.sessions.map(session => session.id), ['one', 'page-two']);
 });
 
-test('refresh failure keeps the cached spaces and tasks', async () => {
+test('a failed catalog page keeps the cached spaces and tasks and can be retried', async () => {
   const state = fixture();
-  state.request = async () => { throw new Error('offline'); };
+  let fail = true;
+  state.request = async path => {
+    if (path.includes('cursor=0&')) return { sessions: [{ id: 'two' }], projects: ['/new'], nextCursor: 100 };
+    if (fail) throw new Error('offline');
+    return { sessions: [{ id: 'three' }], projects: ['/new'] };
+  };
   await state.loadSessions();
   assert.equal(state.sessions[0].id, 'one');
   assert.deepEqual(state.projects, ['/project']);
   assert.equal(state.busy, false);
   assert.equal(state.sessionLoading, false);
+  assert.equal(state.sessionCatalogFailed, true);
+  fail = false;
+  await state.loadSessions();
+  assert.deepEqual(state.sessions.map(session => session.id), ['two', 'three']);
+  assert.deepEqual(state.projects, ['/new']);
+  assert.equal(state.sessionCatalogFailed, false);
 });
 
-test('one space action picker offers creation and removal and requires confirmation before closing', async () => {
+test('the space plus creates a task directly in that space', () => {
   const state = fixture();
   const requests = [];
-  let selection = 0;
+  state.desktopHandoff = true;
+  state.requestAction = async (...args) => { requests.push(args); return false; };
+
+  state.createSpaceTask('/project');
+  assert.equal(state.activeTab, 'tasks');
+  assert.deepEqual(requests, [['/new', { cwd: '/project' }]]);
+});
+
+test('the empty new-task menu can create one space and open its first task', async () => {
+  const state = fixture();
+  Object.assign(state, { projects: [], expandedSpaces: [], desktopHandoff: true, scheduleSidebarSave: () => {} });
+  assert.deepEqual(state.newTaskOptions(), []);
+  state.canCreateWorkspace = true;
+  const [option] = state.newTaskOptions();
+  assert.equal(option.value, '新空间');
+  option.action();
+  assert.equal(state.showNewSpace, true);
+  state.closeNewSpace();
+  assert.equal(state.showNewSpace, false);
+
+  const requests = [];
+  const cwd = '/Pi Go/Spaces/测试 空间';
+  state.request = async (...args) => { requests.push(args); return { cwd }; };
+  state.requestAction = async (...args) => { requests.push(args); return true; };
+  option.action();
+  state.newSpaceName = '../outside';
+  await state.createWorkspaceTask();
+  assert.ok(state.newSpaceError);
+  assert.deepEqual(requests, []);
+  state.newSpaceName = '  测试 空间  ';
+  await Promise.all([state.createWorkspaceTask(), state.createWorkspaceTask()]);
+  assert.deepEqual(requests, [['/create-workspace', { name: '测试 空间' }], ['/new', { cwd }]]);
+  assert.deepEqual(state.projects, [cwd]);
+  assert.deepEqual(state.expandedSpaces, [cwd]);
+  assert.equal(state.showNewSpace, false);
+});
+
+test('the sidebar keeps a created space if its first task fails to open', async () => {
+  const state = fixture();
+  const messages = [];
+  Object.assign(state, {
+    canCreateWorkspace: true, showNewSpace: true, newSpaceName: '测试', expandedSpaces: [],
+    scheduleSidebarSave: () => {}, request: async () => ({ cwd: '/spaces/测试' }),
+    requestAction: async () => { state.epoch++; state.status = '暂时无法打开任务。'; return false; },
+    getUIContext: () => ({ getPromptAction: () => ({ showToast: ({ message }) => messages.push(message) }) })
+  });
+  await state.createWorkspaceTask();
+  assert.ok(state.projects.includes('/spaces/测试'));
+  assert.deepEqual(messages, ['空间已创建。暂时无法打开任务。']);
+});
+
+test('removing a space from its menu requires confirmation on the same computer', () => {
+  const state = fixture();
+  const requests = [];
   let confirmation;
   Object.assign(state, {
-    isPaired: true, desktopHandoff: true,
+    isPaired: true,
     getUIContext: () => ({
-      getPromptAction: () => ({ showActionMenu: async ({ buttons }) => {
-        assert.deepEqual(buttons.map(({ text }) => text), ['新建任务', '移除空间']);
-        return { index: selection };
-      } }),
+      getPromptAction: () => ({ showToast: () => {} }),
       showAlertDialog: options => { confirmation = options; }
     }),
     requestAction: async (...args) => { requests.push(args); return false; }
   });
-  await state.openSpaceActions('/project');
-  assert.deepEqual(requests, [['/new', { cwd: '/project' }]]);
 
-  selection = 1;
-  await state.openSpaceActions('/project');
+  state.confirmCloseSpace('/project', state.epoch - 1);
+  assert.equal(confirmation, undefined);
+  state.confirmCloseSpace('/project', state.epoch);
   assert.equal(confirmation.title, '移除空间');
   confirmation.primaryButton.action();
-  assert.equal(requests.length, 1);
+  assert.equal(requests.length, 0);
+  state.confirmCloseSpace('/project', state.epoch);
   confirmation.secondaryButton.action();
-  assert.deepEqual(requests[1], ['/close-workspace', { cwd: '/project' }]);
+  assert.deepEqual(requests, [['/close-workspace', { cwd: '/project' }]]);
 });
 
 test('removing a space reports errors in the drawer and removes the row after confirmation', async () => {
@@ -346,15 +410,40 @@ test('results from before a computer switch or catalog mutation are discarded', 
   }
 });
 
-test('explicit search bypasses a fresh cache', async () => {
+test('recent tasks load and paginate through the recent catalog', async () => {
   const state = fixture();
-  state.sessionQuery = 'new query';
-  let path;
-  state.request = async value => { path = value; return { sessions: [{ id: 'found' }] }; };
+  state.sessionView = 'recent';
+  const paths = [];
+  state.request = async path => {
+    paths.push(path);
+    return paths.length === 1 ? { sessions: [{ id: 'recent' }], nextCursor: 100 } : { sessions: [{ id: 'older' }] };
+  };
   await state.loadSessions();
-  assert.ok(path.includes('query=new%20query'));
-  assert.equal(state.sessions[0].id, 'found');
-  assert.equal(state.loadedQuery, 'new query');
+  assert.deepEqual(paths, ['/sessions?limit=100&cursor=0&view=recent', '/sessions?limit=100&cursor=100&view=recent']);
+  assert.deepEqual(state.sessions.map(session => session.id), ['recent', 'older']);
+  assert.equal(state.loadedView, 'recent');
+});
+
+test('opening the sidebar loads older tasks even when whole pages belong to a collapsed space', async () => {
+  const state = fixture();
+  state.sessionCatalogLoaded = false;
+  const cursors = [];
+  state.request = async path => {
+    const { searchParams } = new URL(path, 'http://test');
+    const cursor = Number(searchParams.get('cursor'));
+    const limit = Number(searchParams.get('limit'));
+    const projects = ['/project', '/other'];
+    cursors.push(cursor);
+    if (cursor === 0) return { projects, sessions: Array.from({ length: limit }, (_, index) =>
+      ({ id: `other-${index}`, cwd: '/other' })), nextCursor: limit };
+    return { projects, sessions: [{ id: 'other-0', cwd: '/other' }, { id: 'older', cwd: '/project' }] };
+  };
+  clickHistory.call(state);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(state.spaceSessions('/project').map(session => session.id), ['older']);
+  assert.equal(state.spaceSessions('/other').filter(session => session.id === 'other-0').length, 1);
+  assert.equal(cursors.length, 2);
+  assert.doesNotMatch(page, /\.id\('session-more'\)/);
 });
 
 
@@ -378,13 +467,17 @@ test('opening a task keeps sidebar controls bright and prevents duplicate opens'
   let requests = 0;
   state.request = () => { requests++; return new Promise(resolve => { finish = resolve; }); };
   const pending = state.requestAction('/open', { id: 'two' });
+  assert.equal(state.openingSessionId, 'two');
+  assert.equal(state.currentId, 'one');
   const stayedInteractive = !state.busy;
   await state.requestAction('/open', { id: 'three' });
   assert.equal(requests, 1);
+  assert.equal(state.openingSessionId, 'two');
   finish({ session: { id: 'two' } });
   // A successful open must fetch the initial transcript before exposing the new session.
   state.request = async () => ({ session: { id: 'two' }, messages: [{ id: 'latest' }] });
   await pending;
+  assert.equal(state.openingSessionId, '');
   assert.equal(stayedInteractive, true, 'opening a task must not gray out the sidebar');
 });
 
@@ -442,6 +535,8 @@ test('polling does not race the initial navigation snapshot', async () => {
 
 test('failed initial transcript leaves the drawer available for retry', async () => {
   const state = navigationFixture();
+  const messages = [];
+  state.getUIContext = () => ({ getPromptAction: () => ({ showToast: ({ message }) => messages.push(message) }) });
   state.request = async path => {
     if (path === '/open') return { session: { id: 'two' } };
     throw new Error('network');
@@ -451,6 +546,8 @@ test('failed initial transcript leaves the drawer available for retry', async ()
   assert.equal(state.openingSession, false);
   assert.equal(state.busy, false);
   assert.equal(state.currentId, 'one');
+  assert.equal(state.openingSessionId, '');
+  assert.deepEqual(messages, [state.status]);
 });
 
 test('returning to a cached conversation renders before the open request finishes', async () => {
@@ -496,7 +593,6 @@ test('running status refresh updates all tasks without replacing cached pages', 
   assert.equal(state.sessionRunning('page-two'), true);
   assert.equal(state.sessionRunning('one'), false);
   assert.equal(state.sessions.length, 2);
-  assert.equal(state.sessionCursor, 30);
   await state.loadSessionStatus();
   assert.equal(state.sessionRunning('page-two'), false);
 });
