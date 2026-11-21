@@ -50,7 +50,9 @@ async function history(cwd: string, id?: string) {
   return rows
 }
 
-export function registerPiGoHost(workspaces: WorkspaceManager, dialogs: PiEventRouter): void {
+type PiGoNotes = { reassignToGlobal(workspaceId: string): Promise<void> }
+
+export function registerPiGoHost(workspaces: WorkspaceManager, dialogs: PiEventRouter, notes?: PiGoNotes): void {
   if ((process.env.PIGO_DESKTOP_HOST !== '1' && !existsSync(join(process.resourcesPath, 'pi-go-host-enabled'))) || typeof process.getuid !== 'function') return
   const uid = process.getuid()
   const directory = resolve(process.env.PIGO_IPC_DIR ?? join(tmpdir(), `pigo-${uid}`))
@@ -75,10 +77,10 @@ export function registerPiGoHost(workspaces: WorkspaceManager, dialogs: PiEventR
       response.end(JSON.stringify(data))
     }
     if (request.method === 'GET' && request.url === '/health') return reply(200, { protocol: 'pi-go-desktop-host/1', profile })
-    if (request.method !== 'POST' || !['/open', '/new', '/catalog', '/projects', '/authorize', '/pending', '/answer'].includes(request.url ?? '') || request.headers.origin !== undefined) {
+    if (request.method !== 'POST' || !['/open', '/new', '/catalog', '/projects', '/authorize', '/pending', '/answer', '/close-workspace'].includes(request.url ?? '') || request.headers.origin !== undefined) {
       return reply(404, { error: 'not_found' })
     }
-    const mutating = request.url === '/open' || request.url === '/new'
+    const mutating = request.url === '/open' || request.url === '/new' || request.url === '/close-workspace'
     if (quitting || (mutating && pending)) return reply(409, { error: 'desktop_busy' })
     if (mutating) pending = true
     try {
@@ -113,6 +115,25 @@ export function registerPiGoHost(workspaces: WorkspaceManager, dialogs: PiEventR
         const projects = await Promise.all(workspaces.getWorkspaces()
           .map((workspace) => realpath(workspace.path).catch(() => undefined)))
         return reply(200, { projects: [...new Set(projects.filter((path): path is string => path !== undefined))] })
+      }
+      if (request.url === '/close-workspace') {
+        // Pi Go mirrors Desktop's own "remove workspace": the folder leaves the
+        // sidebar and its Pi processes stop, while files on disk are untouched.
+        if (typeof input.cwd !== 'string') return reply(400, { error: 'invalid_target' })
+        const cwd = await realpath(input.cwd).catch(() => undefined)
+        const known = await Promise.all(workspaces.getWorkspaces().map(async (workspace) => ({
+          workspace, path: await realpath(workspace.path).catch(() => undefined),
+        })))
+        const registered = known.filter((item) => cwd !== undefined && item.path === cwd)
+        if (!cwd || registered.length === 0) return reply(404, { error: 'desktop_workspace_not_registered' })
+        if (registered.length > 1) return reply(409, { error: 'desktop_workspace_ambiguous' })
+        const workspace = registered[0].workspace
+        // Managed worktrees and linked-task checkouts would be deleted from disk,
+        // so Pi Go only closes plain folders remotely.
+        if (workspace.kind !== 'folder' || workspace.linkedTask) return reply(409, { error: 'desktop_workspace_kind_unsupported' })
+        const removed = await workspaces.removeWorkspace(workspace.id)
+        if (notes) await notes.reassignToGlobal(workspace.id).catch(() => undefined)
+        return reply(200, { closed: true, cwd, ...removed })
       }
       const opening = request.url === '/open'
       if (typeof input.cwd !== 'string' || (opening && (typeof input.id !== 'string' || !sessionIdPattern.test(input.id)))) {

@@ -5,8 +5,10 @@ import { mkdtemp, mkdir, rm, writeFile, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir, networkInterfaces } from 'node:os';
 import { once } from 'node:events';
-import { createServer } from 'node:net';
-import { request as plainRequest } from 'node:http';
+import { createConnection, createServer } from 'node:net';
+import { checkServerIdentity } from 'node:tls';
+import { stripTypeScriptTypes } from 'node:module';
+import { createServer as httpServer, request as plainRequest } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { request as secureRequest } from 'node:https';
 import { promisify } from 'node:util';
@@ -15,6 +17,25 @@ import { localRequest } from '../desktop/local-ipc.mjs';
 import { localLanAddress } from '../desktop/lan-tls.mjs';
 const project = fileURLToPath(new URL('../', import.meta.url));
 const helper = fileURLToPath(new URL('../desktop/pairing-control.mjs', import.meta.url));
+
+test('phone accepts pairing bundles only in the matching network mode', async () => {
+  const page = await readFile(new URL('../harmony/entry/src/main/ets/pages/Index.ets', import.meta.url), 'utf8');
+  const source = page.slice(page.indexOf('function decodePairingBundle('), page.indexOf('function connectionLabel('));
+  const decode = new Function('util', stripTypeScriptTypes(source) + '\nreturn decodePairingBundle;')({
+    Base64Helper: class { decodeSync(value) { return Buffer.from(value, 'base64'); } },
+    TextDecoder: class { decodeWithStream(bytes) { return bytes.toString('utf8'); } },
+  });
+  const encode = (bundle) => Buffer.from(JSON.stringify({
+    ticket: 'a'.repeat(64), ca: '-----BEGIN CERTIFICATE-----\nYQ==\n-----END CERTIFICATE-----\n',
+    pin: 'A'.repeat(43) + '=', ...bundle,
+  })).toString('base64url');
+  const lan = encode({ url: 'https://192.168.1.99:18981' });
+  const remote = encode({ url: 'https://93.184.216.34:8443', transport: 'remote' });
+  assert.equal(decode(lan, false).url, 'https://192.168.1.99:18981');
+  assert.equal(decode(remote, true).url, 'https://93.184.216.34:8443');
+  assert.throws(() => decode(lan, true), /invalid_bundle/);
+  assert.throws(() => decode(remote, false), /invalid_bundle/);
+});
 
 function gui(input, env) {
   return new Promise((resolve, reject) => {
@@ -28,18 +49,175 @@ function gui(input, env) {
   });
 }
 
-function tlsRequest(config, path, input, token) {
+function tlsRequest(config, path, input, token, options = {}) {
   return new Promise((resolve, reject) => {
+    const binary = Buffer.isBuffer(input);
     const req = secureRequest(config.url + path, { method: input ? 'POST' : 'GET', ca: config.ca, rejectUnauthorized: true,
-      headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) } }, (res) => {
-      let data = ''; res.on('data', (chunk) => { data += chunk; });
-      res.on('end', () => { try { resolve({ status: res.statusCode, data: JSON.parse(data) }); } catch (e) { reject(e); } });
+      ...options, headers: { 'content-type': binary ? 'application/octet-stream' : 'application/json',
+        ...(token ? { authorization: `Bearer ${token}` } : {}), ...options.headers } }, (res) => {
+      const chunks = [];
+      res.on('data', (chunk) => chunks.push(chunk));
+      res.on('end', () => {
+        try {
+          const bytes = Buffer.concat(chunks);
+          const data = res.headers['content-type'] === 'application/octet-stream' ? bytes : JSON.parse(bytes);
+          resolve({ status: res.statusCode, data });
+        } catch (error) { reject(error); }
+      });
     });
-    req.on('error', reject); req.end(input ? JSON.stringify(input) : undefined);
+    req.on('error', reject);
+    req.end(input && !binary ? JSON.stringify(input) : input);
   });
 }
 
-test('desktop GUI discovers unshared real Pi sessions and shares only the selected session', { timeout: 20000 }, async (context) => {
+async function approvalHost(context, ipc, { id, pid }) {
+  const interaction = { id: randomUUID(), method: 'confirm', title: 'Approve fixture?', message: 'Test approval routing' };
+  let pending = true;
+  const server = httpServer(async (req, res) => {
+    const reply = (status, data) => {
+      res.writeHead(status, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(data));
+    };
+    if (req.url === '/health') return reply(200, { protocol: 'pi-go-desktop-host/1' });
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const input = JSON.parse(Buffer.concat(chunks));
+    if (input.id !== id || input.pid !== pid) return reply(409, { error: 'session_changed' });
+    if (req.url === '/pending') return reply(200, pending ? { interaction } : {});
+    if (req.url === '/answer' && pending && input.pendingId === interaction.id && input.answer === true) {
+      pending = false;
+      return reply(200, { answered: true });
+    }
+    return reply(409, { error: 'interaction_unavailable' });
+  });
+  server.listen(join(ipc, `host-${process.pid}.sock`));
+  await once(server, 'listening');
+  context.after(() => promisify(server.close.bind(server))());
+  return interaction;
+}
+
+async function verifyRemote(context, { session, pid, env, lan, outside }) {
+  const { cwd } = session;
+  const reservation = createServer().listen(0, '127.0.0.1');
+  await once(reservation, 'listening');
+  const port = reservation.address().port;
+  await promisify(reservation.close.bind(reservation))();
+  const relay = createServer((phone) => {
+    const mac = createConnection(port, '127.0.0.1');
+    phone.on('error', () => mac.destroy());
+    mac.on('error', () => phone.destroy());
+    phone.once('close', () => mac.destroy());
+    phone.pipe(mac).pipe(phone);
+  }).listen(0, '127.0.0.1');
+  await once(relay, 'listening');
+  context.after(() => relay.close());
+  const publicIP = '93.184.216.34';
+  const setup = { mode: 'remote', port, publicIP, publicPort: 8443 };
+  context.after(() => gui({ action: 'stop', ...setup }, env).catch(() => {}));
+  await assert.rejects(gui({ action: 'pair', ...setup, publicIP: '127.0.0.1' }, env), /公网 IPv4/);
+  const pair = await gui({ action: 'pair', ...setup }, env);
+  const config = JSON.parse(Buffer.from(pair.bundle, 'base64url'));
+  assert.equal(config.transport, 'remote');
+  assert.equal(config.url, `https://${publicIP}:8443`);
+  assert.equal(pair.bridge.host, '127.0.0.1');
+  assert.equal(pair.bridge.computerAccess, true);
+  const endpoint = { ...config, url: `https://127.0.0.1:${relay.address().port}` };
+  const options = { headers: { host: new URL(config.url).host },
+    checkServerIdentity: (_, cert) => checkServerIdentity(publicIP, cert) };
+  const call = (path, input, token) => tlsRequest(endpoint, path, input, token, options);
+  await assert.rejects(tlsRequest(endpoint, '/health'), { code: 'ERR_TLS_CERT_ALTNAME_INVALID' });
+  assert.equal((await tlsRequest(endpoint, '/health', undefined, undefined, { ...options, headers: {} })).status, 403);
+  assert.equal((await call('/health')).status, 401);
+  assert.equal((await call('/sessions')).status, 401);
+  const paired = await call('/pair', { ticket: config.ticket });
+  assert.equal(paired.status, 200);
+  const { token } = paired.data;
+  assert.equal((await call('/health', undefined, token)).status, 200);
+  assert.equal((await tlsRequest(endpoint, '/sessions', undefined, token, { ...options,
+    headers: { ...options.headers, origin: 'https://example.com' } })).status, 403);
+  assert.equal((await call('/pair', { ticket: config.ticket })).status, 401);
+  await gui({ action: 'stop', ...setup }, env);
+  const restarted = await gui({ action: 'connect', ...setup }, env);
+  assert.equal(restarted.bridge.paired, true);
+  assert.equal(restarted.bundle, undefined);
+  const list = await call('/sessions', undefined, token);
+  assert.deepEqual(new Set(list.data.sessions.map((row) => row.id)), new Set([session.id, outside.id]));
+  if (lan) {
+    const local = await tlsRequest(lan.config, '/sessions', undefined, lan.token);
+    assert.deepEqual(list.data.sessions.map((row) => row.id), local.data.sessions.map((row) => row.id));
+  }
+  assert.equal((await call('/files/list', { cwd })).status, 401);
+  assert.deepEqual(await call('/files/list', { cwd: outside.cwd }, token),
+    { status: 403, data: { error: 'desktop_workspace_unshared' } });
+  assert.equal((await call('/open', { id: session.id }, token)).status, 200);
+
+  const file = { cwd, path: 'notes.txt' };
+  await writeFile(join(cwd, file.path), 'before');
+  const files = await call('/files/list', { cwd }, token);
+  assert.equal(files.status, 200);
+  assert.ok(files.data.entries.some((entry) => entry.name === file.path));
+  const original = await call('/files/read', file, token);
+  assert.equal(original.data.text, 'before');
+  const edited = await call('/files/save', { ...file, version: original.data.version, text: 'after' }, token);
+  assert.equal(edited.status, 200);
+  const download = await call(`/files/download?${new URLSearchParams(file)}`, undefined, token);
+  assert.deepEqual(download, { status: 200, data: Buffer.from('after') });
+
+  const interaction = await approvalHost(context, env.PIGO_IPC_DIR, { id: session.id, pid });
+  assert.deepEqual((await call('/chat', undefined, token)).data.interaction, interaction);
+  const answer = { id: session.id, pendingId: interaction.id, answer: true };
+  assert.equal((await call('/answer', answer)).status, 401);
+  assert.deepEqual(await call('/answer', answer, token), { status: 200, data: { answered: true } });
+  assert.equal((await call('/chat', undefined, token)).data.interaction, undefined);
+
+  const attachment = Buffer.from('remote attachment');
+  const uploaded = await call('/upload?kind=file&name=attachment.txt', attachment, token);
+  assert.equal(uploaded.status, 200);
+  assert.deepEqual(await readFile(uploaded.data.attachment.path), attachment);
+  const jpeg = Buffer.from(await readFile(join(project, 'test/prompt-image.base64'), 'utf8'), 'base64');
+  const image = await call('/upload?kind=image&name=photo.jpg', jpeg, token);
+  assert.equal(image.status, 200);
+
+  const models = await call('/models', undefined, token);
+  assert.equal(models.status, 200);
+  if (lan) {
+    const local = (path, input) => tlsRequest(lan.config, path, input, lan.token);
+    assert.equal((await local('/open', { id: session.id })).status, 200);
+    assert.deepEqual(await local('/models'), models);
+    const model = models.data.models.find((item) => item.id === 'text-only');
+    const change = { id: session.id, provider: model.provider, modelId: model.id, thinkingLevel: 'off' };
+    assert.equal((await call('/model', change, token)).status, 200);
+    assert.equal((await local('/models')).data.current.id, model.id);
+    assert.equal((await local('/model', { ...change, modelId: models.data.current.id })).status, 200);
+  }
+
+  const feed = await new Promise((resolve, reject) => {
+    const req = secureRequest(endpoint.url + '/events', { ca: config.ca, rejectUnauthorized: true, ...options,
+      signal: AbortSignal.timeout(8000), headers: { ...options.headers, authorization: `Bearer ${token}` } }, resolve);
+    req.on('error', reject);
+    req.end();
+  });
+  assert.equal(feed.statusCode, 200);
+  const streamClosed = new Promise((resolve) => feed.once('close', resolve));
+  feed.on('error', () => {});
+  const iterator = feed.iterator({ destroyOnReturn: false });
+  assert.match((await iterator.next()).value.toString(), /"type":"ready"/);
+  const sent = await call('/prompt', { id: session.id, text: 'Remote fixture', requestId: randomUUID(),
+    attachments: [{ kind: 'file', token: uploaded.data.attachment.token }, { kind: 'image', token: image.data.attachment.token }] }, token);
+  assert.equal(sent.status, 202);
+  let frames = '';
+  while (!frames.includes('fixture image received')) {
+    const frame = await iterator.next();
+    assert.equal(frame.done, false);
+    frames += frame.value.toString();
+  }
+  await gui({ action: 'revoke', ...setup }, env);
+  await streamClosed;
+  assert.equal((await call('/chat', undefined, token)).status, 401);
+  await gui({ action: 'stop', ...setup }, env);
+}
+
+test('authenticated remote pairing supports the same session catalog and controls as LAN', { timeout: 20000 }, async (context) => {
   const root = await mkdtemp(join(tmpdir(), 'pigo-gui-'));
   const agent = join(root, 'agent'), cwd = join(root, 'project'), ipc = join(root, 'ipc');
   await Promise.all([agent, cwd].map((p) => mkdir(p)));
@@ -66,6 +244,14 @@ test('desktop GUI discovers unshared real Pi sessions and shares only the select
   assert.equal((await gui({ action: 'refresh' }, env)).sessions[0].shared, true);
   await gui({ action: 'unshare', socket: session.socket, id: session.id }, env);
   assert.equal((await gui({ action: 'refresh' }, env)).sessions[0].shared, false);
+  const outside = { id: randomUUID(), cwd: join(root, 'outside'), name: 'Outside workspace' };
+  const history = join(agent, 'sessions', 'outside');
+  await mkdir(history, { recursive: true });
+  await mkdir(outside.cwd);
+  await writeFile(join(history, outside.id + '.jsonl'),
+    JSON.stringify({ type: 'session', ...outside }) + '\n' +
+    JSON.stringify({ type: 'message', message: { role: 'user', content: 'Outside history' } }) + '\n');
+  let lan;
   if (host) {
     const reservation = createServer(); reservation.listen(0, host); await once(reservation, 'listening');
     const port = reservation.address().port; await promisify(reservation.close.bind(reservation))();
@@ -77,7 +263,13 @@ test('desktop GUI discovers unshared real Pi sessions and shares only the select
     assert.equal(list.status, 200);
     assert.equal(list.data.sessions.find((s) => s.id === session.id).active, true);
     assert.equal((await gui({ action: 'refresh' }, env)).sessions[0].shared, true);
-    await gui({ action: 'stop', mode: 'lan', port }, env);
+    lan = { config, token, port };
+  }
+  await gui({ action: 'unshare', socket: session.socket, id: session.id }, env);
+  await verifyRemote(context, { session, pid: runtime.pid, env, lan, outside });
+  if (lan) {
+    assert.equal((await tlsRequest(lan.config, '/chat', undefined, lan.token)).status, 200);
+    await gui({ action: 'stop', mode: 'lan', port: lan.port }, env);
   }
 });
 
@@ -131,6 +323,9 @@ test('desktop GUI USB pairing hands the one-time ticket to the phone over hdc', 
   assert.equal(usbTarget, usb);
   await assert.rejects(gui({ ...input, action: 'pair', target: usbTarget }, { ...env, HDC_TARGETS: 'OTHER USB Connected localhost hdc' }), /USB 手机已更换/);
   const endpoint = `tcp:${port}`;
+  assert.equal((await gui({ ...input, action: 'usb-target', target: usb }, env)).usbForwarded, false);
+  assert.equal((await gui({ ...input, action: 'usb-target', target: usb },
+    { ...env, HDC_FORWARD: `${usb} ${endpoint} ${endpoint} [Reverse]` })).usbForwarded, true);
   const pair = await gui({ ...input, action: 'pair', target: usbTarget }, { ...env, HDC_FORWARD: `OTHER ${endpoint} ${endpoint} [Reverse]\n${usb} ${endpoint} ${endpoint} [Forward]` });
   assert.equal(pair.bridge.running, true);
   assert.equal(pair.bridge.transport, 'usb');
@@ -150,6 +345,10 @@ test('desktop GUI USB pairing hands the one-time ticket to the phone over hdc', 
   assert.equal(phone.status, 200);
   assert.match(phone.data.token, /^[a-f0-9]{64}$/);
   assert.equal((await usbPair(port, delivered)).status, 401);
+  const reconnect = await gui({ ...input, action: 'connect', target: usb },
+    { ...env, HDC_FORWARD: `${usb} ${endpoint} ${endpoint} [Reverse]` });
+  assert.equal(reconnect.code, undefined);
+  assert.doesNotMatch((await readFile(env.HDC_LOG, 'utf8')).slice(log.length), /--ps ticket/);
   const failed = await gui({ ...input, action: 'pair' }, { ...env, HDC_FAIL_START: '1', HDC_FORWARD: `${usb} ${endpoint} ${endpoint} [Reverse]` });
   assert.match(failed.code, /^\d{8}$/);
   assert.match(failed.warning, /无法自动打开手机 Pi Go/);
@@ -164,6 +363,16 @@ test('desktop GUI USB pairing hands the one-time ticket to the phone over hdc', 
   assert.equal((await gui({ ...input, action: 'refresh' }, env)).bridge.paired, true);
   await gui({ ...input, action: 'stop' }, env);
   assert.equal((await gui({ ...input, action: 'refresh' }, env)).bridge.running, false);
+  const resumed = await gui({ ...input, action: 'connect', target: usbTarget }, env);
+  assert.equal(resumed.bridge.paired, true);
+  assert.equal(resumed.code, undefined);
+  const resumeLog = (await readFile(env.HDC_LOG, 'utf8')).slice(finalLog.length);
+  assert.match(resumeLog, /aa start .*--ps address/);
+  assert.doesNotMatch(resumeLog, /--ps ticket/);
+  const response = await fetch(`http://127.0.0.1:${port}/chat`, {
+    headers: { authorization: `Bearer ${manual.data.token}` },
+  });
+  assert.equal(response.status, 200);
 });
 test('desktop GUI starts LAN pairing, exposes no ticket over HTTP, and revokes the device', { skip: !host, timeout: 15000 }, async (context) => {
   const root = await mkdtemp(join(tmpdir(), 'pigo-gui-lan-'));
@@ -220,8 +429,16 @@ test('desktop GUI starts LAN pairing, exposes no ticket over HTTP, and revokes t
   assert.equal(status.paired, true);
   assert.equal(status.expiresAt, undefined);
   assert.equal(JSON.stringify(status).includes(config.ticket), false);
+  await gui({ action: 'stop', mode: 'lan', port }, env);
+  const restarted = await gui({ action: 'connect', mode: 'lan', port, host }, env);
+  assert.equal(restarted.bridge.paired, true, 'a stopped bridge must retain its paired device');
+  assert.equal(restarted.bundle, undefined);
+  assert.equal((await tlsRequest(config, '/chat', undefined, result.token)).status, 200);
   await gui({ action: 'revoke', mode: 'lan', port }, env);
   assert.equal((await gui({ action: 'refresh', mode: 'lan', port }, env)).bridge.paired, false);
   await gui({ action: 'stop', mode: 'lan', port }, env);
   assert.equal((await gui({ action: 'refresh', mode: 'lan', port }, env)).bridge.running, false);
+  const afterRevoke = await gui({ action: 'connect', mode: 'lan', port, host }, env);
+  assert.equal(afterRevoke.bridge.paired, false);
+  assert.equal((await tlsRequest(config, '/chat', undefined, result.token)).status, 401);
 });

@@ -33,6 +33,7 @@ function contentBlocks(source: string): ContentBlock[] {
 @Component
 export struct ChatContent {
   @Prop text: string = '';
+  @Prop accent: string = '#9EE2CE';
 
   @Builder
   inlineText(value: string, heading: boolean) {
@@ -42,13 +43,13 @@ export struct ChatContent {
           Span(part.slice(2, -2)).fontWeight(FontWeight.Bold)
         } else if (part.startsWith('`') && part.endsWith('`')) {
           Span(part.slice(1, -1)).fontFamily('monospace').fontSize(15)
-            .textBackgroundStyle({ color: '#283239', radius: 4 })
+            .textBackgroundStyle({ color: $r('app.color.pigo_control'), radius: 4 })
         } else {
           Span(part)
         }
       }, (part: string, index: number) => `${index}-${part}`)
     }.fontSize(heading ? 19 : 16).fontWeight(heading ? FontWeight.Bold : FontWeight.Normal)
-      .fontColor('#EDF2F4').lineHeight(27).copyOption(CopyOptions.LocalDevice).width('100%')
+      .fontColor($r('app.color.pigo_text')).lineHeight(27).copyOption(CopyOptions.LocalDevice).width('100%')
   }
 
   build() {
@@ -56,11 +57,11 @@ export struct ChatContent {
       ForEach(contentBlocks(this.text), (block: ContentBlock) => {
         if (block.kind === 'code') {
           Column({ space: 8 }) {
-            if (block.language) Text(block.language).fontSize(11).fontColor('#9EE2CE')
-            Text(block.text).fontSize(14).fontFamily('monospace').lineHeight(22).fontColor('#E1E9ED')
+            if (block.language) Text(block.language).fontSize(11).fontColor(this.accent)
+            Text(block.text).fontSize(14).fontFamily('monospace').lineHeight(22).fontColor($r('app.color.pigo_text'))
               .copyOption(CopyOptions.LocalDevice).width('100%')
-          }.alignItems(HorizontalAlign.Start).width('100%').padding(12).backgroundColor('#20262B').borderRadius(12)
-            .border({ width: 1, color: '#35414A' })
+          }.alignItems(HorizontalAlign.Start).width('100%').padding(12).backgroundColor($r('app.color.pigo_panel')).borderRadius(12)
+            .border({ width: 1, color: $r('app.color.pigo_line') })
         } else {
           this.inlineText(block.text, block.kind === 'heading')
         }

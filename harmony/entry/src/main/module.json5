@@ -7,6 +7,13 @@
     "deliveryWithInstall": true,
     "installationFree": false,
     "pages": "$profile:main_pages",
+    "metadata": [
+      { "name": "client_id", "value": "6917622368458448041" },
+      {
+        "name": "ohos.arkui.UIMaterial.state",
+        "value": "enable"
+      }
+    ],
     "requestPermissions": [
       { "name": "ohos.permission.INTERNET" },
       {

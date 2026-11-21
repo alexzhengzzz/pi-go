@@ -1,1 +1,18 @@
-{ "color": [{ "name": "launch_background", "value": "#15191C" }] }
+{
+  "color": [
+    {"name": "launch_background", "value": "#F5F7F9"},
+    {"name": "pigo_panel", "value": "#FFFFFF"},
+    {"name": "pigo_control", "value": "#E8EDF1"},
+    {"name": "pigo_selected", "value": "#DCE4EA"},
+    {"name": "pigo_line", "value": "#D3DCE3"},
+    {"name": "pigo_text", "value": "#1D2933"},
+    {"name": "pigo_muted", "value": "#526371"},
+    {"name": "pigo_info", "value": "#345E88"},
+    {"name": "pigo_success", "value": "#246A47"},
+    {"name": "pigo_queued", "value": "#664595"},
+    {"name": "pigo_warning", "value": "#805102"},
+    {"name": "pigo_warning_panel", "value": "#FFF0D3"},
+    {"name": "pigo_error", "value": "#9F3333"},
+    {"name": "pigo_error_panel", "value": "#FCE4E4"}
+  ]
+}

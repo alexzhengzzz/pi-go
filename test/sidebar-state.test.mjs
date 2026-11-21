@@ -17,7 +17,7 @@ function method(source, name) {
 const pageMethods = ['toggleSpace', 'toggleTasks', 'applySidebar', 'scheduleSidebarSave', 'flushSidebarSave'];
 const Page = new Function(stripTypeScriptTypes(
   `const SIDEBAR_VIEWS = ['all', 'pinned', 'recent', 'archived'];\n` +
-  `const SIDEBAR_MAX_COLLAPSED = 100;\n` +
+  `const SIDEBAR_MAX_EXPANDED = 100;\n` +
   `const SIDEBAR_MAX_ENTRIES = 24;\n` +
   `class Harness {\n${pageMethods.map(name => method(page, name)).join('\n')}\n}`
 ) + '; return Harness;')();
@@ -25,7 +25,7 @@ const Page = new Function(stripTypeScriptTypes(
 const vaultMethods = ['loadSidebar', 'saveSidebar'];
 const Vault = new Function(stripTypeScriptTypes(
   `const SIDEBAR_VIEWS = ['all', 'pinned', 'recent', 'archived'];\n` +
-  `const SIDEBAR_MAX_COLLAPSED = 100;\n` +
+  `const SIDEBAR_MAX_EXPANDED = 100;\n` +
   `const SIDEBAR_MAX_ENTRIES = 24;\n` +
   `class Harness {\n${vaultMethods.map(name => method(vaultSource, name)).join('\n')}\n}`
 ) + '; return Harness;')();
@@ -35,7 +35,7 @@ function pageFixture(book = { version: 1, entries: [] }) {
   const saves = [];
   Object.assign(state, {
     sidebarBook: book, sidebarSaveTimer: -1, base: 'http://127.0.0.1:18977',
-    collapsedSpaces: [], tasksExpanded: true, sessionView: 'all', loadedView: 'all',
+    expandedSpaces: [], tasksExpanded: true, sessionView: 'all', loadedView: 'all',
     vault: { saveSidebar: book => { saves.push(book); return Promise.resolve(); } }
   });
   state.savedBooks = saves;
@@ -55,19 +55,19 @@ function vaultFixture(raw = '') {
   return { instance, store };
 }
 
-test('collapsing a space keeps the fold and records it for persistence', () => {
+test('opening a space records it for persistence and closing it clears the fold', () => {
   const state = pageFixture();
   state.toggleSpace('/repo');
-  assert.deepEqual(state.collapsedSpaces, ['/repo']);
+  assert.deepEqual(state.expandedSpaces, ['/repo']);
   assert.equal(state.savedBooks.length, 0, 'the save is debounced');
   state.flushSidebarSave();
   assert.equal(state.savedBooks.length, 1);
   assert.deepEqual(state.savedBooks[0].entries, [{
     address: 'http://127.0.0.1:18977',
-    state: { collapsedSpaces: ['/repo'], tasksExpanded: true, sessionView: 'all' }
+    state: { expandedSpaces: ['/repo'], tasksExpanded: true, sessionView: 'all' }
   }]);
   state.toggleSpace('/repo');
-  assert.deepEqual(state.collapsedSpaces, []);
+  assert.deepEqual(state.expandedSpaces, []);
 });
 
 test('collapsing the task group is remembered too', () => {
@@ -85,23 +85,42 @@ test('repeated toggles coalesce into one save', () => {
   state.toggleTasks();
   state.flushSidebarSave();
   assert.equal(state.savedBooks.length, 1);
-  assert.deepEqual(state.savedBooks[0].entries[0].state.collapsedSpaces, ['/a', '/b']);
+  assert.deepEqual(state.savedBooks[0].entries[0].state.expandedSpaces, ['/a', '/b']);
   assert.equal(state.savedBooks[0].entries[0].state.tasksExpanded, false);
 });
 
-test('connecting restores the remembered collapse and filter state per computer', () => {
+test('connecting restores the remembered expanded folders and filter state per computer', () => {
   const state = pageFixture({ version: 1, entries: [
-    { address: 'lan://desk', state: { collapsedSpaces: ['/a', '/b'], tasksExpanded: false, sessionView: 'pinned' } }
+    { address: 'lan://desk', state: { expandedSpaces: ['/a', '/b'], tasksExpanded: false, sessionView: 'pinned' } }
   ]});
   state.applySidebar('lan://desk');
-  assert.deepEqual(state.collapsedSpaces, ['/a', '/b']);
+  assert.deepEqual(state.expandedSpaces, ['/a', '/b']);
   assert.equal(state.tasksExpanded, false);
   assert.equal(state.sessionView, 'pinned');
   assert.equal(state.loadedView, 'pinned');
   state.applySidebar('usb://other');
-  assert.deepEqual(state.collapsedSpaces, []);
+  assert.deepEqual(state.expandedSpaces, []);
   assert.equal(state.tasksExpanded, true);
   assert.equal(state.sessionView, 'all');
+});
+
+test('folders stay collapsed on connect until the user opens them', () => {
+  const state = pageFixture();
+  state.applySidebar('lan://desk');
+  state.base = 'lan://desk';
+  assert.deepEqual(state.expandedSpaces, [], 'a computer without remembered state starts fully collapsed');
+  state.toggleSpace('/repo');
+  state.flushSidebarSave();
+  state.applySidebar('lan://desk');
+  assert.deepEqual(state.expandedSpaces, ['/repo'], 'only the folder the user opened stays open');
+  state.toggleSpace('/new-space');
+  state.flushSidebarSave();
+  state.applySidebar('lan://desk');
+  assert.deepEqual(state.expandedSpaces, ['/repo', '/new-space']);
+  state.toggleSpace('/repo');
+  state.flushSidebarSave();
+  state.applySidebar('lan://desk');
+  assert.deepEqual(state.expandedSpaces, ['/new-space'], 'closing a folder is remembered too');
 });
 
 test('switching computers keeps each computer folds independent', () => {
@@ -111,9 +130,9 @@ test('switching computers keeps each computer folds independent', () => {
   state.toggleSpace('/work');
   state.flushSidebarSave();
   state.applySidebar('http://127.0.0.1:18977');
-  assert.deepEqual(state.collapsedSpaces, []);
+  assert.deepEqual(state.expandedSpaces, []);
   state.applySidebar('lan://desk');
-  assert.deepEqual(state.collapsedSpaces, ['/work']);
+  assert.deepEqual(state.expandedSpaces, ['/work']);
 });
 
 test('toggles without a connected computer never enter the book', () => {
@@ -130,12 +149,16 @@ test('the drawer toggles route through the persisted methods', () => {
   assert.ok(page.includes('this.toggleTasks();'), 'task group header must call toggleTasks');
   assert.ok(/this\.sessionView = view; this\.scheduleSidebarSave\(\);/.test(page), 'filter buttons must persist');
   assert.ok(page.includes('this.applySidebar(record.address);'), 'connecting a computer must restore its sidebar');
+  assert.ok(page.includes('this.expandedSpaces.includes(path) ? 0 : -90'),
+    'folder chevrons must render collapsed unless the folder was opened');
+  assert.ok(page.includes('if (this.expandedSpaces.includes(path)) {'),
+    'folder sessions must render only when the folder was opened');
 });
 
 test('the vault roundtrips sidebar state through the store', async () => {
   const { instance, store } = vaultFixture();
   const book = { version: 1, entries: [
-    { address: 'lan://desk', state: { collapsedSpaces: ['/a'], tasksExpanded: false, sessionView: 'recent' } }
+    { address: 'lan://desk', state: { expandedSpaces: ['/a'], tasksExpanded: false, sessionView: 'recent' } }
   ]};
   await instance.saveSidebar(book);
   assert.equal(store.values.get('sidebar'), JSON.stringify(book));
@@ -143,16 +166,28 @@ test('the vault roundtrips sidebar state through the store', async () => {
   assert.deepEqual(await instance.loadSidebar(), book);
 });
 
-test('a missing or corrupted cache falls back to fully expanded defaults', async () => {
+test('a missing or corrupted cache falls back to fully collapsed defaults', async () => {
   for (const raw of ['', '{broken json', 'null', JSON.stringify({ version: 9, entries: [{ address: 'x', state: {} }] })]) {
     const { instance } = vaultFixture(raw);
     assert.deepEqual(await instance.loadSidebar(), { version: 1, entries: [] }, `raw=${raw}`);
   }
 });
 
+test('legacy collapsed-spaces cache loads as fully collapsed', async () => {
+  const raw = JSON.stringify({ version: 1, entries: [
+    { address: 'lan://old', state: { collapsedSpaces: ['/a'], tasksExpanded: true, sessionView: 'all' } }
+  ]});
+  const { instance } = vaultFixture(raw);
+  const book = await instance.loadSidebar();
+  assert.equal(book.entries.length, 1);
+  assert.deepEqual(book.entries[0].state.expandedSpaces, [],
+    'old records never silently expand folders on connect');
+  assert.equal(book.entries[0].state.tasksExpanded, true);
+});
+
 test('stored entries are validated, deduplicated and clamped', async () => {
   const raw = JSON.stringify({ version: 1, entries: [
-    { address: 'lan://a', state: { collapsedSpaces: ['/x', 42, null], tasksExpanded: false, sessionView: 'nonsense' } },
+    { address: 'lan://a', state: { expandedSpaces: ['/x', 42, null], tasksExpanded: false, sessionView: 'nonsense' } },
     { address: 'lan://a', state: { tasksExpanded: true } },
     { state: { tasksExpanded: true } },
     'garbage'
@@ -160,7 +195,7 @@ test('stored entries are validated, deduplicated and clamped', async () => {
   const { instance } = vaultFixture(raw);
   const book = await instance.loadSidebar();
   assert.equal(book.entries.length, 1);
-  assert.deepEqual(book.entries[0].state.collapsedSpaces, ['/x']);
+  assert.deepEqual(book.entries[0].state.expandedSpaces, ['/x']);
   assert.equal(book.entries[0].state.tasksExpanded, false);
   assert.equal(book.entries[0].state.sessionView, 'all');
 });
@@ -172,7 +207,7 @@ test('a failed sidebar write does not block later saves', async () => {
   await assert.rejects(() => instance.saveSidebar({ version: 1, entries: [] }));
   store.put = originalPut;
   await instance.saveSidebar({ version: 1, entries: [
-    { address: 'lan://ok', state: { collapsedSpaces: [], tasksExpanded: true, sessionView: 'all' } }
+    { address: 'lan://ok', state: { expandedSpaces: [], tasksExpanded: true, sessionView: 'all' } }
   ]});
   const book = await instance.loadSidebar();
   assert.equal(book.entries[0].address, 'lan://ok');

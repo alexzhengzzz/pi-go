@@ -17,6 +17,7 @@ struct Bridge: Decodable {
     var lastSeen: Double?
     var expiresAt: Double?
     var host: String?
+    var address: String?
 }
 struct Payload: Decodable {
     var sessions: [Session]?
@@ -26,12 +27,16 @@ struct Payload: Decodable {
     var bundle: String?
     var warning: String?
     var usbTarget: String?
+    var usbForwarded: Bool?
 }
 struct Result: Decodable { var ok: Bool; var data: Payload?; var error: String? }
 
 @MainActor final class PairingModel: ObservableObject {
     @Published var mode = UserDefaults.standard.string(forKey: "connectionMode") ?? "lan" {
-        didSet { UserDefaults.standard.set(mode, forKey: "connectionMode") }
+        didSet {
+            UserDefaults.standard.set(mode, forKey: "connectionMode")
+            if mode != oldValue { usbTarget = nil }
+        }
     }
     @Published var autoUSB = UserDefaults.standard.bool(forKey: "autoUSB") {
         didSet {
@@ -39,7 +44,9 @@ struct Result: Decodable { var ok: Bool; var data: Payload?; var error: String? 
             if !autoUSB { usbTarget = nil }
         }
     }
-    @Published var host = ""
+    @Published var host = UserDefaults.standard.string(forKey: "lanHost") ?? ""
+    @Published var publicIP = UserDefaults.standard.string(forKey: "publicIP") ?? ""
+    @Published var publicPort = UserDefaults.standard.string(forKey: "publicPort") ?? "8443"
     @Published var sessions: [Session] = []
     @Published var addresses: [String] = []
     @Published var bridge = Bridge(running: false)
@@ -86,14 +93,23 @@ struct Result: Decodable { var ok: Bool; var data: Payload?; var error: String? 
             let payload = try await request(["action": "refresh", "mode": selectedMode])
             guard selectedMode == mode && !busy else { return }
             sessions = payload.sessions ?? []; addresses = payload.addresses ?? []
-            if !addresses.contains(host) { host = addresses.first ?? "" }
             bridge = payload.bridge ?? Bridge(running: false)
-            if bridge.expiresAt == nil || (bridge.expiresAt ?? 0) < Date().timeIntervalSince1970 * 1000 { code = ""; bundle = ""; notice = "" }
+            if selectedMode == "lan" && !addresses.contains(host) {
+                host = bridge.host.flatMap { addresses.contains($0) ? $0 : nil } ?? addresses.first ?? ""
+            }
+            if selectedMode == "remote", let address = bridge.address {
+                let endpoint = address.split(separator: ":", maxSplits: 1)
+                publicIP = String(endpoint[0])
+                publicPort = endpoint.count == 2 ? String(endpoint[1]) : "443"
+            }
+            if (!code.isEmpty || !bundle.isEmpty) && (bridge.expiresAt ?? 0) < Date().timeIntervalSince1970 * 1000 {
+                code = ""; bundle = ""; notice = ""
+            }
             if selectedMode == "usb" && autoUSB {
-                let detected = try await request(["action": "usb-target"]).usbTarget
+                let usb = try await request(["action": "usb-target", "target": usbTarget ?? ""])
                 guard !Task.isCancelled && mode == "usb" && autoUSB && !busy else { return }
-                if let detected {
-                    if detected != usbTarget { await perform("pair", target: detected) }
+                if let detected = usb.usbTarget {
+                    if usb.usbForwarded != true || !bridge.running { await perform("connect", target: detected) }
                 } else {
                     usbTarget = nil
                 }
@@ -104,15 +120,24 @@ struct Result: Decodable { var ok: Bool; var data: Payload?; var error: String? 
         guard !busy else { return }
         busy = true; error = ""
         var input = ["action": action, "mode": mode, "host": host]
+        if mode == "remote" {
+            input["publicIP"] = publicIP.trimmingCharacters(in: .whitespacesAndNewlines)
+            input["publicPort"] = publicPort.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
         if let session { input["socket"] = session.socket; input["id"] = session.id }
         if let target { input["target"] = target }
         do {
             let payload = try await request(input)
-            if action == "pair" {
+            if action == "pair" || action == "connect" {
                 notice = payload.warning ?? ""
-                code = notice.isEmpty ? "" : payload.code ?? ""
+                code = payload.code ?? ""
                 bundle = payload.bundle ?? ""
                 if mode == "usb" { usbTarget = payload.usbTarget }
+                if mode == "lan" { UserDefaults.standard.set(host, forKey: "lanHost") }
+                if mode == "remote" {
+                    UserDefaults.standard.set(input["publicIP"], forKey: "publicIP")
+                    UserDefaults.standard.set(input["publicPort"], forKey: "publicPort")
+                }
             }
             if action == "revoke" || action == "stop" { code = ""; bundle = ""; notice = "" }
             if mode == "usb" && (action == "revoke" || action == "stop") { autoUSB = false }
@@ -125,6 +150,11 @@ struct Result: Decodable { var ok: Bool; var data: Payload?; var error: String? 
         if !bridge.running { return mode == "usb" && autoUSB ? "等待 USB 手机" : "尚未连接" }
         if let last = bridge.lastSeen, bridge.paired == true, Date().timeIntervalSince1970 * 1000 - last < 15000 { return "手机在线" }
         return bridge.paired == true ? "已配对 · 等待手机连接" : "服务已启动 · 等待手机配对"
+    }
+    var connectLabel: String {
+        if mode == "usb" { return bridge.paired == true ? "重新连接" : "连接手机" }
+        if bridge.running { return "生成新配对码" }
+        return mode == "remote" ? "启动公网配对" : "启动局域网服务"
     }
     var qr: NSImage? {
         guard !bundle.isEmpty, let filter = CIFilter(name: "CIQRCodeGenerator") else { return nil }
@@ -156,6 +186,7 @@ struct PairingView: View {
                 VStack(alignment: .leading, spacing: 14) {
                     Picker("连接方式", selection: $model.mode) {
                         Text("局域网扫码").tag("lan")
+                        Text("公网").tag("remote")
                         Text("USB").tag("usb")
                     }.pickerStyle(.segmented).disabled(model.busy)
                     if model.mode == "lan" {
@@ -164,17 +195,27 @@ struct PairingView: View {
                             if model.addresses.isEmpty { Text("未找到局域网地址").tag("") }
                             ForEach(model.addresses, id: \.self) { Text($0).tag($0) }
                         }.disabled(model.busy)
+                    } else if model.mode == "remote" {
+                        HStack {
+                            TextField("VPS 公网 IPv4", text: $model.publicIP)
+                            TextField("端口", text: $model.publicPort).frame(width: 75)
+                        }.textFieldStyle(.roundedBorder).disabled(model.busy || model.bridge.running)
+                        Text("将 VPS 公网端口通过 SSH TCP 隧道转发至此 Mac 的 127.0.0.1:18982。").font(.caption).foregroundStyle(.secondary)
                     } else {
                         Toggle("插线自动连接", isOn: $model.autoUSB).disabled(model.busy)
                         Text("保持此窗口打开。通过 USB 连接一台手机并允许调试，Pi Go 会在手机上打开并连接这台电脑。").foregroundStyle(.secondary)
                     }
-                    Button(model.mode == "usb" ? (model.bridge.running ? "重新连接" : "连接手机") : (model.bridge.running ? "生成新配对码" : "开始配对")) {
-                        Task { await model.perform("pair") }
+                    Button(model.connectLabel) {
+                        Task { await model.perform(model.mode != "usb" && model.bridge.running ? "pair" : "connect") }
                     }
                         .buttonStyle(.borderedProminent).controlSize(.large)
-                        .disabled(model.busy || (model.mode == "lan" && model.host.isEmpty))
+                        .disabled(model.busy || (model.mode == "lan" && model.host.isEmpty) ||
+                            (model.mode == "remote" && (model.publicIP.isEmpty || model.publicPort.isEmpty)))
                     if model.bridge.running {
                         HStack {
+                            if model.mode == "usb" && model.bridge.paired == true {
+                                Button("重新配对") { Task { await model.perform("pair") } }
+                            }
                             Button("撤销手机配对", role: .destructive) { Task { await model.perform("revoke") } }
                             Button("停止服务") { Task { await model.perform("stop") } }
                         }.disabled(model.busy)
@@ -189,8 +230,8 @@ struct PairingView: View {
                         Text(model.code).font(.system(size: 34, weight: .semibold, design: .monospaced)).textSelection(.enabled)
                         Text("在手机 Pi Go 中输入八位配对码").foregroundStyle(.secondary)
                     } else {
-                        Image(systemName: model.mode == "lan" ? "qrcode" : "cable.connector").font(.system(size: 65)).foregroundStyle(.tertiary)
-                        Text(model.mode == "lan" ? "点击开始配对" : model.status).foregroundStyle(.secondary)
+                        Image(systemName: model.mode == "usb" ? "cable.connector" : "qrcode").font(.system(size: 65)).foregroundStyle(.tertiary)
+                        Text(model.status).foregroundStyle(.secondary)
                     }
                     if !model.code.isEmpty || !model.bundle.isEmpty {
                         TimelineView(.periodic(from: .now, by: 1)) { context in

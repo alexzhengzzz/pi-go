@@ -14,10 +14,13 @@ function method(name) {
 const methods = ['setDrawer', 'loadSessions', 'requestAction', 'positionTranscript', 'poll', 'loadSessionStatus', 'applyRunningStatus', 'backgroundRunning', 'backgroundActive', 'sessionState', 'sessionRunning'];
 methods.push('cacheChat', 'presentChat', 'send', 'mergeTranscript', 'sameMessage', 'applyLiveSnapshot',
   'handleFrame', 'queueStreamPaint', 'flushStreamDeltas');
-const Page = new Function('Curve', 'BridgeFailure', 'CachePaintFrame', stripTypeScriptTypes(`const STREAM_PAINT_INTERVAL_MS = 32;\nconst MAX_LIVE_TEXT_LENGTH = 16000;\nclass Harness {\n${methods.map(method).join('\n')}\n}`) + '; return Harness;')(
+methods.push('chooseComputer', 'leaveComputer', 'persistComputers', 'pair');
+const Page = new Function('Curve', 'BridgeFailure', 'CachePaintFrame', 'validUsb', 'MAX_COMPUTERS', stripTypeScriptTypes(`const STREAM_PAINT_INTERVAL_MS = 32;\nconst MAX_LIVE_TEXT_LENGTH = 16000;\nclass Harness {\n${methods.map(method).join('\n')}\n}`) + '; return Harness;')(
   { EaseOut: 0 },
   class BridgeFailure extends Error {},
-  class CachePaintFrame { constructor(at) { this.at = at; } }
+  class CachePaintFrame { constructor(at) { this.at = at; } },
+  (address) => address === 'http://127.0.0.1:18977',
+  12
 );
 function fixture() {
   const state = new Page();
@@ -39,6 +42,49 @@ function fixture() {
 }
 const historyHandler = page.match(/\.id\('history'\)[\s\S]*?\.onClick\(\(\) => \{([^}]+)\}\)/)[1];
 const clickHistory = new Function(historyHandler);
+
+test('adding a USB computer does not use or replace the active TLS connection when pairing fails', async () => {
+  const state = fixture();
+  const active = { address: 'https://192.168.1.99:18981', ca: 'active-ca', pin: 'active-pin', token: 'active-token' };
+  const usbAddress = 'http://127.0.0.1:18977';
+  const requests = [];
+  Object.assign(state, {
+    base: active.address, ca: active.ca, pin: active.pin, token: active.token, isPaired: true,
+    computers: [active], address: usbAddress, pairingMode: 'usb', ticket: '12345678',
+    request: async (...args) => { requests.push(args); throw new Error('offline'); },
+    leaveComputer: () => assert.fail('A failed pairing must preserve the active computer')
+  });
+  await state.pair();
+  assert.deepEqual(requests, [['/pair', { ticket: '12345678' },
+    { address: usbAddress, token: '', ca: undefined, pin: undefined }]]);
+  assert.deepEqual([state.base, state.ca, state.pin, state.token],
+    [active.address, active.ca, active.pin, active.token]);
+  assert.deepEqual(state.computers, [active]);
+  assert.equal(state.busy, false);
+});
+
+test('selecting a saved computer while connected switches once and retains both credentials', async () => {
+  const state = fixture();
+  const lan = { address: 'https://192.168.1.99:18981', token: 'lan' };
+  const remote = { address: 'https://93.184.216.34:8443', token: 'remote' };
+  const remembered = [], saves = [];
+  Object.assign(state, {
+    base: remote.address, isPaired: true, computers: [remote, lan], currentId: 'remote-session',
+    rememberDraft: (id) => remembered.push([state.base, id]),
+    cancelSchedule: () => {}, stopStream: () => {}, closeToolDetails: () => {}, flushSidebarSave: () => {},
+    setInteraction: () => {},
+    activateComputer: (record) => {
+      assert.equal(state.currentId, '');
+      state.base = record.address;
+      state.isPaired = true;
+    },
+    vault: { save: async (book) => { saves.push(book); } }
+  });
+  state.chooseComputer(lan);
+  assert.equal(state.base, lan.address);
+  assert.deepEqual(remembered, [[remote.address, 'remote-session']]);
+  assert.deepEqual(saves, [{ version: 2, active: lan.address, computers: [remote, lan] }]);
+});
 
 test('reopening the sidebar uses the fresh catalog without another request', () => {
   const state = fixture();

@@ -1,22 +1,43 @@
-import { UIAbility, Want, ConfigurationConstant } from '@kit.AbilityKit';
+import { UIAbility, Want, Configuration, ConfigurationConstant } from '@kit.AbilityKit';
 import { window } from '@kit.ArkUI';
+import { appearanceMode, openSettings } from './Appearance';
 
 export default class EntryAbility extends UIAbility {
+  private mainWindow?: window.Window;
+
   onCreate(want: Want): void {
-    this.context.getApplicationContext().setColorMode(ConfigurationConstant.ColorMode.COLOR_MODE_DARK);
+    try {
+      const saved = openSettings(this.context).getSync('appearance_mode', 'system') as string;
+      this.context.getApplicationContext().setColorMode(appearanceMode(saved).colorMode);
+    } catch { /* The default is the system color mode. */ }
+    this.updateColorMode(this.context.config);
     this.applyLaunch(want);
   }
   onNewWant(want: Want): void { this.applyLaunch(want); }
+  onConfigurationUpdate(config: Configuration): void { this.updateColorMode(config); }
+
+  private updateColorMode(config: Configuration): void {
+    if (config.colorMode === undefined) return;
+    const dark = config.colorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK;
+    AppStorage.setOrCreate<boolean>('pigoDark', dark);
+    const foreground = dark ? '#EDF2F4' : '#1D2933';
+    void this.mainWindow?.setWindowSystemBarProperties({
+      statusBarContentColor: foreground, navigationBarContentColor: foreground
+    }).catch(() => {});
+  }
+
   onWindowStageCreate(stage: window.WindowStage): void {
     stage.loadContent('pages/Index', () => {
       void stage.getMainWindow().then((mainWindow: window.Window) => {
-        void mainWindow.setWindowSystemBarProperties({ statusBarContentColor: '#EEEEEE' });
+        this.mainWindow = mainWindow;
+        this.updateColorMode(this.context.config);
         return mainWindow.setWindowLayoutFullScreen(true).then(() => {
           this.trackAvoidAreas(mainWindow);
         });
       }).catch(() => { /* The page remains usable if system bars are unavailable. */ });
     });
   }
+  onWindowStageDestroy(): void { this.mainWindow = undefined; }
 
   private trackAvoidAreas(mainWindow: window.Window): void {
     const update = (): void => {

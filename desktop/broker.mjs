@@ -1,24 +1,32 @@
 import { createHash, randomBytes, randomInt, timingSafeEqual } from 'node:crypto';
-import { lstatSync, mkdtempSync, realpathSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { lstatSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createServer, request as ipcRequest } from 'node:http';
 import { createServer as createSecureServer } from 'node:https';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { homedir, tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { desktopHosts, ipcDirectory, localRequest, localUpload, workers, pairingRuntimes } from './local-ipc.mjs';
-import { newLanIdentity, privateIPv4 } from './lan-tls.mjs';
+import { newLanIdentity, newPublicIdentity, privateIPv4, publicAddress } from './lan-tls.mjs';
 import { startDiscovery } from './lan-discovery.mjs';
 import { listFiles, previewFile, saveFile, openWorkspaceDownload, findWorkspaceFileByName } from './workspace-files.mjs';
-import { SessionMetadata } from './session-metadata.mjs';
+import { SessionMetadata, stateDirectory } from './session-metadata.mjs';
 import { computerSessions } from './computer-sessions.mjs';
 import { maxFileBytes, maxImageBytes, maxPromptBody, safeAttachmentName } from './attachments.mjs';
 
-const lan = Boolean(process.argv[3]);
-const host = process.argv[3] || '127.0.0.1';
+const remote = process.argv[3] === '--remote';
+const lan = !remote && Boolean(process.argv[3]);
+const transport = remote ? 'remote' : lan ? 'lan' : 'usb';
+const host = lan ? process.argv[3] : '127.0.0.1';
 const port = Number(process.argv[2] ?? '18977');
 if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error('invalid_port');
-const metadata = new SessionMetadata(port);
-const tls = lan ? newLanIdentity(host) : undefined;
+const address = remote ? publicAddress(process.argv[4], Number(process.argv[5])) : `${host}:${port}`;
+const ticketRoute = remote ? '/ticket-remote' : lan ? '/ticket-lan' : '/ticket';
+const metadata = new SessionMetadata(remote ? 18981 : port);
+const pairingFile = join(stateDirectory(), `pairing-${transport}-${port}.json`);
+const pairingProfile = resolve(process.env.PI_CODING_AGENT_DIR || join(homedir(), '.pi', 'agent'));
+const saved = loadPairing();
+const tls = remote ? newPublicIdentity(process.argv[4], saved?.identity) : lan ? newLanIdentity(host, saved?.identity) : undefined;
+const sameIdentity = !tls || tls.cert === saved?.identity?.cert;
 const adminPath = join(ipcDirectory(), `bridge-${port}.sock`);
 const digest = (text) => createHash('sha256').update(text).digest();
 const matches = (text, expected) => typeof text === 'string' && expected !== undefined && timingSafeEqual(digest(text), expected);
@@ -30,10 +38,10 @@ const error = (response, status, code) => reply(response, status, { error: code 
 const options = { requestTimeout: 5000, headersTimeout: 5000, connectionsCheckingInterval: 1000 };
 // Phone uploads can carry one 8 MiB file, so the public listener gets a longer
 // request budget; header/keepalive limits and maxConnections still apply.
-const publicOptions = { ...options, requestTimeout: 60000 };
-let bearer;
+const publicOptions = { ...options, requestTimeout: 60000, ...(remote ? { maxHeaderSize: 8192, keepAliveTimeout: 2500 } : {}) };
+let bearer = sameIdentity && saved?.bearer ? Buffer.from(saved.bearer, 'hex') : undefined;
 let lastSeen;
-let computerAccess = false;
+let computerAccess = remote || (saved?.computerAccess ?? false);
 let pairing;
 let selected;
 let chosen = false;
@@ -44,8 +52,61 @@ let stopDiscovery;
 let selectionVersion = 0;
 const grants = new Map();
 const streams = new Set();
+let remoteRequests = 0;
+let remoteBudget = 40;
+let remoteBudgetAt = performance.now();
 
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function acceptRemoteRequest(response) {
+  const now = performance.now();
+  remoteBudget = Math.min(40, remoteBudget + (now - remoteBudgetAt) * 0.012);
+  remoteBudgetAt = now;
+  if (remoteBudget < 1 || remoteRequests >= 10) {
+    response.setHeader('Retry-After', '1');
+    error(response, 429, 'too_many_requests');
+    return false;
+  }
+  remoteBudget -= 1;
+  remoteRequests += 1;
+  response.once('close', () => { remoteRequests -= 1; });
+  return true;
+}
+
+function workerPath(path, session) {
+  if (!remote) return path;
+  const url = new URL(path, 'http://pi-go');
+  url.searchParams.set('_pigoSession', session.id);
+  url.searchParams.set('_pigoCwd', session.cwd);
+  return url.pathname + url.search;
+}
+
+function loadPairing() {
+  let info;
+  try { info = lstatSync(pairingFile); }
+  catch (error) { if (error.code === 'ENOENT') return; throw error; }
+  if (!info.isFile() || info.uid !== process.getuid() || (info.mode & 0o077) || info.size > 8192) {
+    throw new Error('unsafe_pairing_state');
+  }
+  const value = JSON.parse(readFileSync(pairingFile, 'utf8'));
+  if (value?.version !== 1 || typeof value.computerAccess !== 'boolean' || typeof value.profile !== 'string' ||
+    (value.bearer !== undefined && (typeof value.bearer !== 'string' || !/^[a-f0-9]{64}$/.test(value.bearer))) ||
+    ((lan || remote) && (typeof value.identity?.cert !== 'string' || typeof value.identity?.key !== 'string'))) {
+    throw new Error('invalid_pairing_state');
+  }
+  if (value.host === host && value.profile === pairingProfile && (!remote || value.address === address)) return value;
+}
+
+function savePairing(nextBearer) {
+  const identity = tls && { cert: tls.cert, key: tls.key };
+  const state = { version: 1, host, profile: pairingProfile, computerAccess, bearer: nextBearer?.toString('hex'), identity };
+  if (remote) Object.assign(state, { address });
+  const temporary = pairingFile + '.' + randomBytes(8).toString('hex');
+  try {
+    writeFileSync(temporary, JSON.stringify(state), { mode: 0o600, flag: 'wx' });
+    renameSync(temporary, pairingFile);
+  } finally { try { unlinkSync(temporary); } catch {} }
+}
 
 async function pumpEvents(client, authorization) {
   try {
@@ -67,7 +128,8 @@ async function pumpEvents(client, authorization) {
         if (client.closed || !matches(authorization, bearer) || version !== selectionVersion) client.upstream?.destroy();
         else if (!client.response.write(': keepalive\n\n')) client.response.destroy();
       }, 4000);
-      const upstream = ipcRequest({ socketPath: current.socket, path: '/events', method: 'GET', agent: false }, (res) => {
+      const path = workerPath('/events', current.session);
+      const upstream = ipcRequest({ socketPath: current.socket, path, method: 'GET', agent: false }, (res) => {
         if (res.statusCode !== 200) { res.resume(); finish(); return; }
         res.setEncoding('utf8');
         res.on('data', (chunk) => { if (!client.response.write(chunk)) client.response.destroy(); });
@@ -89,20 +151,24 @@ async function pumpEvents(client, authorization) {
 }
 
 function clearTicket() {
-  if (pairing) rmSync(pairing.directory, { recursive: true, force: true });
+  const directory = pairing?.directory;
   pairing = undefined;
   clearTimeout(ticketTimer);
+  if (directory) {
+    try { rmSync(directory, { recursive: true, force: true }); } catch { /* The ticket is already invalid. */ }
+  }
 }
 
 function issueTicket() {
   clearTicket();
   const directory = mkdtempSync(join(tmpdir(), 'pigo-bridge-'));
   const ticket = randomBytes(32).toString('hex');
-  const code = lan ? undefined : String(randomInt(100_000_000)).padStart(8, '0');
+  const code = tls ? undefined : String(randomInt(100_000_000)).padStart(8, '0');
   const file = join(directory, 'pair.json');
   pairing = { directory, ticket: digest(ticket), code: code && digest(code), attempts: 0, expiresAt: Date.now() + 120000 };
-  const url = `${lan ? 'https' : 'http'}://${host}:${port}`;
-  const config = tls ? { bundle: Buffer.from(JSON.stringify({ url, ticket, ca: tls.cert, pin: tls.pin })).toString('base64url') } : { url, ticket, code };
+  const url = `${tls ? 'https' : 'http'}://${address}`;
+  const config = tls ? { bundle: Buffer.from(JSON.stringify({ url, ticket, ca: tls.cert, pin: tls.pin,
+    ...(remote ? { transport } : {}) })).toString('base64url') } : { url, ticket, code };
   writeFileSync(file, JSON.stringify(config), { mode: 0o600, flag: 'wx' });
   ticketTimer = setTimeout(clearTicket, 120000).unref();
   return file;
@@ -150,7 +216,9 @@ async function workerList() {
   const states = await Promise.all(workers().map(async (socket) => {
     try {
       const { status, data } = await localRequest(socket, 'GET', '/session');
-      if (status === 200 && typeof data.session?.id === 'string' && typeof data.session?.cwd === 'string') return { socket, session: data.session };
+      if (status === 200 && typeof data.session?.id === 'string' && typeof data.session?.cwd === 'string') {
+        return { socket, session: data.session };
+      }
     } catch (cause) {
       if (cause.code === 'ECONNREFUSED') {
         try { unlinkSync(socket); } catch {}
@@ -181,10 +249,11 @@ async function catalog(live, hostSocket, granted = []) {
     ...session, active: true, occupied: counts.get(session.id) > 1,
   }]));
   const projects = new Map(live.map((worker) => [worker.session.cwd, worker]));
-  await Promise.all([...projects].map(async ([cwd, { socket }]) => {
+  await Promise.all([...projects].map(async ([cwd, { socket, session }]) => {
     let cursor = 0;
     for (let page = 0; page < 3; page += 1) {
-      const result = await localRequest(socket, 'GET', `/sessions?limit=100&cursor=${cursor}`).catch(() => undefined);
+      const path = workerPath(`/sessions?limit=100&cursor=${cursor}`, session);
+      const result = await localRequest(socket, 'GET', path).catch(() => undefined);
       if (result?.status !== 200 || result.data.current?.cwd !== cwd || !Array.isArray(result.data.sessions)) return;
       for (const record of result.data.sessions) {
         const prior = rows.get(record.id);
@@ -196,9 +265,11 @@ async function catalog(live, hostSocket, granted = []) {
       cursor = next;
     }
   }));
-  if (hostSocket) await Promise.all(granted.filter((cwd) => !projects.has(cwd)).map(async (cwd) => {
+  // In computer-wide mode the native store supplies history without asking
+  // Desktop to register or trust a workspace during a read-only listing.
+  if (hostSocket && !computerAccess) await Promise.all(granted.filter((cwd) => !projects.has(cwd)).map(async (cwd) => {
     const result = await localRequest(hostSocket, 'POST', '/catalog', { cwd }).catch(() => undefined);
-    if ((!computerAccess && !grants.has(cwd)) || result?.status !== 200 || !Array.isArray(result.data.sessions)) return;
+    if (!grants.has(cwd) || result?.status !== 200 || !Array.isArray(result.data.sessions)) return;
     for (const record of result.data.sessions) {
       if (!rows.has(record.id)) rows.set(record.id, { ...record, cwd, active: false });
     }
@@ -232,7 +303,9 @@ async function nativeHandoff(request, response, route, cwd, id, context, hasLive
     if (context.ambiguous) return error(response, 409, 'desktop_host_ambiguous');
     if (!context.socket) return error(response, 409, 'desktop_handoff_required');
     if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
-    if (!computerAccess && !hasLiveProject && grants.get(cwd) !== context.profile) return error(response, 403, 'desktop_workspace_unshared');
+    if (!computerAccess && !hasLiveProject && grants.get(cwd) !== context.profile) {
+      return error(response, 403, 'desktop_workspace_unshared');
+    }
     const result = await localRequest(context.socket, 'POST', route, { cwd, id }, 12000).catch(() => undefined);
     if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
     if (!result) return error(response, 409, 'desktop_handoff_unconfirmed');
@@ -252,30 +325,39 @@ async function nativeHandoff(request, response, route, cwd, id, context, hasLive
 
 const publicHandler = async (request, response) => {
   try {
-    if (request.headers.host !== `${host}:${port}` || request.headers.origin !== undefined ||
+    const authenticated = matches(request.headers.authorization, bearer);
+    if (remote && !authenticated) response.setHeader('Connection', 'close');
+    if (request.headers.host !== address || request.headers.origin !== undefined ||
       (lan && !privateIPv4(request.socket.remoteAddress))) return error(response, 403, 'invalid_source');
     const path = (request.url ?? '').split('?')[0];
     const route = `${request.method} ${path}`;
-    if (route === 'GET /health') return reply(response, 200, { protocol: 'pi-go-bridge/1' });
+    if (!remote && route === 'GET /health') return reply(response, 200, { protocol: 'pi-go-bridge/1' });
     if (route === 'POST /pair') {
-      const input = await body(request);
+      if (remote && (!pairing || pairing.expiresAt <= Date.now())) return error(response, 401, 'invalid_ticket');
+      const input = await body(request, remote ? 1024 : undefined);
+      if (remote && pairing?.expiresAt <= Date.now()) clearTicket();
       if (!matches(input.ticket, pairing?.ticket) && !matches(input.ticket, pairing?.code)) {
-        if (pairing && ++pairing.attempts >= 5) clearTicket();
+        if (!remote && pairing && ++pairing.attempts >= 5) clearTicket();
         return error(response, 401, 'invalid_ticket');
       }
-      clearTicket();
       const token = randomBytes(32).toString('hex');
-      bearer = digest(`Bearer ${token}`);
+      const nextBearer = digest(`Bearer ${token}`);
+      try { savePairing(nextBearer); }
+      catch { return error(response, 500, 'pairing_state_unavailable'); }
+      clearTicket();
+      bearer = nextBearer;
       lastSeen = Date.now();
       selected = undefined;
       chosen = false;
       selectionVersion += 1;
-      for (const client of streams) client.upstream?.destroy();
+      for (const client of streams) remote ? client.response.destroy() : client.upstream?.destroy();
       return reply(response, 200, { token });
     }
-    if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
+    if (!authenticated) return error(response, 401, 'unpaired');
+    if (remote && !acceptRemoteRequest(response)) return;
     lastSeen = Date.now();
-    if (!['GET /session', 'GET /chat', 'GET /history', 'GET /tool-detail', 'GET /sessions', 'GET /sessions/status', 'GET /models', 'GET /events', 'GET /files/download', 'POST /open', 'POST /new', 'POST /prompt', 'POST /upload', 'POST /abort', 'POST /answer', 'POST /receipt', 'POST /model', 'POST /rename', 'POST /session-meta', 'POST /files/list', 'POST /files/read', 'POST /files/save'].includes(route)) return error(response, 404, 'not_found');
+    if (route === 'GET /health') return reply(response, 200, { protocol: 'pi-go-bridge/1' });
+    if (!['GET /session', 'GET /chat', 'GET /history', 'GET /tool-detail', 'GET /sessions', 'GET /sessions/status', 'GET /models', 'GET /events', 'GET /files/download', 'POST /open', 'POST /new', 'POST /prompt', 'POST /upload', 'POST /abort', 'POST /answer', 'POST /receipt', 'POST /model', 'POST /rename', 'POST /session-meta', 'POST /close-workspace', 'POST /files/list', 'POST /files/read', 'POST /files/save'].includes(route)) return error(response, 404, 'not_found');
     if (route === 'GET /events') {
       if (streams.size >= 4) return error(response, 429, 'too_many_streams');
       request.socket.setTimeout(0);
@@ -334,12 +416,13 @@ const publicHandler = async (request, response) => {
       if (live.filter(({ session }) => session.id === current.session.id).length !== 1) return error(response, 409, 'session_occupied');
       const bytes = await rawBody(request, kind === 'image' ? maxImageBytes : maxFileBytes);
       if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
-      const result = await localUpload(current.socket, request.url ?? '/upload', bytes).catch(() => undefined);
+      const result = await localUpload(current.socket, workerPath(request.url ?? '/upload', current.session), bytes).catch(() => undefined);
       if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
       if (!result) return error(response, 409, 'session_unavailable');
       return reply(response, result.status, result.data);
     }
-    const input = request.method === 'POST' ? await body(request, route === 'POST /prompt' ? maxPromptBody : route === 'POST /files/save' ? 512 * 1024 : undefined) : undefined;
+    const input = request.method === 'POST' ? await body(request, route === 'POST /prompt' ? maxPromptBody :
+      route === 'POST /files/save' ? 512 * 1024 : undefined) : undefined;
     const live = await workerList();
     if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
     const current = selectionFor(live);
@@ -437,6 +520,30 @@ const publicHandler = async (request, response) => {
       if (typeof input.cwd !== 'string' || (!live.some(({ session }) => session.cwd === input.cwd) && !context.granted.includes(input.cwd))) return error(response, 403, 'desktop_workspace_unshared');
       return await nativeHandoff(request, response, '/new', input.cwd, undefined, context, live.some(({ session }) => session.cwd === input.cwd));
     }
+    if (route === 'POST /close-workspace') {
+      // Closing mirrors Desktop's own "remove workspace": the folder leaves the
+      // Desktop sidebar (files stay), so the next refresh no longer lists it.
+      if (typeof input.cwd !== 'string') return error(response, 400, 'invalid_target');
+      const context = await hostContext();
+      if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
+      if (!context.socket) return error(response, 409, 'desktop_handoff_required');
+      if (!live.some(({ session }) => session.cwd === input.cwd) && !context.granted.includes(input.cwd)) {
+        return error(response, 403, 'desktop_workspace_unshared');
+      }
+      const result = await localRequest(context.socket, 'POST', '/close-workspace', { cwd: input.cwd }, 12000).catch(() => undefined);
+      if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
+      if (!result) return error(response, 409, 'desktop_handoff_unconfirmed');
+      if (result.status !== 200) return error(response, result.status, result.data?.error ?? 'desktop_close_failed');
+      try { grants.delete(realpathSync(input.cwd)); } catch {}
+      if (selected) {
+        let hosted = selected.cwd === input.cwd;
+        if (!hosted) {
+          try { hosted = realpathSync(selected.cwd) === realpathSync(input.cwd); } catch {}
+        }
+        if (hosted) { selected = undefined; chosen = false; selectionVersion += 1; }
+      }
+      return reply(response, 200, { closed: true });
+    }
     if (!current) {
       if (route === 'GET /chat' || route === 'GET /session') return reply(response, 200, { messages: [], state: selected ? 'session_closed' : live.length ? 'no_session_selected' : 'no_shared_sessions' });
       return error(response, 409, 'session_unavailable');
@@ -452,11 +559,14 @@ const publicHandler = async (request, response) => {
       if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
       return reply(response, answer?.status ?? 409, answer?.data ?? { error: 'interaction_unavailable' });
     }
-    const result = await localRequest(current.socket, request.method, request.url, input).catch(() => undefined);
+    const result = await localRequest(current.socket, request.method, workerPath(request.url, current.session), input).catch(() => undefined);
     if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
     if (!result) return error(response, 409, 'session_unavailable');
+    if ((route === 'GET /chat' || (remote && route === 'GET /models')) && result.status === 200 &&
+        (result.data.session?.id !== current.session.id || (remote && result.data.session?.cwd !== current.session.cwd))) {
+      return error(response, 409, 'session_changed');
+    }
     if (route === 'GET /chat' && result.status === 200) {
-      if (result.data.session?.id !== current.session.id) return error(response, 409, 'session_changed');
       const hosts = await desktopHosts();
       if (hosts.length === 1) {
         const pending = await localRequest(hosts[0], 'POST', '/pending', identity, 700).catch(() => undefined);
@@ -484,14 +594,15 @@ publicServer.setTimeout(18000, (socket) => socket.destroy());
 const admin = createServer(options, async (request, response) => {
   if (request.headers.origin !== undefined) return error(response, 403, 'invalid_source');
   if (request.method === 'GET' && request.url === '/status') return reply(response, 200, {
-    protocol: 'pi-go-pairing/1', computerAccess, transport: lan ? 'lan' : 'usb', host, port,
+    protocol: 'pi-go-pairing/1', computerAccess, transport, host, port,
+    ...(remote ? { address } : {}),
     paired: Boolean(bearer), lastSeen: bearer ? lastSeen : undefined, expiresAt: pairing?.expiresAt,
   });
   if (request.method !== 'POST') return error(response, 404, 'not_found');
   try {
-    if (request.url === '/computer-access') { computerAccess = true; return reply(response, 200, { enabled: true }); }
-    if (request.url === '/ticket' || request.url === '/ticket-lan') {
-      if (lan !== (request.url === '/ticket-lan')) return error(response, 409, 'wrong_transport');
+    if (request.url === '/computer-access' && !remote) { computerAccess = true; return reply(response, 200, { enabled: true }); }
+    if (['/ticket', '/ticket-lan', '/ticket-remote'].includes(request.url)) {
+      if (request.url !== ticketRoute) return error(response, 409, 'wrong_transport');
       if (lan) {
         const input = await body(request);
         if (input.host !== host) return error(response, 409, 'wrong_address');
@@ -499,15 +610,16 @@ const admin = createServer(options, async (request, response) => {
       return reply(response, 200, { file: issueTicket() });
     }
     if (request.url === '/revoke-device') {
+      savePairing(undefined);
       clearTicket();
       bearer = undefined;
       selected = undefined;
       chosen = false;
       selectionVersion += 1;
-      for (const client of streams) client.upstream?.destroy();
+      for (const client of streams) remote ? client.response.destroy() : client.upstream?.destroy();
       return reply(response, 200, { revoked: true });
     }
-    if (request.url === '/grant' || request.url === '/revoke-project') {
+    if (!remote && (request.url === '/grant' || request.url === '/revoke-project')) {
       const input = await body(request);
       if (typeof input.cwd !== 'string') return error(response, 400, 'invalid_target');
       const cwd = realpathSync(input.cwd);
@@ -571,6 +683,7 @@ try {
     unlinkSync(adminPath);
   } catch (cause) { if (cause.code !== 'ENOENT') throw cause; }
   await listen(admin, adminPath);
+  if (remote && !sameIdentity) savePairing(undefined);
   if (lan) stopDiscovery = startDiscovery(host, port);
 } catch (cause) {
   stop();

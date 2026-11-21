@@ -3,15 +3,19 @@ import { lstatSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSy
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 
+export function stateDirectory(directory = process.env.PIGO_STATE_DIR ??
+    (process.env.PIGO_IPC_DIR ? join(process.env.PIGO_IPC_DIR, 'state') : join(homedir(), '.pi-go'))) {
+  const root = resolve(directory);
+  mkdirSync(root, { recursive: true, mode: 0o700 });
+  const info = lstatSync(root);
+  if (!info.isDirectory() || info.uid !== process.getuid() || (info.mode & 0o077)) throw new Error('unsafe_state_directory');
+  return root;
+}
+
 // This is presentation metadata only. Pi retains ownership of session JSONL files.
 export class SessionMetadata {
-  constructor(port, directory = process.env.PIGO_STATE_DIR ??
-      (process.env.PIGO_IPC_DIR ? join(process.env.PIGO_IPC_DIR, 'state') : join(homedir(), '.pi-go'))) {
-    const root = resolve(directory);
-    mkdirSync(root, { recursive: true, mode: 0o700 });
-    const info = lstatSync(root);
-    if (!info.isDirectory() || info.uid !== process.getuid() || (info.mode & 0o077)) throw new Error('unsafe_state_directory');
-    this.directory = join(root, `sessions-${port}`);
+  constructor(port, directory) {
+    this.directory = join(stateDirectory(directory), `sessions-${port}`);
     mkdirSync(this.directory, { mode: 0o700, recursive: true });
     const directoryInfo = lstatSync(this.directory);
     if (!directoryInfo.isDirectory() || directoryInfo.uid !== process.getuid() || (directoryInfo.mode & 0o077)) throw new Error('unsafe_state_directory');
@@ -35,15 +39,44 @@ export class SessionMetadata {
     }
   }
   update(row, patch, revision) {
-    const previous = this.get(row);
-    if (revision !== undefined && previous.revision !== revision) throw new Error('metadata_conflict');
-    const next = { ...previous, ...patch, version: 1, revision: previous.revision + 1 };
-    const temporary = this.file(row) + '.' + randomBytes(8).toString('hex');
+    const file = this.file(row);
+    const lock = file + '.lock';
+    const temporary = file + '.' + randomBytes(8).toString('hex');
+    try { writeFileSync(lock, String(process.pid), { flag: 'wx', mode: 0o600 }); }
+    catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+      this.removeAbandonedLock(lock);
+      throw new Error('metadata_conflict');
+    }
     try {
+      const previous = this.get(row);
+      if (revision !== undefined && previous.revision !== revision) throw new Error('metadata_conflict');
+      const next = { ...previous, ...patch, version: 1, revision: previous.revision + 1 };
       writeFileSync(temporary, JSON.stringify(next), { mode: 0o600, flag: 'wx' });
-      renameSync(temporary, this.file(row));
-    } finally { try { unlinkSync(temporary); } catch {} }
-    return next;
+      renameSync(temporary, file);
+      return next;
+    } finally {
+      try { unlinkSync(temporary); } catch {}
+      unlinkSync(lock);
+    }
   }
-  visit(row) { return this.update(row, { lastVisited: new Date().toISOString() }); }
+  removeAbandonedLock(lock) {
+    try {
+      const previous = lstatSync(lock);
+      if (Date.now() - previous.mtimeMs < 30000) return;
+      const owner = Number(readFileSync(lock, 'utf8'));
+      if (Number.isInteger(owner) && owner > 0) {
+        try { process.kill(owner, 0); return; }
+        catch (error) { if (error.code !== 'ESRCH') return; }
+      }
+      const current = lstatSync(lock);
+      if (current.ino === previous.ino && current.dev === previous.dev) unlinkSync(lock);
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+  }
+  visit(row) {
+    try { this.update(row, { lastVisited: new Date().toISOString() }); }
+    catch (error) { if (error.message !== 'metadata_conflict') throw error; }
+  }
 }

@@ -5,15 +5,20 @@ import { http } from '@kit.NetworkKit';
 import { util } from '@kit.ArkTS';
 import { scanBarcode, scanCore } from '@kit.ScanKit';
 import { common } from '@kit.AbilityKit';
+import { preferences, relationalStore } from '@kit.ArkData';
 import { fileIo, fileUri, picker } from '@kit.CoreFileKit';
 import { cryptoFramework } from '@kit.CryptoArchitectureKit';
 import { filePreview } from '@kit.PreviewKit';
-import { pasteboard } from '@kit.BasicServicesKit';
-import { Companion, CredentialVault, SIDEBAR_MAX_COLLAPSED, SIDEBAR_MAX_ENTRIES, SIDEBAR_VIEWS, SidebarBook, SidebarEntry, SidebarState } from '../CredentialVault';
+import { BusinessError, pasteboard } from '@kit.BasicServicesKit';
+import { Companion, CredentialVault, SIDEBAR_MAX_EXPANDED, SIDEBAR_MAX_ENTRIES, SIDEBAR_VIEWS, SidebarBook, SidebarEntry, SidebarState } from '../CredentialVault';
 import { discoverLan } from '../LanDiscovery';
 import { choosePromptImage, capturePromptImage, PromptImage } from '../PromptImage';
 import { choosePromptFiles, PromptFile, MAX_FILES } from '../PromptFile';
 import { ensureMicrophone, VoiceInputSession, voiceInputSupported } from '../VoiceInput';
+import { APPEARANCE_MODES, AppearanceMode, THEME_STYLES, ThemeStyle, appearanceMode, openSettings, themeStyle } from '../Appearance';
+import { HuaweiProfile, authorizeHuaweiProfile, isHuaweiProfileCurrent } from '../HuaweiProfile';
+import { AccountSync, CloudComputer, SyncRow, SyncSnapshot, SYNC_MODE, SYNC_THEME, computerSyncRow } from '../AccountSync';
+import { immersiveSurface } from '../Immersive';
 
 interface ModelOption {
   provider: string;
@@ -22,6 +27,13 @@ interface ModelOption {
   image: boolean;
   levels: string[];
   thinkingLevel?: string;
+}
+
+interface BridgeEndpoint {
+  address: string;
+  token: string;
+  ca?: string;
+  pin?: string;
 }
 
 interface SessionState {
@@ -208,11 +220,12 @@ interface PendingSend {
   attachments: DraftAttachment[];
 }
 
-interface LanBundle {
+interface SecurePairingBundle {
   url: string;
   ticket: string;
   ca: string;
   pin: string;
+  transport?: string;
 }
 
 const MAX_COMPUTERS = 12;
@@ -226,13 +239,6 @@ const RECEIVED_FILE_DIR = 'pigo-files';
 const RECEIVED_FILE_TTL_S = 7 * 24 * 3600;
 const STREAM_PAINT_INTERVAL_MS = 32;
 const MAX_LIVE_TEXT_LENGTH = 16000;
-const PAGE_COLOR = '#15191C';
-const PANEL_COLOR = '#20262B';
-const CONTROL_COLOR = '#2A333A';
-const LINE_COLOR = '#35414A';
-const TEXT_COLOR = '#EDF2F4';
-const MUTED_COLOR = '#A3AFB8';
-const ACCENT_COLOR = '#9EE2CE';
 const MAX_DOWNLOAD_BYTES = 64 * 1024 * 1024;
 const MAX_DOWNLOAD_ERROR_BYTES = 4096;
 const MAX_TEXT_PREVIEW_BYTES = 128 * 1024;
@@ -295,30 +301,47 @@ function messageFileChips(text: string, cwd: string): string[] {
 
 function validCompanion(record: Companion): boolean {
   return !!record && typeof record.address === 'string' && typeof record.token === 'string' && /^[a-f0-9]{64}$/.test(record.token) &&
-    (validUsb(record.address) || (typeof record.ca === 'string' && typeof record.pin === 'string' && validLan(record.address, record.ca, record.pin)));
+    (validUsb(record.address) || (typeof record.ca === 'string' && typeof record.pin === 'string' &&
+      (validSecureAddress(record.address, record.ca, record.pin, false) ||
+        validSecureAddress(record.address, record.ca, record.pin, true))));
 }
 
-function decodeLanBundle(value: string): LanBundle {
+function decodePairingBundle(value: string, remote: boolean): SecurePairingBundle {
   const encoded = value.trim().replace(/\s/g, '');
   if (!/^[a-zA-Z0-9_-]{100,4096}$/.test(encoded)) throw new Error('invalid_bundle');
   const raw = encoded.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(encoded.length / 4) * 4, '=');
   const bytes = new util.Base64Helper().decodeSync(raw);
-  const bundle = JSON.parse(new util.TextDecoder('utf-8').decodeWithStream(bytes)) as LanBundle;
+  const bundle = JSON.parse(new util.TextDecoder('utf-8').decodeWithStream(bytes)) as SecurePairingBundle;
   if (typeof bundle.url !== 'string' || typeof bundle.ca !== 'string' || typeof bundle.pin !== 'string' ||
-    typeof bundle.ticket !== 'string' || !validLan(bundle.url, bundle.ca, bundle.pin) ||
+    (remote ? bundle.transport !== 'remote' : bundle.transport !== undefined) ||
+    typeof bundle.ticket !== 'string' || !validSecureAddress(bundle.url, bundle.ca, bundle.pin, remote) ||
     !/^[a-f0-9]{64}$/.test(bundle.ticket)) throw new Error('invalid_bundle');
   return bundle;
 }
 
-function validLan(url: string, ca: string, pin: string): boolean {
-  const match = /^https:\/\/(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3}):(\d{1,5})$/.exec(url);
-  if (!match || Number(match[5]) < 1024 || Number(match[5]) > 65535 ||
+function validSecureAddress(url: string, ca: string, pin: string, remote: boolean): boolean {
+  const match = /^https:\/\/(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(?::(\d{1,5}))?$/.exec(url);
+  if (!match || (!remote && !match[5]) ||
+    (match[5] && (Number(match[5]) < 1024 || Number(match[5]) > 65535 || String(Number(match[5])) !== match[5])) ||
     ca.length > 2000 || !/^-----BEGIN CERTIFICATE-----\n[A-Za-z0-9+/=\n]+-----END CERTIFICATE-----\n?$/.test(ca) ||
     !/^[A-Za-z0-9+/]{43}=$/.test(pin)) return false;
+  if (!match.slice(1, 5).every((part: string): boolean => Number(part) <= 255 && String(Number(part)) === part)) return false;
   const first = Number(match[1]);
   const second = Number(match[2]);
-  return match.slice(1, 5).every((part: string): boolean => Number(part) <= 255 && String(Number(part)) === part) &&
-    (first === 10 || (first === 172 && second >= 16 && second <= 31) || (first === 192 && second === 168));
+  const third = Number(match[3]);
+  const lan = first === 10 || (first === 172 && second >= 16 && second <= 31) || (first === 192 && second === 168);
+  if (!remote) return lan;
+  return !lan && first > 0 && first < 224 && first !== 127 &&
+    !(first === 100 && second >= 64 && second <= 127) &&
+    !(first === 169 && second === 254) &&
+    !(first === 192 && ((second === 0 && (third === 0 || third === 2)) || (second === 88 && third === 99))) &&
+    !(first === 198 && (second === 18 || second === 19 || (second === 51 && third === 100))) &&
+    !(first === 203 && second === 0 && third === 113);
+}
+
+function connectionLabel(record: Companion): string {
+  if (validUsb(record.address)) return 'USB';
+  return record.ca && record.pin && validSecureAddress(record.address, record.ca, record.pin, true) ? '公网' : 'Wi-Fi';
 }
 
 class CachePaintFrame extends FrameCallback {
@@ -338,8 +361,8 @@ class BridgeFailure extends Error {
 
 @Extend(Button)
 function chatAction() {
-  .backgroundColor('#292929')
-  .fontColor('#E8E8E8')
+  .backgroundColor($r('app.color.pigo_control'))
+  .fontColor($r('app.color.pigo_text'))
   .fontSize(14)
   .borderRadius(14)
 }
@@ -347,6 +370,7 @@ function chatAction() {
 @Entry
 @Component
 struct Index {
+  @StorageProp('pigoDark') private darkMode: boolean = false;
   @StorageLink('pigoAddress') address: string = 'http://127.0.0.1:18977';
   @StorageLink('pigoTicket') @Watch('onLaunchTicket') launchTicket: string = '';
   private restoreChain: Promise<void> = Promise.resolve();
@@ -361,8 +385,8 @@ struct Index {
   private pendingSessionReveal: string = '';
   private navigationStarted: number = 0;
   @State private ticket: string = '';
-  @State private lanMode: boolean = false;
-  @State private lanBundle: string = '';
+  @State private pairingMode: string = 'usb';
+  @State private pairingBundle: string = '';
   @State private lanCandidates: string[] = [];
   @State private isPaired: boolean = false;
   @State private loading: boolean = true;
@@ -434,10 +458,32 @@ struct Index {
   private sessionStatusLoading: boolean = false;
   @State private messages: ChatMessage[] = [];
   @State @Watch('onDrawerChange') private showSessions: boolean = false;
-  @State private collapsedSpaces: string[] = [];
+  @State private expandedSpaces: string[] = [];
   @State private tasksExpanded: boolean = true;
   @State private offlineDismissed: boolean = false;
   @State private activeTab: string = 'tasks';
+  @State private minePage: string = '';
+  @State private addingComputer: boolean = false;
+  @State private themeId: string = 'mint';
+  @State private modeId: string = 'system';
+  @State private appearanceNotice: string = '';
+  @State private huaweiProfile?: HuaweiProfile = undefined;
+  @State private avatarUnavailable: boolean = false;
+  @State private accountBusy: boolean = false;
+  @State private accountNotice: string = '';
+  private settings?: preferences.Preferences;
+  private settingsWrite: Promise<void> = Promise.resolve();
+  @State private cloudComputers: CloudComputer[] = [];
+  @State private restoringComputer?: CloudComputer = undefined;
+  @State private cloudSyncStatus: string = '';
+  @State private cloudSyncBusy: boolean = false;
+  private cloudStore?: Promise<AccountSync>;
+  private cloudWork: Promise<void> = Promise.resolve();
+  private cloudWrites: Promise<void> = Promise.resolve();
+  private cloudTimer: number = -1;
+  private cloudRevision: number = 0;
+  private readonly pendingCloudRows: Map<string, SyncRow> = new Map<string, SyncRow>();
+
   @State private sessionQuery: string = '';
   @State private sessionTotal: number = 0;
   @State private sessionCursor?: number = undefined;
@@ -506,15 +552,28 @@ struct Index {
     if (this.showSessions) { this.showSessions = false; return true; }
     if (this.showSettings) { this.showSettings = false; return true; }
     if (this.showFiles) { this.fileBack(); return true; }
+    if (this.activeTab === 'mine' && this.minePage) {
+      if (!this.busy) this.mineBack();
+      return true;
+    }
     return false;
   }
 
   aboutToAppear(): void {
     this.getUIContext().setKeyboardAvoidMode(KeyboardAvoidMode.RESIZE);
+    this.restoreSettings();
     this.restoreChain = this.restore();
-    void this.restoreChain.then(() => { void this.consumeLaunchTicket(); });
+    void this.restoreChain.then(() => {
+      if (!this.isPaired && this.activeTab === 'tasks') this.openComputers();
+      void this.consumeLaunchTicket();
+    });
   }
-  onPageShow(): void { this.visible = true; this.schedule(0); this.startStream(); }
+  onPageShow(): void {
+    this.visible = true;
+    this.schedule(0);
+    this.startStream();
+    void this.checkHuaweiProfile().then(() => { this.scheduleCloudSync(0); });
+  }
   onPageHide(): void {
     this.visible = false;
     this.cancelSchedule();
@@ -569,8 +628,8 @@ struct Index {
       if (this.launchTicket !== ticket) return;
       if (!this.busy && !this.openingSession) {
         this.launchTicket = '';
-        this.lanMode = false;
-        this.lanBundle = '';
+        this.pairingMode = 'usb';
+        this.pairingBundle = '';
         this.ticket = ticket;
         await this.pair();
         return;
@@ -585,13 +644,17 @@ struct Index {
     this.epoch += 1;
     this.base = record.address;
     this.token = record.token;
-    this.lanMode = !usb;
+    this.pairingMode = usb ? 'usb' : connectionLabel(record) === '公网' ? 'remote' : 'lan';
     if (usb) this.address = record.address;
     this.ca = usb ? undefined : record.ca;
     this.pin = usb ? undefined : record.pin;
     this.ticket = '';
-    this.lanBundle = '';
+    this.pairingBundle = '';
     this.removeTarget = '';
+    this.addingComputer = false;
+    this.restoringComputer = undefined;
+    this.activeTab = 'tasks';
+    this.minePage = '';
     this.status = '';
     this.noSession = '正在加载该电脑的会话…';
     this.showSessions = true;
@@ -605,7 +668,11 @@ struct Index {
   }
 
   private chooseComputer(record: Companion): void {
-    if (this.busy || this.openingSession || this.isPaired || this.removeTarget) return;
+    if (this.busy || this.openingSession || this.removeTarget || (this.isPaired && this.base === record.address)) return;
+    if (this.isPaired) {
+      this.leaveComputer(false, record);
+      return;
+    }
     this.activateComputer(record);
     void this.persistComputers().catch(() => { this.status = '已连接；未能保存本次选择。'; });
   }
@@ -621,10 +688,14 @@ struct Index {
     this.timer = setTimeout(() => { void this.poll(); }, delay);
   }
 
-  private async request(path: string, input?: Payload): Promise<BridgeReply> {
+  private async request(path: string, input?: Payload, endpoint?: BridgeEndpoint): Promise<BridgeReply> {
     const req = http.createHttp();
+    const address = endpoint ? endpoint.address : this.base;
+    const token = endpoint ? endpoint.token : this.token;
+    const ca = endpoint ? endpoint.ca : this.ca;
+    const pin = endpoint ? endpoint.pin : this.pin;
     const headers: Record<string, string> = {};
-    if (this.token) headers['Authorization'] = `Bearer ${this.token}`;
+    if (token) headers['Authorization'] = `Bearer ${token}`;
     if (input) headers['Content-Type'] = 'application/json';
     try {
       const opts: http.HttpRequestOptions = {
@@ -637,12 +708,12 @@ struct Index {
         connectTimeout: 2500,
         readTimeout: path === '/open' || path === '/new' ? 16000 : 6500
       };
-      if (this.ca && this.pin) {
-        opts.caData = this.ca;
-        opts.certificatePinning = { hashAlgorithm: 'SHA-256', publicKeyHash: this.pin };
+      if (ca && pin) {
+        opts.caData = ca;
+        opts.certificatePinning = { hashAlgorithm: 'SHA-256', publicKeyHash: pin };
       }
       if (input) opts.extraData = JSON.stringify(input);
-      const response = await req.request(`${this.base}${path}`, opts);
+      const response = await req.request(`${address}${path}`, opts);
       const reply = JSON.parse(response.result as string) as BridgeReply;
       if (response.responseCode < 200 || response.responseCode >= 300) {
         throw new BridgeFailure(response.responseCode, reply.error ?? 'request_failed');
@@ -836,19 +907,21 @@ struct Index {
   }
 
   private async pair(): Promise<void> {
+    if (this.busy || this.openingSession) return;
+    const profile = this.huaweiProfile;
     let base = this.address.trim();
     let ticket = this.ticket.trim().toLowerCase();
-    this.ca = undefined;
-    this.pin = undefined;
-    if (this.lanMode) {
+    let ca: string | undefined = undefined;
+    let pin: string | undefined = undefined;
+    if (this.pairingMode !== 'usb') {
       try {
-        const bundle = decodeLanBundle(this.lanBundle);
+        const bundle = decodePairingBundle(this.pairingBundle, this.pairingMode === 'remote');
         base = bundle.url;
         ticket = bundle.ticket;
-        this.ca = bundle.ca;
-        this.pin = bundle.pin;
+        ca = bundle.ca;
+        pin = bundle.pin;
       } catch {
-        this.status = '请粘贴从这台电脑直接取得的完整局域网配对包。';
+        this.status = this.pairingMode === 'remote' ? '请导入桌面生成的公网配对包。' : '请导入桌面生成的局域网配对包。';
         return;
       }
     } else if (!validUsb(base) || !/^(\d{8}|[a-f0-9]{64})$/.test(ticket)) {
@@ -859,25 +932,40 @@ struct Index {
       this.status = '已保存 12 台电脑。请先移除不再使用的配对。';
       return;
     }
-    this.base = base;
     this.busy = true;
     this.status = '';
     try {
-      const result = await this.request('/pair', { ticket: ticket });
+      const result = await this.request('/pair', { ticket: ticket }, { address: base, token: '', ca: ca, pin: pin });
       if (!result.token || !/^[a-f0-9]{64}$/.test(result.token)) throw new Error('invalid_token');
-      const record: Companion = { address: base, token: result.token, ca: this.ca, pin: this.pin };
-      this.forgetDrafts(base);
+      const record: Companion = { address: base, token: result.token, ca: ca, pin: pin };
+      if (!this.isPaired || this.base !== base) this.forgetDrafts(base);
       this.computers = [record, ...this.computers.filter((item: Companion): boolean => item.address !== base)];
-      this.activateComputer(record);
-      try { await this.persistComputers(); }
-      catch { this.status = '已连接；凭证未能保存。'; }
+      if (this.isPaired) this.leaveComputer(false, record);
+      else {
+        this.activateComputer(record);
+        try { await this.persistComputers(); }
+        catch { this.status = '已连接；凭证未能保存。'; }
+      }
+      if (profile && this.huaweiProfile === profile) {
+        this.updateCloudComputer(base, validUsb(base) ? 'usb' : connectionLabel(record) === '公网' ? 'remote' : 'lan');
+      }
     } catch (error) {
       this.status = error instanceof BridgeFailure && error.status === 401 ? '票据已经失效，请在电脑上重新生成。' :
-        this.lanMode ? '无法建立安全连接。请检查 Wi-Fi、桥接地址与配对包。' : '无法连接电脑，请确认 USB 转发和 Pi Go 桥接服务。';
+        this.pairingMode !== 'usb' ? '无法建立安全连接。请检查网络、桌面服务与配对包。' : '无法连接电脑，请确认 USB 转发和 Pi Go 桥接服务。';
     } finally { this.busy = false; }
   }
 
-  private async scanLanBundle(): Promise<void> {
+  private selectPairingMode(mode: string): void {
+    if (mode === this.pairingMode) return;
+    this.pairingMode = mode;
+    if (mode === 'usb' && !validUsb(this.address)) this.address = USB_ADDRESS;
+    this.status = '';
+    this.pairingBundle = '';
+    this.lanCandidates = [];
+    this.ticket = '';
+  }
+
+  private async scanPairingBundle(): Promise<void> {
     const context = this.getUIContext().getHostContext();
     if (!context || this.busy) return;
     this.busy = true;
@@ -886,10 +974,13 @@ struct Index {
       const result = await scanBarcode.startScanForResult(context, {
         scanTypes: [scanCore.ScanType.QR_CODE], enableMultiMode: false, enableAlbum: true
       });
-      const bundle = decodeLanBundle(result.originalValue);
-      this.lanBundle = result.originalValue;
+      const bundle = decodePairingBundle(result.originalValue, this.pairingMode === 'remote');
+      this.pairingBundle = result.originalValue;
       this.status = `已导入 ${bundle.url}。确认是自己的电脑后，点「配对并连接」。`;
-    } catch { this.status = '未导入配对包，可重新扫码或手动粘贴。'; }
+    } catch {
+      this.status = this.pairingMode === 'remote' ? '未导入公网配对包，请扫描桌面「公网」二维码。' :
+        '未导入局域网配对包，请扫描桌面「局域网」二维码。';
+    }
     finally { this.busy = false; }
   }
 
@@ -905,7 +996,7 @@ struct Index {
     finally { this.busy = false; }
   }
 
-  private leaveComputer(revoked: boolean = false): void {
+  private leaveComputer(revoked: boolean = false, next?: Companion): void {
     this.textFilePreview = undefined;
     this.closeToolDetails();
     const address = this.base;
@@ -917,14 +1008,18 @@ struct Index {
     this.token = '';
     this.ca = undefined;
     this.pin = undefined;
-    this.lanBundle = '';
+    this.pairingBundle = '';
     this.currentId = '';
     this.pendingSessionReveal = '';
     this.noSession = '';
     this.project = '';
     this.workspaceCwd = '';
     this.showFiles = false;
-    this.activeTab = 'tasks';
+    if (!next && this.activeTab !== 'mine') {
+      this.activeTab = 'mine';
+      this.minePage = 'computers';
+    }
+    this.addingComputer = false;
     this.offlineDismissed = false;
     this.editingPath = '';
     this.fileText = '';
@@ -982,13 +1077,20 @@ struct Index {
     }
     this.status = revoked ? '该电脑的配对已撤销，请重新连接。' : '';
     this.flushSidebarSave();
+    if (next) this.activateComputer(next);
     void this.persistComputers().catch(() => { this.status = '无法保存电脑列表的本次更改。'; });
   }
 
   private removeComputer(address: string): void {
-    if (this.removeTarget !== address || this.isPaired || this.busy) return;
+    if (this.removeTarget !== address || this.busy || this.openingSession) return;
     this.removeTarget = '';
+    if (this.huaweiProfile) this.updateCloudComputer(address, '');
     this.computers = this.computers.filter((record: Companion): boolean => record.address !== address);
+    if (this.isPaired && this.base === address) {
+      this.leaveComputer();
+      this.forgetDrafts(address);
+      return;
+    }
     this.forgetDrafts(address);
     void this.persistComputers().catch(() => { this.status = '无法保存电脑列表的本次更改。'; });
   }
@@ -1283,6 +1385,19 @@ struct Index {
     return this.reachable && (id === this.currentId ? !this.idle || this.queued : this.runningSessionIds.includes(id));
   }
 
+  // Tab 2 ("运行中") lists every running session: the current one first, then background rows.
+  private allRunningRows(): RunningRow[] {
+    const current: RunningRow[] = [];
+    if (this.currentId && this.sessionRunning(this.currentId)) {
+      current.push({
+        id: this.currentId,
+        name: this.chatTitle(),
+        cwd: this.workspaceCwd || undefined
+      });
+    }
+    return current.concat(this.backgroundRunning());
+  }
+
   // Fine-grained state for pills and badges: streaming / waiting / queued.
   private sessionState(id: string): string {
     if (!this.reachable) return '';
@@ -1296,10 +1411,10 @@ struct Index {
     return this.runningSessionIds.includes(id) ? 'streaming' : '';
   }
 
-  private stateColor(state: string): string {
-    if (state === 'waiting') return '#FFB024';
-    if (state === 'queued') return '#B49BDB';
-    return '#72D6A0';
+  private stateColor(state: string): Resource {
+    if (state === 'waiting') return $r('app.color.pigo_warning');
+    if (state === 'queued') return $r('app.color.pigo_queued');
+    return $r('app.color.pigo_success');
   }
 
   private stateLabel(state: string): string {
@@ -1798,6 +1913,42 @@ struct Index {
     if (await this.requestAction('/session-meta', payload)) await this.loadSessions();
   }
 
+  // 长按空间菜单确认后执行：电脑端移除工作区（不删文件），手机端立即收起，下次刷新不再出现。
+  private confirmCloseSpace(path: string): void {
+    const name = path.split('/').pop() || path;
+    if (!this.isPaired || !this.reachable) { this.status = '请先连接电脑再关闭工作区。'; return; }
+    if (this.busy || this.openingSession) { this.status = '请等待当前操作结束后再关闭工作区。'; return; }
+    this.getUIContext().showAlertDialog({
+      title: '关闭工作区',
+      message: `将在电脑端关闭「${name}」：Pi Desktop 侧边栏移除该工作区，其中的进行中任务会停止。文件和会话历史不会被删除。`,
+      autoCancel: true,
+      alignment: DialogAlignment.Bottom,
+      primaryButton: {
+        value: '取消',
+        action: () => {}
+      },
+      secondaryButton: {
+        value: '关闭工作区',
+        fontColor: $r('app.color.pigo_error'),
+        action: () => { void this.closeWorkspace(path); }
+      }
+    });
+  }
+
+  private async closeWorkspace(path: string): Promise<void> {
+    if (!(await this.requestAction('/close-workspace', { cwd: path }))) return;
+    // 本地立即镜像桌面端的移除，避免等待下一次网络刷新才消失。
+    this.projects = this.projects.filter((item: string): boolean => item !== path);
+    this.expandedSpaces = this.expandedSpaces.filter((item: string): boolean => item !== path);
+    this.scheduleSidebarSave();
+    this.getUIContext().getPromptAction().showToast({ message: `已关闭工作区 ${path.split('/').pop() || path}` });
+    if (this.workspaceCwd === path) {
+      // 当前会话所在的电脑端工作区已关闭，回到任务列表等桥接状态刷新。
+      this.showSessions = true;
+      this.schedule(0);
+    } else void this.loadSessions();
+  }
+
   private async requestAction(path: string, input?: Payload): Promise<boolean> {
     if (this.busy || this.openingSession) return false;
     const navigation = path === '/open' || path === '/new';
@@ -1820,7 +1971,7 @@ struct Index {
       const result = await this.request(path, input);
       if (navigation) console.info(`[DEBUG-chat-cache] open ${Date.now() - this.navigationStarted}ms`);
       if (epoch !== this.epoch) return false;
-      if (path === '/new' || path === '/rename' || path === '/session-meta') {
+      if (path === '/new' || path === '/rename' || path === '/session-meta' || path === '/close-workspace') {
         this.sessionCatalogLoaded = false;
         this.sessionCatalogVersion += 1;
       }
@@ -1860,7 +2011,13 @@ struct Index {
         this.showSessions = true;
       }
       if (error instanceof BridgeFailure && error.status === 401) this.leaveComputer(true);
+      else if (error instanceof BridgeFailure && error.message === 'desktop_handoff_required' && path === '/close-workspace') this.status = '此电脑的 Desktop 未启用 Pi Go 集成，无法远程关闭工作区。';
+      else if (error instanceof BridgeFailure && error.message === 'not_found' && path === '/close-workspace') this.status = '电脑端 Pi Go 版本过旧，请重新打包安装 Pi Desktop 后再远程关闭工作区。';
       else if (error instanceof BridgeFailure && error.message === 'desktop_handoff_required') this.status = '此电脑的 Desktop 尚未启用历史恢复支持。先在 Desktop 打开该会话，手机会自动接入。';
+      else if (error instanceof BridgeFailure && error.message === 'desktop_workspace_unshared') this.status = '该工作区尚未共享给手机。';
+      else if (error instanceof BridgeFailure && error.message === 'desktop_workspace_not_registered') this.status = '该工作区不在 Pi Desktop 项目列表中，请在电脑上关闭。';
+      else if (error instanceof BridgeFailure && error.message === 'desktop_workspace_kind_unsupported') this.status = '该工作区是桌面管理的临时检出，请在电脑上关闭。';
+      else if (error instanceof BridgeFailure && error.message === 'desktop_close_failed') this.status = '电脑端关闭工作区失败，请稍后重试。';
       else if (error instanceof BridgeFailure && error.message === 'desktop_workspace_untrusted') this.status = '该工作区未在 Pi Desktop 中登记或信任。';
       else if (error instanceof BridgeFailure && error.message === 'desktop_handoff_unconfirmed') this.status = '桌面未确认操作。请确认是否已打开标签，不要重复新建。';
       else if (error instanceof BridgeFailure && error.message === 'session_occupied') this.status = '同一历史会话出现在多个桌面运行时，请关闭重复标签。';
@@ -1909,10 +2066,10 @@ struct Index {
   thinkingCard(id: string, content: string, ms: number, open: boolean) {
     Column({ space: 8 }) {
       Row({ space: 6 }) {
-        Text('✻').fontSize(13).fontColor('#9BB7D4')
+        Text('✻').fontSize(13).fontColor($r('app.color.pigo_info'))
         Text(id ? (ms >= 0 ? `思考 · ${(ms / 1000).toFixed(1)}s` : '思考') : '思考中…')
-          .fontSize(13).fontColor('#9BB7D4').layoutWeight(1)
-        Image($r('app.media.ic_chevron')).width(16).height(16)
+          .fontSize(13).fontColor($r('app.color.pigo_info')).layoutWeight(1)
+        Image($r('app.media.ic_chevron')).width(16).height(16).fillColor($r('app.color.pigo_text'))
           .rotate({ angle: open ? 90 : 0 }).align(Alignment.End)
       }.width('100%').onClick(() => {
         if (id) this.toggleThinking(id, !open);
@@ -1920,27 +2077,27 @@ struct Index {
       })
       if (open) {
         Scroll() {
-          Text(content).fontSize(13).fontStyle(FontStyle.Italic).fontColor('#8A8A8A').lineHeight(21)
+          Text(content).fontSize(13).fontStyle(FontStyle.Italic).fontColor($r('app.color.pigo_muted')).lineHeight(21)
             .copyOption(CopyOptions.LocalDevice).width('100%')
         }.constraintSize({ maxHeight: 320 }).width('100%')
       } else if (!id) {
-        Text(content.split('\n').pop() ?? '').fontSize(12).fontColor('#7A7A7A').maxLines(1)
+        Text(content.split('\n').pop() ?? '').fontSize(12).fontColor($r('app.color.pigo_muted')).maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis }).width('100%')
       }
-    }.width('100%').padding(12).backgroundColor(PANEL_COLOR).borderRadius(12)
-      .border({ width: 1, color: LINE_COLOR })
+    }.width('100%').padding(12).backgroundColor($r('app.color.pigo_panel')).borderRadius(12)
+      .border({ width: 1, color: $r('app.color.pigo_line') })
   }
 
   @Builder
   fileChip(path: string, lookupName: boolean) {
     Button({ type: ButtonType.Normal }) {
       Row({ space: 8 }) {
-        Text(this.fileIcon(path.split('/').pop() ?? path)).fontSize(10).fontColor('#9BB7D4')
-        Text(path.split('/').pop() ?? path).fontSize(14).fontColor('#E8E8E8').maxLines(1)
+        Text(this.fileIcon(path.split('/').pop() ?? path)).fontSize(10).fontColor($r('app.color.pigo_info'))
+        Text(path.split('/').pop() ?? path).fontSize(14).fontColor($r('app.color.pigo_text')).maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis }).constraintSize({ maxWidth: 220 })
-        Text(this.openingFile ? '接收中…' : '打开').fontSize(12).fontColor('#8A8A8A')
+        Text(this.openingFile ? '接收中…' : '打开').fontSize(12).fontColor($r('app.color.pigo_muted'))
       }
-    }.id(`file-chip-${path}`).backgroundColor('#242424').borderRadius(12)
+    }.id(`file-chip-${path}`).backgroundColor($r('app.color.pigo_panel')).borderRadius(12)
       .padding({ left: 14, right: 14, top: 10, bottom: 10 }).enabled(!this.openingFile)
       .onClick(() => { void this.openWorkspaceFile(this.workspaceCwd, path, lookupName); })
   }
@@ -1949,25 +2106,25 @@ struct Index {
   toolRow(tool: LiveTool, messageId: string) {
     Button({ type: ButtonType.Normal }) {
       Row({ space: 9 }) {
-        Image(this.toolIcon(tool)).width(18).height(18).fillColor(ACCENT_COLOR)
-        Text(this.toolTitle(tool)).fontSize(13).fontColor(TEXT_COLOR)
-        Text(tool.detail).fontSize(12).fontColor(MUTED_COLOR).maxLines(1)
+        Image(this.toolIcon(tool)).width(18).height(18).fillColor(this.accent())
+        Text(this.toolTitle(tool)).fontSize(13).fontColor($r('app.color.pigo_text'))
+        Text(tool.detail).fontSize(12).fontColor($r('app.color.pigo_muted')).maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis }).layoutWeight(1)
         if (tool.state === 'run' && !this.idle) {
-          LoadingProgress().width(13).height(13).color(ACCENT_COLOR)
+          LoadingProgress().width(13).height(13).color(this.accent())
         } else if (tool.state === 'fail') {
-          Text('失败').fontSize(12).fontColor('#FF9D9D')
+          Text('失败').fontSize(12).fontColor($r('app.color.pigo_error'))
         }
-        Image($r('app.media.ic_chevron')).width(14).height(14)
+        Image($r('app.media.ic_chevron')).width(14).height(14).fillColor($r('app.color.pigo_text'))
       }.width('100%')
-    }.width('100%').height(44).padding({ left: 12, right: 10 }).borderRadius(10).backgroundColor(PANEL_COLOR)
+    }.width('100%').height(44).padding({ left: 12, right: 10 }).borderRadius(10).backgroundColor($r('app.color.pigo_panel'))
       .onClick(() => { this.openToolDetails(tool, messageId); })
   }
 
   @Builder
   copyButton(label: string, value: string) {
     Button({ type: ButtonType.Normal }) {
-      Image($r('app.media.ic_copy')).width(18).height(18)
+      Image($r('app.media.ic_copy')).width(18).height(18).fillColor($r('app.color.pigo_text'))
     }.width(38).height(38).borderRadius(10).backgroundColor(Color.Transparent)
       .accessibilityText(label).onClick(() => { void this.copyText(value); })
   }
@@ -1976,16 +2133,16 @@ struct Index {
   toolDetailBlock(label: string, value: string) {
     Column({ space: 4 }) {
       Row() {
-        Text(label).fontSize(13).fontWeight(FontWeight.Medium).fontColor(ACCENT_COLOR).layoutWeight(1)
+        Text(label).fontSize(13).fontWeight(FontWeight.Medium).fontColor(this.accent()).layoutWeight(1)
         if (value) this.copyButton(`复制${label}`, value)
       }.width('100%')
       if (value) {
-        Text(value).width('100%').fontFamily('monospace').fontSize(14).lineHeight(22).fontColor(TEXT_COLOR)
+        Text(value).width('100%').fontFamily('monospace').fontSize(14).lineHeight(22).fontColor($r('app.color.pigo_text'))
           .wordBreak(WordBreak.BREAK_ALL).copyOption(CopyOptions.LocalDevice)
       }
     }.alignItems(HorizontalAlign.Start).width('100%')
       .padding({ left: 12, right: 8, top: 4, bottom: 12 })
-      .backgroundColor(PAGE_COLOR).borderRadius(12).border({ width: 1, color: LINE_COLOR })
+      .backgroundColor($r('app.color.launch_background')).borderRadius(12).border({ width: 1, color: $r('app.color.pigo_line') })
   }
 
   @Builder
@@ -1994,8 +2151,8 @@ struct Index {
       Column({ space: 12 }) {
         if (this.selectedTool) {
           Row({ space: 10 }) {
-            Image(this.toolIcon(this.selectedTool)).width(21).height(21).fillColor(ACCENT_COLOR)
-            Text(this.toolTitle(this.selectedTool)).fontSize(21).fontWeight(FontWeight.Medium).fontColor(TEXT_COLOR)
+            Image(this.toolIcon(this.selectedTool)).width(21).height(21).fillColor(this.accent())
+            Text(this.toolTitle(this.selectedTool)).fontSize(21).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
           }.width('100%').padding({ right: 40 })
           if (this.toolFile(this.selectedTool)) this.fileChip(this.toolFile(this.selectedTool), false)
           if (this.selectedToolDetails) {
@@ -2006,19 +2163,19 @@ struct Index {
               this.toolDetailBlock(this.selectedToolDetails.state === 'fail' ? '错误输出' : '输出', this.selectedToolDetails.output)
             } else {
               Text(this.selectedTool.state === 'run' && !this.idle ? '正在运行…' : '没有文本输出')
-                .fontSize(14).fontColor('#B6B6B6')
+                .fontSize(14).fontColor($r('app.color.pigo_muted'))
             }
             if (this.selectedToolDetails.truncated) {
-              Text('较长的输入或输出仅显示前 64K 字符').fontSize(12).fontColor('#B6B6B6')
+              Text('较长的输入或输出仅显示前 64K 字符').fontSize(12).fontColor($r('app.color.pigo_muted'))
             }
           } else if (this.selectedTool.detail) {
             this.toolDetailBlock('摘要', this.selectedTool.detail)
           }
           if (this.toolDetailError) {
-            Text(this.toolDetailError).fontSize(14).fontColor('#B6B6B6')
+            Text(this.toolDetailError).fontSize(14).fontColor($r('app.color.pigo_muted'))
             Button('重试').chatAction().onClick(() => { void this.loadToolDetails(); })
           } else if (!this.selectedToolDetails) {
-            LoadingProgress().width(22).height(22).color('#B6B6B6').accessibilityText('正在加载工具详情')
+            LoadingProgress().width(22).height(22).color($r('app.color.pigo_muted')).accessibilityText('正在加载工具详情')
           }
         }
       }.width('100%').alignItems(HorizontalAlign.Start).padding({ left: 18, right: 18, top: 22, bottom: 24 })
@@ -2060,8 +2217,15 @@ struct Index {
           Button('取消').chatAction().id('interaction-cancel').enabled(this.reachable && !this.busy && !this.openingSession)
             .onClick(() => { void this.answerInteraction(request.id, false); })
         }
-      }.padding(12).width('100%').backgroundColor('#342A15').borderRadius(14)
+      }.padding(12).width('100%').backgroundColor($r('app.color.pigo_warning_panel')).borderRadius(14)
     }.constraintSize({ maxHeight: 240 }).width('100%')
+  }
+
+  private canSend(): boolean {
+    return this.reachable && !this.busy && !this.openingSession && !this.pendingSend &&
+      !this.recording && !this.voicePreparing && !this.voiceFinishing &&
+      (this.draft.trim().length > 0 || this.attachments.length > 0) &&
+      (this.acceptsImage || !this.attachments.some((item: DraftAttachment): boolean => item.kind === 'image'));
   }
 
   private async send(mode: string = 'send'): Promise<void> {
@@ -2520,6 +2684,307 @@ struct Index {
     if (this.keyboardHeight > 0) this.armTranscriptFollow();
   }
 
+  private restoreSettings(): void {
+    const context = this.getUIContext().getHostContext();
+    if (!context) return;
+    try {
+      const settings = openSettings(context);
+      this.settings = settings;
+      this.themeId = themeStyle(settings.getSync('theme_style', 'mint') as string).id;
+      this.modeId = appearanceMode(settings.getSync('appearance_mode', 'system') as string).id;
+      const raw = settings.getSync('huawei_profile', '') as string;
+      if (!raw) return;
+      const profile = JSON.parse(raw) as HuaweiProfile;
+      if (typeof profile?.openId === 'string' && profile.openId &&
+        typeof profile.name === 'string' && typeof profile.avatar === 'string') {
+        this.huaweiProfile = profile;
+      }
+    } catch { /* An unavailable preferences store leaves the defaults in place. */ }
+  }
+
+  private async saveSetting(key: string, value: string): Promise<void> {
+    const settings = this.settings;
+    if (!settings) throw new Error('settings_unavailable');
+    const write = this.settingsWrite.then(async () => {
+      settings.putSync(key, value);
+      await settings.flush();
+    });
+    this.settingsWrite = write.catch(() => {});
+    return write;
+  }
+
+  private async checkHuaweiProfile(): Promise<void> {
+    const profile = this.huaweiProfile;
+    if (!profile || this.accountBusy) return;
+    try {
+      if (!await isHuaweiProfileCurrent(profile) && this.huaweiProfile === profile && !this.accountBusy) {
+        await this.signOutHuawei();
+      }
+    } catch { /* A temporary Account Kit failure leaves the local profile available. */ }
+  }
+
+  private async signInHuawei(): Promise<void> {
+    const context = this.getUIContext().getHostContext();
+    if (!context || this.accountBusy) return;
+    this.accountBusy = true;
+    this.accountNotice = '';
+    try {
+      this.huaweiProfile = await authorizeHuaweiProfile(context);
+      this.scheduleCloudSync(0);
+      this.avatarUnavailable = false;
+      try { await this.saveSetting('huawei_profile', JSON.stringify(this.huaweiProfile)); }
+      catch { this.accountNotice = '已登录，本次登录状态无法保存。'; }
+    } catch (error) {
+      const code = (error as BusinessError).code;
+      if (code !== 1001502012) {
+        this.accountNotice = code === 1001500001 ? '华为账号登录需要配置应用签名指纹和 Client ID。' :
+          '华为账号登录未完成，请检查系统账号后重试。';
+      }
+    } finally { this.accountBusy = false; }
+  }
+
+  private async signOutHuawei(): Promise<void> {
+    if (this.accountBusy) return;
+    this.accountBusy = true;
+    this.accountNotice = '';
+    try {
+      await this.saveSetting('huawei_profile', '');
+      this.huaweiProfile = undefined;
+      this.avatarUnavailable = false;
+      this.cloudStore = undefined;
+      this.cloudComputers = [];
+      this.pendingCloudRows.clear();
+      this.cloudSyncStatus = '';
+      this.cloudSyncBusy = false;
+      this.restoringComputer = undefined;
+      if (this.cloudTimer !== -1) clearTimeout(this.cloudTimer);
+      this.cloudTimer = -1;
+    }
+    catch { this.accountNotice = '未能清除本地登录记录，请重试退出。'; }
+    finally { this.accountBusy = false; }
+  }
+
+  private queueCloudWork(work: () => Promise<void>): void {
+    this.cloudWork = this.cloudWork.then(work).catch(() => {});
+  }
+
+  private async accountCloudStore(profile: HuaweiProfile): Promise<AccountSync> {
+    if (this.huaweiProfile !== profile) throw new Error('account_changed');
+    if (!this.cloudStore) {
+      const context = this.getUIContext().getHostContext();
+      if (!context) throw new Error('context_unavailable');
+      this.cloudStore = AccountSync.open(context, profile.openId).catch((error: Error) => {
+        if (this.huaweiProfile === profile) this.cloudStore = undefined;
+        throw error;
+      });
+    }
+    return this.cloudStore;
+  }
+
+  private scheduleCloudSync(delay: number = 650): void {
+    const profile = this.huaweiProfile;
+    if (!profile) return;
+    if (this.cloudTimer !== -1) clearTimeout(this.cloudTimer);
+    this.cloudTimer = setTimeout(() => {
+      this.cloudTimer = -1;
+      const revision = this.cloudRevision;
+      this.queueCloudWork(async () => { await this.syncAccountSettings(profile, revision); });
+    }, delay);
+  }
+
+  private async syncAccountSettings(profile: HuaweiProfile, revision: number): Promise<void> {
+    await this.restoreChain;
+    if (this.huaweiProfile !== profile) return;
+    this.cloudSyncBusy = true;
+    this.cloudSyncStatus = '正在与华为云空间同步…';
+    let step = 'account';
+    try {
+      if (!await isHuaweiProfileCurrent(profile) || this.huaweiProfile !== profile) {
+        if (this.huaweiProfile === profile) this.cloudSyncStatus = '请重新登录华为账号。';
+        return;
+      }
+      if (this.settings && !this.settings.getSync('cloud_migration_owner', '')) {
+        await this.saveSetting('cloud_migration_owner', profile.openId);
+      }
+      step = 'local';
+      const store = await this.accountCloudStore(profile);
+      await this.persistCloudRows(profile);
+      const cached = await store.read();
+      if (this.huaweiProfile === profile && revision === this.cloudRevision) this.cloudComputers = cached.computers;
+      if (!await isHuaweiProfileCurrent(profile) || this.huaweiProfile !== profile) return;
+      step = 'cloud';
+      let result = await store.synchronize();
+      if (this.huaweiProfile !== profile) return;
+      if (result === relationalStore.ProgressCode.SUCCESS && revision === this.cloudRevision) {
+        step = 'migration';
+        if (await store.seed(this.legacyCloudSettings(profile))) {
+          if (!await isHuaweiProfileCurrent(profile) || this.huaweiProfile !== profile) return;
+          step = 'upload';
+          result = await store.synchronize();
+        }
+      }
+      step = 'restore';
+      const snapshot = await store.read();
+      if (this.huaweiProfile !== profile) return;
+      if (revision === this.cloudRevision) this.applyCloudSettings(snapshot);
+      this.cloudSyncStatus = result === relationalStore.ProgressCode.SUCCESS ? '电脑列表和主题偏好已同步' :
+        result === relationalStore.ProgressCode.CLOUD_DISABLED ? '请在「设置 → 云空间」开启 Pi Go 同步。' :
+        result === relationalStore.ProgressCode.NETWORK_ERROR ? '云空间连接失败，请检查网络后重试。' :
+        '云空间同步暂未完成，请稍后重试。';
+    } catch (error) {
+      console.warn(`[PiGoCloud] ${step} failed, code=${(error as BusinessError).code ?? 'unknown'}`);
+      if (this.huaweiProfile === profile) this.cloudSyncStatus = '云空间暂不可用，请检查同步设置后重试。';
+    } finally {
+      if (this.huaweiProfile === profile) this.cloudSyncBusy = false;
+    }
+  }
+
+  private legacyCloudSettings(profile: HuaweiProfile): SyncRow[] {
+    const settings = this.settings;
+    if (!settings) return [];
+    if (settings.getSync('cloud_migration_owner', '') !== profile.openId) return [];
+    const rows = this.computers.map((computer: Companion): SyncRow =>
+      computerSyncRow(computer.address, validUsb(computer.address) ? 'usb' :
+        connectionLabel(computer) === '公网' ? 'remote' : 'lan'));
+    const theme = settings.getSync(SYNC_THEME, '') as string;
+    const mode = settings.getSync(SYNC_MODE, '') as string;
+    if (theme && themeStyle(theme).id === theme) rows.push({ key: SYNC_THEME, payload: theme });
+    if (mode && appearanceMode(mode).id === mode) rows.push({ key: SYNC_MODE, payload: mode });
+    return rows;
+  }
+
+  private applyCloudSettings(snapshot: SyncSnapshot): void {
+    this.cloudComputers = snapshot.computers;
+    if (snapshot.theme !== this.themeId && themeStyle(snapshot.theme).id === snapshot.theme) {
+      this.themeId = snapshot.theme;
+      void this.saveSetting(SYNC_THEME, snapshot.theme).catch(() => { this.appearanceNotice = '未能保存主题配色。'; });
+    }
+    if (snapshot.mode !== this.modeId && appearanceMode(snapshot.mode).id === snapshot.mode) {
+      this.applyAppearanceMode(appearanceMode(snapshot.mode));
+    }
+  }
+
+  private writeCloudRow(row: SyncRow): void {
+    const profile = this.huaweiProfile;
+    if (!profile) return;
+    this.cloudRevision += 1;
+    this.pendingCloudRows.set(row.key, row);
+    void this.persistCloudRows(profile).then(() => {
+      if (this.huaweiProfile === profile) this.scheduleCloudSync();
+    }).catch(() => {
+      if (this.huaweiProfile === profile) this.cloudSyncStatus = '本次修改无法保存到同步库，请稍后重试。';
+    });
+  }
+
+  private persistCloudRows(profile: HuaweiProfile): Promise<void> {
+    const write = this.cloudWrites.then(async () => {
+      if (this.huaweiProfile !== profile || !this.pendingCloudRows.size) return;
+      const store = await this.accountCloudStore(profile);
+      for (const row of Array.from(this.pendingCloudRows.values())) {
+        if (this.huaweiProfile !== profile) return;
+        await store.save(row);
+        if (this.huaweiProfile === profile && this.pendingCloudRows.get(row.key) === row) {
+          this.pendingCloudRows.delete(row.key);
+        }
+      }
+    });
+    this.cloudWrites = write.catch(() => {});
+    return write;
+  }
+
+  private updateCloudComputer(address: string, mode: string): void {
+    try {
+      this.writeCloudRow(computerSyncRow(address, mode));
+    } catch {
+      this.cloudSyncStatus = '未能同步电脑列表。';
+    }
+  }
+
+  private cloudOnlyComputers(): CloudComputer[] {
+    return this.cloudComputers.filter((row: CloudComputer): boolean =>
+      !this.computers.some((local: Companion): boolean => local.address === row.address));
+  }
+
+  private restoreCloudComputer(computer: CloudComputer): void {
+    this.selectPairingMode(computer.mode);
+    if (computer.mode === 'usb') this.address = computer.address;
+    this.ticket = '';
+    this.pairingBundle = '';
+    this.lanCandidates = [];
+    this.status = '';
+    this.restoringComputer = computer;
+    this.addingComputer = true;
+  }
+
+  private removeCloudComputer(computer: CloudComputer): void {
+    if (this.removeTarget !== computer.address || this.busy || !this.huaweiProfile) return;
+    this.removeTarget = '';
+    this.updateCloudComputer(computer.address, '');
+  }
+
+  private accentFor(style: ThemeStyle): string {
+    return this.darkMode ? style.dark : style.light;
+  }
+
+  private accent(): string { return this.accentFor(themeStyle(this.themeId)); }
+
+  private accentTint(): string {
+    const style = themeStyle(this.themeId);
+    return this.darkMode ? style.darkTint : style.lightTint;
+  }
+
+  private accentForeground(): string { return this.darkMode ? '#15191C' : '#FFFFFF'; }
+
+  private selectTheme(id: string): void {
+    this.appearanceNotice = '';
+    this.themeId = id;
+    void this.saveSetting(SYNC_THEME, id).catch(() => { this.appearanceNotice = '未能保存主题配色。'; });
+    this.writeCloudRow({ key: SYNC_THEME, payload: id });
+  }
+
+  private applyAppearanceMode(mode: AppearanceMode): boolean {
+    const context = this.getUIContext().getHostContext();
+    if (!context) return false;
+    this.appearanceNotice = '';
+    try {
+      context.getApplicationContext().setColorMode(mode.colorMode);
+      this.modeId = mode.id;
+      void this.saveSetting(SYNC_MODE, mode.id).catch(() => { this.appearanceNotice = '未能保存显示模式。'; });
+      return true;
+    } catch { this.appearanceNotice = '无法切换显示模式。'; }
+    return false;
+  }
+
+  private selectAppearanceMode(mode: AppearanceMode): void {
+    if (this.applyAppearanceMode(mode)) this.writeCloudRow({ key: SYNC_MODE, payload: mode.id });
+  }
+
+  private openComputers(): void {
+    if (this.editingPath && this.fileText !== this.fileOriginal) {
+      this.status = '请先保存或放弃文件修改。';
+      return;
+    }
+    if (this.showSessions) this.setDrawer(false);
+    this.showSettings = false;
+    this.showFiles = false;
+    this.activeTab = 'mine';
+    this.minePage = 'computers';
+  }
+
+  private mineBack(): void {
+    this.dismissKeyboard();
+    if (this.addingComputer) {
+      this.addingComputer = false;
+      this.restoringComputer = undefined;
+      this.ticket = '';
+      this.pairingBundle = '';
+    } else {
+      this.minePage = '';
+    }
+    this.removeTarget = '';
+    this.status = '';
+  }
+
   @Builder
   computerList() {
     if (this.computers.length) {
@@ -2528,44 +2993,88 @@ struct Index {
         Column({ space: 7 }) {
           ForEach(this.computers, (record: Companion) => {
             Row({ space: 6 }) {
-              Button(`${validUsb(record.address) ? 'USB' : 'Wi-Fi'} · ${record.address.split('://')[1]}`).chatAction()
-                .id(`computer-${record.address}`).layoutWeight(1).enabled(!this.busy && !this.removeTarget)
+              Button(`${connectionLabel(record)} · ${record.address.split('://')[1]}${this.isPaired && this.base === record.address ? ' · 当前' : ''}`).chatAction()
+                .id(`computer-${record.address}`).layoutWeight(1)
+                .enabled(!this.busy && !this.openingSession && !this.removeTarget && (!this.isPaired || this.base !== record.address))
                 .onClick(() => { this.chooseComputer(record); })
               if (this.removeTarget === record.address) {
                 Button('确认移除').chatAction().id('confirm-remove').enabled(!this.busy)
                   .onClick(() => { this.removeComputer(record.address); })
                 Button('取消').chatAction().enabled(!this.busy).onClick(() => { this.removeTarget = ''; })
               } else {
-                Button('移除').chatAction().id(`remove-${record.address}`).enabled(!this.busy && !this.removeTarget)
+                Button('移除').chatAction().id(`remove-${record.address}`).enabled(!this.busy && !this.openingSession && !this.removeTarget)
                   .onClick(() => { this.removeTarget = record.address; })
               }
             }.width('100%')
           }, (record: Companion) => record.address)
         }.width('100%')
       }.constraintSize({ maxHeight: 144 }).width('100%')
-      if (this.removeTarget) Text('仅移除手机凭证。要吊销设备，请在电脑上操作。').fontSize(12).width('100%')
+      if (this.removeTarget) Text(this.huaweiProfile ?
+        '移除本机配对和账号列表中的记录。可在电脑端吊销其他手机的访问。' :
+        '移除本机配对。可在电脑端吊销手机的访问。').fontSize(12).width('100%')
     }
   }
 
   @Builder
-  connection() {
-    Column({ space: 20 }) {
-      Text('Pi Go').fontSize(16).fontWeight(FontWeight.Bold).fontColor('#777777').width('100%')
-      Text('连接你的电脑').fontSize(28).fontWeight(FontWeight.Bold).fontColor('#E8E8E8').width('100%')
-      this.computerList()
-      Button(this.lanMode ? '切换到 USB' : '切换到局域网').chatAction().id('transport').enabled(!this.busy && !this.removeTarget)
-        .onClick(() => {
-          this.lanMode = !this.lanMode;
-          if (!this.lanMode && !validUsb(this.address)) this.address = USB_ADDRESS;
-          this.status = '';
-          this.lanBundle = '';
-          this.ticket = '';
-        })
-      if (this.lanMode) {
-        Text('请扫描或粘贴从信任的 Desktop 直接取得的局域网配对包。').fontSize(14).fontColor('#777777').width('100%')
+  cloudComputerList() {
+    if (this.cloudOnlyComputers().length) {
+      Text('从账号恢复的电脑').fontSize(16).fontWeight(FontWeight.Bold).width('100%')
+      ForEach(this.cloudOnlyComputers(), (computer: CloudComputer) => {
+        Column({ space: 8 }) {
+          Text(`${computer.mode === 'usb' ? 'USB' : computer.mode === 'lan' ? '局域网' : '公网'} · ${computer.address.split('://')[1]}`)
+            .fontSize(15).fontColor($r('app.color.pigo_text')).width('100%')
+          Row({ space: 8 }) {
+            if (this.removeTarget === computer.address) {
+              Button('从账号移除').chatAction().enabled(!this.busy)
+                .onClick(() => { this.removeCloudComputer(computer); })
+              Button('取消').chatAction().onClick(() => { this.removeTarget = ''; })
+            } else {
+              Button('在本机配对').chatAction().backgroundColor(this.accent()).fontColor(this.accentForeground())
+                .enabled(!this.busy && !this.openingSession && !this.removeTarget)
+                .onClick(() => { this.restoreCloudComputer(computer); })
+              Button('移除').chatAction().enabled(!this.busy && !this.removeTarget)
+                .onClick(() => { this.removeTarget = computer.address; })
+            }
+          }.width('100%')
+        }.width('100%').padding(12).backgroundColor($r('app.color.pigo_panel')).borderRadius(14)
+      }, (computer: CloudComputer) => computer.address)
+    }
+  }
+
+  @Builder
+  pairingForm() {
+    Column({ space: 14 }) {
+      if (this.restoringComputer) {
+        Text('请从这台电脑获取新的配对码或配对包。')
+          .fontSize(14).fontColor($r('app.color.pigo_text')).width('100%')
+      }
+      Row({ space: 8 }) {
+        Button('USB').chatAction().id('usb-transport').layoutWeight(1).height(42)
+          .accessibilitySelected(this.pairingMode === 'usb')
+          .backgroundColor(this.pairingMode === 'usb' ? this.accentTint() : Color.Transparent)
+          .fontColor(this.pairingMode === 'usb' ? this.accent() : $r('app.color.pigo_muted'))
+          .onClick(() => { this.selectPairingMode('usb'); })
+        Button('局域网').chatAction().id('transport').layoutWeight(1).height(42)
+          .accessibilitySelected(this.pairingMode === 'lan')
+          .backgroundColor(this.pairingMode === 'lan' ? this.accentTint() : Color.Transparent)
+          .fontColor(this.pairingMode === 'lan' ? this.accent() : $r('app.color.pigo_muted'))
+          .onClick(() => { this.selectPairingMode('lan'); })
+        Button('公网').chatAction().id('remote-transport').layoutWeight(1).height(42)
+          .accessibilitySelected(this.pairingMode === 'remote')
+          .backgroundColor(this.pairingMode === 'remote' ? this.accentTint() : Color.Transparent)
+          .fontColor(this.pairingMode === 'remote' ? this.accent() : $r('app.color.pigo_muted'))
+          .onClick(() => { this.selectPairingMode('remote'); })
+      }.width('100%').padding(4).borderRadius(17).backgroundColor($r('app.color.pigo_control'))
+        .enabled(!this.busy && !this.removeTarget)
+      if (this.pairingMode !== 'usb') {
+        Text(this.pairingMode === 'remote' ? '扫描或粘贴桌面「公网」生成的配对包。' :
+          '扫描或粘贴桌面「局域网」生成的配对包。').fontSize(14).fontColor($r('app.color.pigo_muted')).width('100%')
         Row({ space: 8 }) {
-          Button('发现电脑').chatAction().id('lan-discover').enabled(!this.busy && !this.removeTarget).onClick(() => { void this.findLanCompanions(); })
-          Button('扫码导入').chatAction().id('lan-scan').enabled(!this.busy && !this.removeTarget).onClick(() => { void this.scanLanBundle(); })
+          if (this.pairingMode === 'lan') {
+            Button('发现电脑').chatAction().id('lan-discover').enabled(!this.busy && !this.removeTarget).onClick(() => { void this.findLanCompanions(); })
+          }
+          Button('扫码导入').chatAction().id(this.pairingMode === 'remote' ? 'remote-scan' : 'lan-scan')
+            .enabled(!this.busy && !this.removeTarget).onClick(() => { void this.scanPairingBundle(); })
         }.width('100%')
         if (this.lanCandidates.length) {
           Text('附近地址（未验证）').fontSize(12).width('100%')
@@ -2577,18 +3086,180 @@ struct Index {
             }.width('100%')
           }.constraintSize({ maxHeight: 100 }).width('100%')
         }
-        TextInput({ placeholder: '局域网配对包', text: this.lanBundle }).id('lan-bundle').type(InputType.Password).maxLength(4096)
-          .onChange((value: string) => { this.lanBundle = value; }).width('100%')
+        TextInput({ placeholder: this.pairingMode === 'remote' ? '公网配对包' : '局域网配对包', text: this.pairingBundle })
+          .id(this.pairingMode === 'remote' ? 'remote-bundle' : 'lan-bundle').type(InputType.Password).maxLength(4096)
+          .onChange((value: string) => { this.pairingBundle = value; }).width('100%')
       } else {
-        Text('先在桌面会话执行 /pi-go-bridge，再通过 USB 转发连接。').fontSize(14).fontColor('#777777').width('100%')
+        Text('先在桌面会话执行 /pi-go-bridge，再通过 USB 转发连接。').fontSize(14).fontColor($r('app.color.pigo_muted')).width('100%')
         TextInput({ placeholder: 'USB 地址', text: this.address }).id('address')
           .onChange((value: string) => { this.address = value; }).width('100%')
         TextInput({ placeholder: '8 位配对码或一次性票据', text: this.ticket }).id('ticket').type(InputType.Password)
           .onChange((value: string) => { this.ticket = value; }).width('100%')
       }
-      Button('配对并连接').chatAction().id('pair').enabled(!this.busy && !this.removeTarget).backgroundColor('#353535').fontColor('#E8E8E8').width('100%')
+      Button('配对并连接').chatAction().id('pair').enabled(!this.busy && !this.openingSession && !this.removeTarget)
+        .backgroundColor(this.accent()).fontColor(this.accentForeground()).width('100%').height(46)
         .onClick(() => { void this.pair(); })
-    }.padding({ top: 52, bottom: 24, left: 4, right: 4 }).backgroundColor('#1B1B1B').width('100%')
+    }.padding(16).backgroundColor($r('app.color.pigo_panel')).borderRadius(22).width('100%')
+      .border({ width: 1, color: $r('app.color.pigo_line') })
+  }
+
+  @Builder
+  profileCard() {
+    Column({ space: 14 }) {
+      Row({ space: 14 }) {
+        Stack() {
+          if (this.huaweiProfile?.avatar && !this.avatarUnavailable) {
+            Image(this.huaweiProfile.avatar).width(52).height(52).objectFit(ImageFit.Cover)
+              .onError(() => { this.avatarUnavailable = true; })
+          } else {
+            Image($r('app.media.ic_person')).width(24).height(24).fillColor(this.accent())
+          }
+        }.width(52).height(52).backgroundColor(this.accentTint()).borderRadius(26).clip(true)
+        Column({ space: 4 }) {
+          Text(this.huaweiProfile?.name || '个人资料').fontSize(20).fontWeight(FontWeight.Bold)
+            .fontColor($r('app.color.pigo_text')).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+          Text(this.huaweiProfile ? '华为账号已登录' : '华为账号未登录').fontSize(13).fontColor($r('app.color.pigo_muted'))
+        }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+      }.width('100%')
+      Button(this.accountBusy ? '请稍候…' : this.huaweiProfile ? '退出登录' : '使用华为账号登录')
+        .chatAction().id('huawei-account').width('100%').height(44).enabled(!this.accountBusy)
+        .backgroundColor(this.huaweiProfile ? $r('app.color.pigo_control') : this.accent())
+        .fontColor(this.huaweiProfile ? $r('app.color.pigo_text') : this.accentForeground())
+        .onClick(() => {
+          if (this.huaweiProfile) void this.signOutHuawei();
+          else void this.signInHuawei();
+        })
+      if (this.accountNotice) {
+        Text(this.accountNotice).fontSize(13).fontColor($r('app.color.pigo_warning')).width('100%')
+      }
+      if (this.huaweiProfile) {
+        Text(this.cloudSyncStatus || '通过华为云空间同步电脑列表和主题偏好。')
+          .fontSize(13).fontColor($r('app.color.pigo_muted')).width('100%')
+        Button('立即同步').chatAction().id('sync-account-settings').width('100%').height(40)
+          .enabled(!this.cloudSyncBusy && !this.accountBusy)
+          .onClick(() => { this.scheduleCloudSync(0); })
+      }
+    }.width('100%').padding(16).backgroundColor($r('app.color.pigo_panel')).borderRadius(22)
+      .border({ width: 1, color: $r('app.color.pigo_line') })
+  }
+
+  @Builder
+  mineEntry(page: string, label: string, summary: string) {
+    Button({ type: ButtonType.Normal }) {
+      Row({ space: 12 }) {
+        Stack() {
+          if (page === 'computers') {
+            Image($r('app.media.ic_computer')).width(22).height(22).fillColor(this.accent())
+          } else {
+            Row({ space: 3 }) {
+              Blank().width(6).height(6).borderRadius(3).backgroundColor(this.accentFor(THEME_STYLES[0]))
+              Blank().width(6).height(6).borderRadius(3).backgroundColor(this.accentFor(THEME_STYLES[1]))
+              Blank().width(6).height(6).borderRadius(3).backgroundColor(this.accentFor(THEME_STYLES[2]))
+            }
+          }
+        }.width(40).height(40).backgroundColor(this.accentTint()).borderRadius(12)
+        Column({ space: 4 }) {
+          Text(label).fontSize(16).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
+          Text(summary).fontSize(13).fontColor($r('app.color.pigo_muted')).maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+        }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+        Image($r('app.media.ic_chevron')).width(18).height(18).rotate({ angle: -90 })
+          .fillColor($r('app.color.pigo_muted'))
+      }.width('100%').padding(14)
+    }.id(`mine-${page}`).width('100%').padding(0).backgroundColor($r('app.color.pigo_panel')).borderRadius(16)
+      .onClick(() => { this.minePage = page; })
+  }
+
+  @Builder
+  themeSettings() {
+    Column({ space: 10 }) {
+      Text('显示模式').fontSize(16).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text')).width('100%')
+      Row({ space: 6 }) {
+        ForEach(APPEARANCE_MODES, (mode: AppearanceMode) => {
+          Button(mode.label, { type: ButtonType.Normal }).chatAction().layoutWeight(1).height(44).padding(4)
+            .id(`appearance-${mode.id}`).accessibilitySelected(this.modeId === mode.id)
+            .backgroundColor(this.modeId === mode.id ? this.accent() : $r('app.color.pigo_control'))
+            .fontColor(this.modeId === mode.id ? this.accentForeground() : $r('app.color.pigo_text'))
+            .onClick(() => { this.selectAppearanceMode(mode); })
+        }, (mode: AppearanceMode) => mode.id)
+      }.width('100%')
+    }.width('100%').padding(16).backgroundColor($r('app.color.pigo_panel')).borderRadius(18)
+    Column({ space: 8 }) {
+      Text('主题配色').fontSize(16).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text')).width('100%')
+      ForEach(THEME_STYLES, (style: ThemeStyle) => {
+        Button({ type: ButtonType.Normal }) {
+          Row({ space: 12 }) {
+            Blank().width(22).height(22).borderRadius(11).backgroundColor(this.accentFor(style))
+            Text(style.label).fontSize(15).fontColor($r('app.color.pigo_text')).layoutWeight(1)
+            if (this.themeId === style.id) Text('✓').fontSize(18).fontColor(this.accent())
+          }.width('100%').padding({ left: 12, right: 12 })
+        }.id(`theme-${style.id}`).width('100%').height(44).padding(0).borderRadius(12)
+          .accessibilitySelected(this.themeId === style.id)
+          .backgroundColor(this.themeId === style.id ? this.accentTint() : Color.Transparent)
+          .onClick(() => { this.selectTheme(style.id); })
+      }, (style: ThemeStyle) => style.id)
+    }.width('100%').padding(16).backgroundColor($r('app.color.pigo_panel')).borderRadius(18)
+    if (this.appearanceNotice) Text(this.appearanceNotice).fontSize(13).fontColor($r('app.color.pigo_warning'))
+  }
+
+  @Builder
+  mineHeader() {
+    Row({ space: 12 }) {
+      if (this.minePage) {
+        Button({ type: ButtonType.Normal }) {
+          Image($r('app.media.ic_chevron')).width(20).height(20).rotate({ angle: 90 })
+            .fillColor($r('app.color.pigo_text'))
+        }.width(42).height(42).padding(0).borderRadius(12).backgroundColor($r('app.color.pigo_panel'))
+          .accessibilityText('返回').enabled(!this.busy).onClick(() => { this.mineBack(); })
+      }
+      Text(this.minePage === 'theme' ? '系统主题' : this.minePage === 'computers' ?
+        (this.addingComputer ? '添加电脑' : '我的电脑') : '我的')
+        .fontSize(this.minePage ? 21 : 26).fontWeight(FontWeight.Bold).fontColor($r('app.color.pigo_text'))
+    }.width('100%').height(62).padding({ left: 9, right: 9 })
+    .backgroundColor($r('app.color.pigo_panel')).borderRadius(21)
+    .border({ width: 1, color: $r('app.color.pigo_line') }).attributeModifier(immersiveSurface(this.darkMode))
+  }
+
+  @Builder
+  mineView() {
+    Scroll() {
+      Column({ space: 12 }) {
+        if (this.minePage === 'computers') {
+          if (!this.addingComputer) {
+            if (this.isPaired) {
+              Row({ space: 10 }) {
+                Image($r('app.media.ic_computer')).width(28).height(28).fillColor(this.accent())
+                Column({ space: 4 }) {
+                  Text(this.computerTitle()).fontSize(17).fontWeight(FontWeight.Medium)
+                    .fontColor($r('app.color.pigo_text')).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+                  Text(this.reachable ? '已连接' : '离线，正在尝试重连').fontSize(13)
+                    .fontColor(this.reachable ? $r('app.color.pigo_success') : $r('app.color.pigo_warning'))
+                }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+              }.width('100%').padding(16).borderRadius(16).backgroundColor($r('app.color.pigo_panel'))
+            }
+            this.computerList()
+            this.cloudComputerList()
+          }
+          if (this.addingComputer || !this.isPaired) {
+            this.pairingForm()
+          } else {
+            Button('添加电脑').chatAction().id('add-computer').width('100%').height(44)
+              .backgroundColor(this.accent()).fontColor(this.accentForeground())
+              .enabled(!this.busy && !this.openingSession && !this.removeTarget)
+              .onClick(() => { this.status = ''; this.addingComputer = true; })
+          }
+        } else if (this.minePage === 'theme') {
+          this.themeSettings()
+        } else {
+          this.profileCard()
+          this.mineEntry('computers', '我的电脑', this.isPaired ?
+            `${this.computerTitle()} · ${this.reachable ? '已连接' : '离线'}` :
+            (this.computers.length || this.cloudComputers.length ?
+              `${this.computers.length + this.cloudOnlyComputers().length} 台电脑` : '配对并连接电脑'))
+          this.mineEntry('theme', '系统主题', `${themeStyle(this.themeId).label} · ${appearanceMode(this.modeId).label}`)
+        }
+      }.width('100%').alignItems(HorizontalAlign.Start).padding({ top: 4, bottom: 12 })
+    }.layoutWeight(1).width('100%').align(Alignment.TopStart)
   }
 
   @Builder
@@ -2688,67 +3359,65 @@ struct Index {
   }
 
   @Builder
-  chat() {
+  chatHeader() {
     Row({ space: 10 }) {
       Button({ type: ButtonType.Normal }) {
-        Image($r('app.media.ic_menu')).width(24).height(24)
-      }.id('history').width(44).height(44).backgroundColor(PANEL_COLOR).borderRadius(13)
+        Image($r('app.media.ic_menu')).width(24).height(24).fillColor(this.accent())
+      }.id('history').width(44).height(44).padding(0).backgroundColor(this.accentTint()).borderRadius(14)
         .accessibilityText('打开任务抽屉').enabled(!this.busy && !this.showFiles)
         .onClick(() => { this.setDrawer(true); })
       Column({ space: 4 }) {
-        Text(this.showFiles ? '工作区文件' : this.showSettings ? '会话设置' : this.activeTab === 'mine' ? '我的电脑' : this.activeTab === 'pending' ? '待处理' : this.chatTitle())
-          .fontSize(17).fontWeight(FontWeight.Medium).fontColor(TEXT_COLOR).maxLines(1)
+        Text(this.showFiles ? '工作区文件' : this.showSettings ? '会话设置' : this.activeTab === 'pending' ? '运行中' : this.chatTitle())
+          .fontSize(18).fontWeight(FontWeight.Bold).fontColor($r('app.color.pigo_text')).maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis }).width('100%')
         Row({ space: 6 }) {
-          Text('').width(7).height(7).borderRadius(4).backgroundColor(this.reachable ? ACCENT_COLOR : '#FFB46E')
+          Text('').width(7).height(7).borderRadius(4).backgroundColor(this.reachable ? this.accent() : $r('app.color.pigo_warning'))
             .accessibilityText(this.reachable ? '电脑已连接' : '电脑离线')
           Text(`${this.computerTitle()}${this.project ? '  |  ' + this.project : ''}`)
-            .fontSize(12).fontColor(MUTED_COLOR).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+            .fontSize(12).fontColor($r('app.color.pigo_muted')).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
         }.width('100%').onClick(() => { this.setDrawer(true); })
       }.layoutWeight(1).alignItems(HorizontalAlign.Start)
       Row({ space: 0 }) {
         Button({ type: ButtonType.Normal }) {
-          Image($r('app.media.ic_compose')).width(25).height(25)
+          Image($r('app.media.ic_compose')).width(25).height(25).fillColor($r('app.color.pigo_text'))
         }.id('new-task').width(40).height(44).backgroundColor(Color.Transparent).accessibilityText('在当前工作区新建会话')
           .enabled(this.reachable && !this.busy && !this.openingSession && this.desktopHandoff &&
             !!this.workspaceCwd && this.projects.includes(this.workspaceCwd))
           .onClick(() => { this.activeTab = 'tasks'; void this.requestAction('/new', { cwd: this.workspaceCwd }); })
         Button({ type: ButtonType.Normal }) {
-          Image($r('app.media.ic_more')).width(24).height(24)
+          Image($r('app.media.ic_more')).width(24).height(24).fillColor($r('app.color.pigo_text'))
         }.id('session-settings').width(38).height(44).backgroundColor(Color.Transparent).accessibilityText('更多操作')
           .bindMenu([
             { value: this.showSettings ? '返回聊天' : '模型与会话设置', action: () => {
               if (this.showSettings) this.showSettings = false;
               else if (this.reachable && this.currentId) void this.requestAction('/models');
             } },
-            { value: '切换电脑', action: () => { if (!this.busy) this.leaveComputer(); } }
+            { value: '切换电脑', action: () => { if (!this.busy) this.openComputers(); } }
           ])
-      }.backgroundColor(PANEL_COLOR).borderRadius(13)
-    }.width('100%').height(60)
-      .border({ width: { bottom: 1 }, color: LINE_COLOR })
+      }
+    }.width('100%').height(62).padding({ left: 8, right: 4 }).borderRadius(21)
+      .backgroundColor($r('app.color.pigo_panel')).border({ width: 1, color: $r('app.color.pigo_line') })
+      .attributeModifier(immersiveSurface(this.darkMode, `#50${this.accent().slice(1)}`))
+  }
+
+  @Builder
+  pageHeader() {
+    if (this.activeTab === 'mine') {
+      this.mineHeader()
+    } else {
+      this.chatHeader()
+    }
+  }
+
+  @Builder
+  chat() {
     this.runningStrip()
     if (this.showFiles) {
       this.workspaceFiles()
     } else if (this.showSettings) {
       this.sessionSettings()
-    } else if (this.activeTab === 'mine') {
-      Column({ space: 20 }) {
-        Image($r('app.media.ic_computer')).width(48).height(48).opacity(0.8)
-        Text(this.computerTitle()).fontSize(20).fontColor('#E8E8E8')
-        Text(this.reachable ? '设备已连接' : '设备离线，正在尝试重连').fontSize(14).fontColor(this.reachable ? '#8FBAA1' : '#FFB024')
-        this.computerList()
-        Button('连接其他电脑').chatAction().width('100%').enabled(!this.busy)
-          .onClick(() => { this.leaveComputer(); })
-      }.width('100%').layoutWeight(1).padding({ top: 48 }).alignItems(HorizontalAlign.Center)
     } else if (this.activeTab === 'pending') {
-      Column({ space: 20 }) {
-        if (this.interaction) this.pendingCard(this.interaction)
-        else {
-          Image($r('app.media.ic_pending')).width(42).height(42).opacity(0.5)
-          Text('暂无待处理请求').fontSize(20).fontColor('#E8E8E8')
-          Text('需要确认或补充信息时，会显示在这里').fontSize(14).fontColor('#888888')
-        }
-      }.width('100%').layoutWeight(1).justifyContent(FlexAlign.Center)
+      this.runningView()
     } else if (this.noSession) {
       this.welcome()
     } else {
@@ -2780,19 +3449,19 @@ struct Index {
                     if (message.text) {
                       if (message.role === 'user') {
                         Text(message.text).fontSize(16).lineHeight(26)
-                          .copyOption(CopyOptions.LocalDevice).fontColor(TEXT_COLOR)
+                          .copyOption(CopyOptions.LocalDevice).fontColor($r('app.color.pigo_text'))
                       } else {
-                        ChatContent({ text: message.text })
+                        ChatContent({ text: message.text, accent: this.accent() })
                         ForEach(this.messageFiles(message), (path: string) => {
                           this.fileChip(path, true)
                         }, (path: string) => path)
                         this.copyButton('复制回复', message.text)
                       }
                     }
-                    if (message.imageCount) Text(`图片 × ${message.imageCount}`).id(`image-message-${message.id}`).fontSize(13).fontColor('#777777')
+                    if (message.imageCount) Text(`图片 × ${message.imageCount}`).id(`image-message-${message.id}`).fontSize(13).fontColor($r('app.color.pigo_muted'))
                   }.alignItems(HorizontalAlign.Start).padding(message.role === 'user' ? 13 : 0)
                     .constraintSize({ maxWidth: message.role === 'user' ? '88%' : '100%' })
-                    .backgroundColor(message.role === 'user' ? '#2A3B3B' : Color.Transparent)
+                    .backgroundColor(message.role === 'user' ? this.accentTint() : Color.Transparent)
                     .borderRadius({ topLeft: 17, topRight: 6, bottomLeft: 17, bottomRight: 17 })
                 }.width('100%').justifyContent(message.role === 'user' ? FlexAlign.End : FlexAlign.Start)
                   .padding({ top: 10, bottom: 4 })
@@ -2807,7 +3476,7 @@ struct Index {
             if (this.liveThinking) this.thinkingCard('', this.liveThinking, -1, this.liveThinkingOpen)
             if (this.liveText) {
               Column({ space: 8 }) {
-                ChatContent({ text: this.liveText })
+                ChatContent({ text: this.liveText, accent: this.accent() })
                 ForEach(messageFileChips(this.liveText, this.workspaceCwd), (path: string) => {
                   this.fileChip(path, true)
                 }, (path: string) => path)
@@ -2843,20 +3512,20 @@ struct Index {
                     .objectFit(ImageFit.Cover)
                 } else if (item.kind === 'file') {
                   Column({ space: 3 }) {
-                    Text(item.file ? this.fileIcon(item.file.name) : '文件').fontSize(15).fontColor('#9E9E9E')
-                    Text(item.name).fontSize(12).fontColor('#BFBFBF').maxLines(1)
+                    Text(item.file ? this.fileIcon(item.file.name) : '文件').fontSize(15).fontColor($r('app.color.pigo_muted'))
+                    Text(item.name).fontSize(12).fontColor($r('app.color.pigo_text')).maxLines(1)
                       .textOverflow({ overflow: TextOverflow.Ellipsis }).constraintSize({ maxWidth: 150 })
-                    Text(this.fileSize(item.size)).fontSize(11).fontColor('#777777')
+                    Text(this.fileSize(item.size)).fontSize(11).fontColor($r('app.color.pigo_muted'))
                   }.justifyContent(FlexAlign.Center).width('100%').height('100%')
                 }
                 Button({ type: ButtonType.Circle }) {
-                  Text('×').fontSize(13).fontColor('#E8E8E8')
-                }.id(`remove-attachment-${index}`).width(20).height(20).backgroundColor('#5A5A5A')
+                  Text('×').fontSize(13).fontColor($r('app.color.pigo_text'))
+                }.id(`remove-attachment-${index}`).width(20).height(20).backgroundColor($r('app.color.pigo_selected'))
                   .enabled(!this.busy && !this.pendingSend)
                   .onClick(() => { this.removeAttachment(index); })
               }.width(item.kind === 'image' ? 64 : 170).height(64)
                 .borderRadius(item.kind === 'image' ? 10 : 12)
-                .backgroundColor(item.kind === 'image' ? Color.Transparent : '#3A3A3A')
+                .backgroundColor(item.kind === 'image' ? Color.Transparent : $r('app.color.pigo_control'))
                 .padding(item.kind === 'file' ? 6 : 0)
             }, (item: DraftAttachment, index: number) => `${index}-${item.kind}-${item.name}-${item.size}`)
           }.padding({ bottom: 2 })
@@ -2864,23 +3533,25 @@ struct Index {
       }
       Row({ space: 8 }) {
         Button({ type: ButtonType.Normal }) {
-          Text(this.modelLabel || '选择模型').fontSize(12).fontColor(this.modelLabel ? TEXT_COLOR : MUTED_COLOR)
+          Text(this.modelLabel || '选择模型').fontSize(12).fontColor(this.modelLabel ? $r('app.color.pigo_text') : $r('app.color.pigo_muted'))
             .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).constraintSize({ maxWidth: 190 })
-        }.id('model-pill').height(32).padding({ left: 12, right: 12 }).borderRadius(10).backgroundColor(PANEL_COLOR)
+        }.id('model-pill').height(34).padding({ left: 12, right: 12 }).borderRadius(17).backgroundColor(this.accentTint())
           .accessibilityText('切换模型')
           .enabled(this.reachable && !this.busy && !this.openingSession && !!this.currentId && this.idle && !this.queued)
           .onClick(() => { void this.openModelMenu(); })
         Blank()
         Button({ type: ButtonType.Normal }) {
-          Image($r('app.media.ic_chevron')).width(22).height(22)
-        }.id('scroll-bottom').width(38).height(38).borderRadius(12).backgroundColor(CONTROL_COLOR)
+          Image($r('app.media.ic_chevron')).width(22).height(22).fillColor($r('app.color.pigo_text'))
+        }.id('scroll-bottom').width(38).height(38).borderRadius(12).backgroundColor($r('app.color.pigo_control'))
           .visibility(this.transcriptFollow ? Visibility.Hidden : Visibility.Visible)
           .accessibilityText('滚动到最新消息').onClick(() => { this.transcriptFollow = true; this.transcript.scrollEdge(Edge.Bottom); })
       }.width('100%').height(38)
       if (!this.reachable && !this.offlineDismissed) this.offlineNotice(false)
       Row({ space: 6 }) {
         Button({ type: ButtonType.Normal }) {
-          Image(this.voiceMode ? $r('app.media.ic_keyboard') : $r('app.media.ic_mic')).width(24).height(24)
+          Image(this.voiceMode ? $r('app.media.ic_keyboard') : $r('app.media.ic_mic')).width(22).height(22)
+            .fillColor(this.voiceMode ? this.accent() : $r('app.color.pigo_muted'))
+            .fillColor($r('app.color.pigo_text'))
         }.id('voice-toggle').width(38).height(42).backgroundColor(Color.Transparent).borderRadius(19)
           .accessibilityText(this.voiceMode ? '切换到文字输入' : '切换到语音输入')
           .enabled(!!this.currentId && !this.pendingSend && !this.busy && !this.recording && !this.voicePreparing && !this.voiceFinishing)
@@ -2889,20 +3560,20 @@ struct Index {
         if (this.voiceMode) {
           Button({ type: ButtonType.Normal }) {
             Text(this.voicePreparing ? '正在准备…' : this.voiceFinishing ? (this.voiceCancelling ? '按住 说话' : '正在转文字…') : this.recording ? (this.holdCancel ? '松开 取消' : '松开 发送') : '按住 说话')
-              .fontSize(16).fontColor(this.holdCancel ? '#FF7A7A' : '#CFCFCF').maxLines(1)
+              .fontSize(16).fontColor(this.holdCancel ? $r('app.color.pigo_error') : $r('app.color.pigo_text')).maxLines(1)
           }.id('hold-to-talk').layoutWeight(1).height(58).borderRadius(28)
-            .backgroundColor(this.recording ? (this.holdCancel ? '#4A2525' : '#3C3C3C') : '#3A3A3A')
+            .backgroundColor(this.recording ? (this.holdCancel ? $r('app.color.pigo_error_panel') : $r('app.color.pigo_selected')) : $r('app.color.pigo_control'))
             .enabled(!!this.currentId && this.reachable && !this.pendingSend && !this.busy && !this.openingSession)
             .onTouch((event: TouchEvent) => { this.holdTouch(event); })
         } else {
           TextArea({ placeholder: this.reachable ? '输入消息' : '设备离线', text: this.draft })
             .id('draft').layoutWeight(1).constraintSize({ minHeight: 46, maxHeight: 118 }).onFocus(() => { this.armTranscriptFollow(); })
-            .fontSize(16).fontColor(TEXT_COLOR).placeholderColor(MUTED_COLOR).backgroundColor(Color.Transparent)
+            .fontSize(16).fontColor($r('app.color.pigo_text')).placeholderColor($r('app.color.pigo_muted')).backgroundColor(Color.Transparent)
             .padding({ left: 0, right: 2, top: 13, bottom: 11 })
             .enabled(!this.pendingSend).onChange((value: string) => { this.draft = value; })
         }
         Button({ type: ButtonType.Normal }) {
-          Image($r('app.media.ic_plus')).width(25).height(25)
+          Image($r('app.media.ic_plus')).width(25).height(25).fillColor($r('app.color.pigo_text'))
         }.id('attach-image').width(40).height(42).backgroundColor(Color.Transparent).borderRadius(20)
           .accessibilityText('添加图片或文件').enabled(this.reachable && !this.busy && !this.openingSession && !this.pendingSend && !this.recording)
           .bindMenu(this.acceptsImage ? [
@@ -2914,21 +3585,21 @@ struct Index {
           ])
         if (this.idle) {
           Button({ type: ButtonType.Normal }) {
-            Image($r('app.media.ic_send')).width(20).height(20)
-          }.id('send').width(42).height(42).borderRadius(13).backgroundColor(ACCENT_COLOR)
-            .accessibilityText('发送消息').enabled(this.reachable && !this.busy && !this.openingSession && !this.pendingSend && !this.recording && !this.voicePreparing && !this.voiceFinishing &&
-              (this.draft.trim().length > 0 || this.attachments.length > 0) &&
-              (!this.attachments.some((item: DraftAttachment): boolean => item.kind === 'image') || this.acceptsImage))
-            .opacity(this.reachable ? 1 : 0.3).onClick(() => { void this.send(); })
+            Image($r('app.media.ic_send')).width(22).height(22)
+              .fillColor(this.canSend() ? this.accentForeground() : $r('app.color.pigo_text'))
+          }.id('send').width(42).height(42).padding(0).borderRadius(13)
+            .backgroundColor(this.canSend() ? this.accent() : $r('app.color.pigo_control'))
+            .accessibilityText('发送消息').enabled(this.canSend())
+            .onClick(() => { void this.send(); })
         } else {
           Button({ type: ButtonType.Normal }) {
-            Rect().width(12).height(12).fill('#1B1B1B').radius(2)
-          }.id('abort').width(42).height(42).borderRadius(13).backgroundColor(ACCENT_COLOR)
+            Rect().width(12).height(12).fill(this.accentForeground()).radius(2)
+          }.id('abort').width(42).height(42).borderRadius(13).backgroundColor(this.accent())
             .accessibilityText('停止生成').enabled(this.reachable && !this.busy && !this.openingSession)
             .onClick(() => { void this.requestAction('/abort', { id: this.currentId }); })
         }
-      }.width('100%').padding({ left: 4, right: 6, top: 4, bottom: 4 }).backgroundColor(PANEL_COLOR)
-        .border({ width: 1, color: LINE_COLOR }).borderRadius(17)
+      }.width('100%').padding({ left: 6, right: 7, top: 5, bottom: 5 }).backgroundColor($r('app.color.pigo_panel'))
+        .border({ width: 1, color: $r('app.color.pigo_line') }).borderRadius(22)
       if (!this.idle && (this.draft.trim() || this.attachments.length) &&
         (!this.attachments.some((item: DraftAttachment): boolean => item.kind === 'image') || this.acceptsImage)) {
         Row({ space: 8 }) {
@@ -3028,12 +3699,13 @@ struct Index {
     return validUsb(this.base) ? 'USB 电脑' : (this.base.split('://')[1] || '我的电脑');
   }
 
+  // Spaces mirror the desktop project list only; sessions in unshared directories stay under Tasks.
   private spacePaths(): string[] {
-    const paths: string[] = this.projects.slice();
-    this.sessions.forEach((session: SessionRow) => {
-      if (session.cwd && !paths.includes(session.cwd)) paths.push(session.cwd);
-    });
-    return paths;
+    return this.projects.slice();
+  }
+
+  private unfiledSessions(): SessionRow[] {
+    return this.sessions.filter((session: SessionRow): boolean => !session.cwd || !this.projects.includes(session.cwd));
   }
 
   private spaceSessions(path: string): SessionRow[] {
@@ -3041,8 +3713,8 @@ struct Index {
   }
 
   private toggleSpace(path: string): void {
-    this.collapsedSpaces = this.collapsedSpaces.includes(path) ?
-      this.collapsedSpaces.filter((item: string): boolean => item !== path) : this.collapsedSpaces.concat([path]);
+    this.expandedSpaces = this.expandedSpaces.includes(path) ?
+      this.expandedSpaces.filter((item: string): boolean => item !== path) : this.expandedSpaces.concat([path]);
     this.scheduleSidebarSave();
   }
 
@@ -3051,10 +3723,10 @@ struct Index {
     this.scheduleSidebarSave();
   }
 
-  // Sidebar choices are per computer: restore the remembered collapse and filter state on connect.
+  // Sidebar choices are per computer: folders stay collapsed on connect unless the user opened them.
   private applySidebar(address: string): void {
     const entry = this.sidebarBook.entries.find((kept: SidebarEntry): boolean => kept.address === address);
-    this.collapsedSpaces = entry ? entry.state.collapsedSpaces.slice() : [];
+    this.expandedSpaces = entry ? entry.state.expandedSpaces.slice() : [];
     this.tasksExpanded = entry ? entry.state.tasksExpanded : true;
     this.sessionView = entry && SIDEBAR_VIEWS.includes(entry.state.sessionView) ? entry.state.sessionView : 'all';
     this.loadedView = this.sessionView;
@@ -3063,7 +3735,7 @@ struct Index {
   private scheduleSidebarSave(): void {
     if (!this.base) return;
     const state: SidebarState = {
-      collapsedSpaces: this.collapsedSpaces.slice(0, SIDEBAR_MAX_COLLAPSED),
+      expandedSpaces: this.expandedSpaces.slice(0, SIDEBAR_MAX_EXPANDED),
       tasksExpanded: this.tasksExpanded,
       sessionView: SIDEBAR_VIEWS.includes(this.sessionView) ? this.sessionView : 'all'
     };
@@ -3088,20 +3760,20 @@ struct Index {
   modelSheet() {
     Column({ space: 10 }) {
       Row({ space: 10 }) {
-        Text('切换模型').fontSize(17).fontWeight(FontWeight.Bold).fontColor('#E8E8E8').layoutWeight(1)
+        Text('切换模型').fontSize(17).fontWeight(FontWeight.Bold).fontColor($r('app.color.pigo_text')).layoutWeight(1)
         Button('关闭').chatAction().height(32).fontSize(13)
           .onClick(() => { this.showModelMenu = false; })
       }.width('100%')
-      if (!this.idle || this.queued) Text('等待当前任务和队列结束后可切换模型。').fontSize(13).fontColor('#FFB024').width('100%')
+      if (!this.idle || this.queued) Text('等待当前任务和队列结束后可切换模型。').fontSize(13).fontColor($r('app.color.pigo_warning')).width('100%')
       Scroll() {
         Column({ space: 6 }) {
           ForEach(this.models, (model: ModelOption, index: number) => {
             Button({ type: ButtonType.Normal }) {
               Text(`${this.isCurrentModel(model) ? '✓ ' : ''}${model.name} · ${model.provider}${model.image ? ' · 图片' : ''}`)
-                .fontSize(15).fontColor('#E8E8E8').maxLines(1)
+                .fontSize(15).fontColor($r('app.color.pigo_text')).maxLines(1)
                 .textOverflow({ overflow: TextOverflow.Ellipsis }).width('100%').textAlign(TextAlign.Start)
             }.id(`model-option-${index}`).width('100%').height(46).padding({ left: 16, right: 16 })
-              .borderRadius(14).backgroundColor(this.isCurrentModel(model) ? '#373737' : '#292929')
+              .borderRadius(14).backgroundColor(this.isCurrentModel(model) ? $r('app.color.pigo_selected') : $r('app.color.pigo_control'))
               .enabled(this.reachable && this.idle && !this.queued && !this.busy)
               .onClick(() => { this.showModelMenu = false; void this.applyModelFromMenu(index); })
           }, (model: ModelOption) => `${model.provider}-${model.id}`)
@@ -3110,8 +3782,8 @@ struct Index {
       }.constraintSize({ maxHeight: 260 }).width('100%').align(Alignment.TopStart)
     }.width('100%')
       .padding({ left: 14, right: 14, top: 14, bottom: this.bottomPad() + 14 })
-      .backgroundColor('#1B1B1B').borderRadius({ topLeft: 20, topRight: 20 })
-      .border({ width: { top: 1 }, color: '#454545' })
+      .backgroundColor($r('app.color.pigo_panel')).borderRadius({ topLeft: 28, topRight: 28 })
+      .border({ width: { top: 1 }, color: $r('app.color.pigo_line') })
   }
 
   @Builder
@@ -3121,34 +3793,35 @@ struct Index {
         .textAlign(TextAlign.Center).width(25).height(25).borderRadius(13).backgroundColor('#FF9518')
       Column({ space: 4 }) {
         Text(compact ? '设备已离线，当前为缓存内容' : '电脑设备已离线')
-          .fontSize(compact ? 13 : 17).fontWeight(FontWeight.Medium).fontColor(compact ? '#FFB024' : '#E8E8E8')
-        if (!compact) Text('请检查电脑与网络连接').fontSize(12).fontColor('#999999')
+          .fontSize(compact ? 13 : 17).fontWeight(FontWeight.Medium).fontColor(compact ? $r('app.color.pigo_warning') : $r('app.color.pigo_text'))
+        if (!compact) Text('请检查电脑与网络连接').fontSize(12).fontColor($r('app.color.pigo_muted'))
       }.layoutWeight(1).alignItems(HorizontalAlign.Start)
       if (!compact) Button('切换').chatAction().height(34).fontSize(13)
-        .onClick(() => { if (!this.busy) this.leaveComputer(); })
+        .onClick(() => { if (!this.busy) this.openComputers(); })
       Button(compact ? '↻' : '重试').chatAction().id(compact ? 'drawer-retry' : 'offline-retry')
         .height(34).fontSize(compact ? 23 : 13).enabled(!this.busy)
         .onClick(() => { this.offlineDismissed = false; this.schedule(0); })
       if (!compact) Button('×').chatAction().width(26).height(30).fontSize(21)
         .accessibilityText('关闭离线提示').onClick(() => { this.offlineDismissed = true; })
     }.width('100%').padding(compact ? 12 : 16).borderRadius(compact ? 9 : 24)
-      .backgroundColor(compact ? '#382D10' : '#252525')
+      .backgroundColor(compact ? $r('app.color.pigo_warning_panel') : $r('app.color.pigo_panel'))
   }
 
   @Builder
   bottomTabs() {
-    Row() {
-      ForEach(['tasks', 'pending', 'files', 'mine'], (tab: string) => {
+    Row({ space: 4 }) {
+      ForEach(this.isPaired ? ['tasks', 'pending', 'files', 'mine'] : ['tasks', 'mine'], (tab: string) => {
         Button({ type: ButtonType.Normal }) {
           Column({ space: 5 }) {
             Image(tab === 'tasks' ? $r('app.media.ic_tasks') : tab === 'pending' ? $r('app.media.ic_pending') :
               tab === 'files' ? $r('app.media.ic_folder') : $r('app.media.ic_person')).width(22).height(22)
-              .fillColor(this.activeTab === tab ? ACCENT_COLOR : MUTED_COLOR)
-            Text(tab === 'tasks' ? '任务' : tab === 'pending' ? '待处理' : tab === 'files' ? '工作区' : '我的')
-              .fontSize(11).fontColor(this.activeTab === tab ? ACCENT_COLOR : MUTED_COLOR)
+              .fillColor(this.activeTab === tab ? this.accent() : $r('app.color.pigo_muted'))
+            Text(tab === 'tasks' ? '任务' : tab === 'pending' ? '运行中' : tab === 'files' ? '工作区' : '我的')
+              .fontSize(11).fontColor(this.activeTab === tab ? this.accent() : $r('app.color.pigo_muted'))
           }
-        }.id(`tab-${tab}`).layoutWeight(1).height(50).borderRadius(12)
-          .backgroundColor(this.activeTab === tab ? PANEL_COLOR : Color.Transparent)
+        }.id(`tab-${tab}`).layoutWeight(1).height(48).padding(0).borderRadius(17)
+          .accessibilitySelected(this.activeTab === tab)
+          .backgroundColor(this.activeTab === tab ? this.accentTint() : Color.Transparent)
           .enabled(!this.busy).onClick(() => {
             this.dismissKeyboard();
             if (this.editingPath && this.fileText !== this.fileOriginal) {
@@ -3161,19 +3834,39 @@ struct Index {
                 this.showFiles = true; this.status = '';
               } else { this.fileRoot = this.workspaceCwd; void this.browseFiles(''); }
             } else { this.showFiles = false; this.showSettings = false; }
+            if (tab === 'mine' && this.minePage) {
+              this.mineBack();
+              this.minePage = '';
+            }
+            if (tab !== this.activeTab) {
+              this.minePage = '';
+              this.addingComputer = false;
+              this.restoringComputer = undefined;
+              this.removeTarget = '';
+            }
             this.activeTab = tab;
           })
       }, (tab: string) => tab)
-    }.width('100%').padding({ top: 4 })
+    }.width('100%').padding(5).borderRadius(23).backgroundColor($r('app.color.pigo_panel'))
+      .border({ width: 1, color: $r('app.color.pigo_line') })
   }
 
   @Builder
   welcome() {
-    Column({ space: 14 }) {
-      Text('Pi Go').fontSize(32).fontWeight(FontWeight.Bold).fontColor('#E8E8E8')
-      Text('有什么可以帮你？').fontSize(23).fontWeight(FontWeight.Medium).fontColor('#E8E8E8')
-      Text(this.loading ? '正在读取已配对的电脑…' : this.noSession || '继续电脑上的灵感，或开始一个新任务。').fontSize(14).fontColor('#888888').textAlign(TextAlign.Center).lineHeight(22)
-    }.width('100%').padding({ top: 88, bottom: 60, left: 20, right: 20 }).layoutWeight(1)
+    Column({ space: 12 }) {
+      Stack() {
+        Image($r('app.media.ic_terminal')).width(33).height(33).fillColor(this.accent())
+      }.width(68).height(68).borderRadius(23).backgroundColor(this.accentTint())
+        .border({ width: 1, color: $r('app.color.pigo_line') }).accessibilityLevel('no')
+      Text('Pi Go').fontSize(36).fontWeight(FontWeight.Bold).fontColor($r('app.color.pigo_text'))
+      Text(this.loading ? '正在读取已配对的电脑…' : !this.isPaired ? '连接电脑后查看和继续任务。' :
+        this.noSession || '继续电脑上的任务，或开始一个新任务。')
+        .fontSize(15).fontColor($r('app.color.pigo_muted')).textAlign(TextAlign.Center).lineHeight(23)
+      if (!this.loading && !this.isPaired) {
+        Button('连接电脑').chatAction().height(44).padding({ left: 24, right: 24 })
+          .backgroundColor(this.accent()).fontColor(this.accentForeground()).onClick(() => { this.openComputers(); })
+      }
+    }.width('100%').padding({ top: 76, bottom: 48, left: 20, right: 20 }).layoutWeight(1)
   }
 
   @Builder
@@ -3183,7 +3876,7 @@ struct Index {
         Row({ space: 8 }) {
           Scroll() {
             Text(session.name === '(no messages)' ? '新任务' : session.name || '未命名任务')
-              .fontSize(16).fontColor('#E8E8E8').maxLines(1)
+              .fontSize(16).fontColor($r('app.color.pigo_text')).maxLines(1)
           }.scrollable(ScrollDirection.Horizontal).scrollBar(BarState.Off).layoutWeight(1).align(Alignment.Start)
           if (this.sessionRunning(session.id)) {
             Row({ space: 4 }) {
@@ -3203,18 +3896,71 @@ struct Index {
           else void this.requestAction('/open', { id: session.id });
         })
       Button({ type: ButtonType.Normal }) {
-        Image($r('app.media.ic_more')).width(17).height(17).opacity(0.5)
+        Image($r('app.media.ic_more')).width(17).height(17).fillColor($r('app.color.pigo_text')).opacity(0.5)
       }.id(`session-more-${session.id}`).width(30).height(40).backgroundColor(Color.Transparent)
         .accessibilityText('任务操作').enabled(this.reachable && !this.busy).bindMenu([
           { value: session.pinned ? '取消置顶' : '置顶', action: () => { void this.updateSessionMeta(session, true); } },
           { value: session.archived ? '取消归档' : '归档', action: () => { void this.updateSessionMeta(session, false); } }
         ])
-    }.width('100%').borderRadius(12).backgroundColor(session.id === this.currentId ? CONTROL_COLOR : Color.Transparent)
+    }.width('100%').borderRadius(12).backgroundColor(session.id === this.currentId ? $r('app.color.pigo_control') : Color.Transparent)
       .onAreaChange((_oldArea: Area, newArea: Area) => {
         if (session.id !== this.currentId) return;
         this.libraryRowY = Number(newArea.globalPosition.y);
         if (this.pendingLibraryReveal) this.revealLibraryAnchor();
       })
+  }
+
+  @Builder
+  runningView() {
+    Scroll() {
+      Column({ space: 10 }) {
+        if (this.allRunningRows().length) {
+          Text(`${this.allRunningRows().length} 个会话在运行`).fontSize(13).fontColor($r('app.color.pigo_muted'))
+            .width('100%').textAlign(TextAlign.Start)
+          ForEach(this.allRunningRows(), (row: RunningRow) => {
+            Button({ type: ButtonType.Normal }) {
+              Row({ space: 10 }) {
+                Column({ space: 4 }) {
+                  Text(row.name || '后台任务').fontSize(16).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text')).maxLines(1)
+                    .textOverflow({ overflow: TextOverflow.Ellipsis })
+                  if (row.cwd) Text(row.cwd.split('/').pop() || row.cwd).fontSize(12).fontColor($r('app.color.pigo_muted')).maxLines(1)
+                    .textOverflow({ overflow: TextOverflow.Ellipsis })
+                }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+                Row({ space: 5 }) {
+                  Text('').width(6).height(6).borderRadius(3)
+                    .backgroundColor(this.stateColor(this.sessionState(row.id)))
+                  Text(`${row.id === this.currentId ? '当前 · ' : ''}${this.stateLabel(this.sessionState(row.id))}`)
+                    .fontSize(12).fontColor(this.stateColor(this.sessionState(row.id)))
+                }
+                Image($r('app.media.ic_chevron')).width(14).height(14).fillColor($r('app.color.pigo_text')).rotate({ angle: -90 }).opacity(0.6)
+              }.width('100%').padding(14)
+            }.id(`running-session-${row.id}`).width('100%').constraintSize({ minHeight: 60 }).padding(0)
+              .borderRadius(12).backgroundColor(row.id === this.currentId ? $r('app.color.pigo_control') : $r('app.color.pigo_panel'))
+              .accessibilityText(`${row.name || '后台任务'}，${this.stateLabel(this.sessionState(row.id))}，点击切换查看`)
+              .enabled(!this.busy && !this.openingSession && (this.reachable || row.id === this.currentId))
+              .onClick(() => {
+                if (this.openingSession) return;
+                if (row.id !== this.currentId) void this.requestAction('/open', { id: row.id });
+                this.activeTab = 'tasks';
+              })
+          }, (row: RunningRow) => row.id)
+        } else {
+          Row({ space: 12 }) {
+            Stack() {
+              Image(this.reachable ? $r('app.media.ic_pending') : $r('app.media.ic_computer'))
+                .width(22).height(22)
+            }.width(40).height(40).borderRadius(10).backgroundColor($r('app.color.pigo_control'))
+            Column({ space: 4 }) {
+              Text(this.reachable ? '暂无运行中的会话' : '电脑未连接')
+                .fontSize(16).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
+              Text(this.reachable ? '会话在电脑上执行时，会显示在这里' : '连接电脑后可查看运行中的会话')
+                .fontSize(13).lineHeight(19).fontColor($r('app.color.pigo_muted'))
+            }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+          }.width('100%').padding(14).borderRadius(12).backgroundColor($r('app.color.pigo_panel'))
+        }
+      }.width('100%').alignItems(HorizontalAlign.Start).padding({ top: 12, bottom: 16 })
+    }.scrollable(ScrollDirection.Vertical).scrollBar(BarState.Off).width('100%').layoutWeight(1)
+      .align(Alignment.TopStart).edgeEffect(EdgeEffect.Spring)
   }
 
   @Builder
@@ -3228,12 +3974,12 @@ struct Index {
               Row({ space: 6 }) {
                 Text('').width(6).height(6).borderRadius(3)
                   .backgroundColor(this.stateColor(this.sessionState(row.id)))
-                Text(row.name || '后台任务').fontSize(13).fontColor('#C9C9C9').maxLines(1)
+                Text(row.name || '后台任务').fontSize(13).fontColor($r('app.color.pigo_text')).maxLines(1)
                 Text(this.stateLabel(this.sessionState(row.id))).fontSize(11)
                   .fontColor(this.stateColor(this.sessionState(row.id)))
               }
             }.id(`running-${row.id}`).height(34).padding({ left: 12, right: 12 }).borderRadius(17)
-              .backgroundColor('#242424').accessibilityText(`${row.name || '后台任务'}${this.stateLabel(this.sessionState(row.id))}，点击切换查看`)
+              .backgroundColor($r('app.color.pigo_panel')).accessibilityText(`${row.name || '后台任务'}${this.stateLabel(this.sessionState(row.id))}，点击切换查看`)
               .enabled(this.reachable && !this.busy && !this.openingSession)
               .onClick(() => {
                 if (row.id !== this.currentId && !this.openingSession) {
@@ -3249,50 +3995,59 @@ struct Index {
   }
 
   @Builder
+  spaceContextMenu(path: string) {
+    Menu() {
+      MenuItem({ content: '关闭工作区' })
+        .onClick(() => { this.confirmCloseSpace(path); })
+    }
+  }
+
+  @Builder
   sessionLibrary() {
     Row({ space: 6 }) {
       TextInput({ placeholder: '搜索任务', text: this.sessionQuery }).id('session-query').maxLength(100)
-        .layoutWeight(1).height(36).fontSize(13).fontColor('#E8E8E8').placeholderColor('#777777')
-        .borderRadius(10).backgroundColor('#242424').enabled(!this.busy && !this.sessionLoading)
+        .layoutWeight(1).height(36).fontSize(13).fontColor($r('app.color.pigo_text')).placeholderColor($r('app.color.pigo_muted'))
+        .borderRadius(10).backgroundColor($r('app.color.pigo_panel')).enabled(!this.busy && !this.sessionLoading)
         .onChange((value: string) => { this.sessionQuery = value; }).onSubmit(() => { void this.loadSessions(); })
       Button({ type: ButtonType.Normal }) {
-        Image($r('app.media.ic_search')).width(18).height(18)
-      }.id('session-search').width(36).height(36).backgroundColor('#242424').borderRadius(10)
+        Image($r('app.media.ic_search')).width(18).height(18).fillColor($r('app.color.pigo_text'))
+      }.id('session-search').width(36).height(36).backgroundColor($r('app.color.pigo_panel')).borderRadius(10)
         .accessibilityText('搜索任务').enabled(this.reachable && !this.busy && !this.sessionLoading).onClick(() => { void this.loadSessions(); })
     }.width('100%')
     Scroll(this.library) {
       Column({ space: 5 }) {
-        if (this.spaceSessions('').length || this.loadedQuery || this.sessionView !== 'all') {
+        if (this.unfiledSessions().length || this.loadedQuery || this.sessionView !== 'all') {
         Row({ space: 6 }) {
-          Text(this.loadedQuery ? '搜索结果' : '任务').fontSize(14).fontColor('#888888')
-          Image($r('app.media.ic_chevron')).width(14).height(14).rotate({ angle: this.tasksExpanded ? 0 : -90 }).opacity(0.5)
+          Text(this.loadedQuery ? '搜索结果' : '任务').fontSize(14).fontColor($r('app.color.pigo_muted'))
+          Image($r('app.media.ic_chevron')).width(14).height(14).fillColor($r('app.color.pigo_text')).rotate({ angle: this.tasksExpanded ? 0 : -90 }).opacity(0.5)
           Blank()
-          Text(`${this.sessionTotal}`).fontSize(12).fontColor('#777777')
+          Text(`${this.sessionTotal}`).fontSize(12).fontColor($r('app.color.pigo_muted'))
         }.width('100%').height(42).padding({ left: 12, right: 12 })
           .onClick(() => { this.toggleTasks(); })
         }
         if (this.tasksExpanded) {
-          ForEach(this.spaceSessions(''), (session: SessionRow) => { this.taskRow(session, false) }, (session: SessionRow) => session.id)
+          ForEach(this.unfiledSessions(), (session: SessionRow) => { this.taskRow(session, false) }, (session: SessionRow) => session.id)
           if (this.loadedQuery || this.sessionView !== 'all') {
-            ForEach(this.sessions.filter((session: SessionRow): boolean => !!session.cwd), (session: SessionRow) => {
+            ForEach(this.sessions.filter((session: SessionRow): boolean => !!session.cwd && this.projects.includes(session.cwd)), (session: SessionRow) => {
               this.taskRow(session, false)
             }, (session: SessionRow) => session.id)
           }
         }
         if (!this.loadedQuery && this.sessionView === 'all') {
-          Text(`空间 (${this.spacePaths().length})`).fontSize(14).fontColor('#888888').width('100%')
+          Text(`空间 (${this.spacePaths().length})`).fontSize(14).fontColor($r('app.color.pigo_muted')).width('100%')
             .padding({ left: 12, top: 24, bottom: 12 })
           ForEach(this.spacePaths(), (path: string) => {
             Row({ space: 8 }) {
               Row({ space: 9 }) {
-                Image($r('app.media.ic_folder')).width(23).height(23)
-                Text(path.split('/').pop() || path).fontSize(18).fontColor('#E8E8E8')
+                Image($r('app.media.ic_folder')).width(23).height(23).fillColor($r('app.color.pigo_text'))
+                Text(path.split('/').pop() || path).fontSize(18).fontColor($r('app.color.pigo_text'))
                   .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).layoutWeight(1)
-                Image($r('app.media.ic_chevron')).width(18).height(18)
-                  .rotate({ angle: this.collapsedSpaces.includes(path) ? -90 : 0 }).opacity(0.6)
+                Image($r('app.media.ic_chevron')).width(18).height(18).fillColor($r('app.color.pigo_text'))
+                  .rotate({ angle: this.expandedSpaces.includes(path) ? 0 : -90 }).opacity(0.6)
               }.layoutWeight(1).height(48).onClick(() => { this.toggleSpace(path); })
+                .bindContextMenu((): void => { this.spaceContextMenu(path); }, ResponseType.LongPress)
               Button({ type: ButtonType.Normal }) {
-                Image($r('app.media.ic_plus')).width(23).height(23).opacity(0.6)
+                Image($r('app.media.ic_plus')).width(23).height(23).fillColor($r('app.color.pigo_text')).opacity(0.6)
               }.id(`new-${path}`).width(34).height(44).backgroundColor(Color.Transparent).accessibilityText('在此空间新建任务')
                 .enabled(this.reachable && !this.busy && this.desktopHandoff && this.projects.includes(path))
                 .onClick(() => { this.activeTab = 'tasks'; void this.requestAction('/new', { cwd: path }); })
@@ -3302,13 +4057,13 @@ struct Index {
                 this.librarySpaceY = Number(newArea.globalPosition.y);
                 if (this.pendingLibraryReveal) this.revealLibraryAnchor();
               })
-            if (!this.collapsedSpaces.includes(path)) {
+            if (this.expandedSpaces.includes(path)) {
               ForEach(this.spaceSessions(path), (session: SessionRow) => { this.taskRow(session, true) }, (session: SessionRow) => session.id)
             }
           }, (path: string) => path)
         }
         if (!this.sessions.length) Text(this.loadedQuery ? '没有找到匹配的任务' : this.reachable ? '暂无任务，点击上方新建' : '连接电脑后加载任务')
-          .fontSize(14).fontColor('#888888').width('100%').padding(16)
+          .fontSize(14).fontColor($r('app.color.pigo_muted')).width('100%').padding(16)
         if (this.sessionCursor !== undefined) Button('加载更多').chatAction().id('session-more').width('100%').height(38)
           .enabled(this.reachable && !this.busy && !this.sessionLoading).onClick(() => { void this.loadSessions(true); })
       }.width('100%').alignItems(HorizontalAlign.Start).padding({ bottom: 20 })
@@ -3323,27 +4078,27 @@ struct Index {
   sessionDrawer() {
     Column({ space: 14 }) {
       Row({ space: 10 }) {
-        Image($r('app.media.ic_computer')).width(26).height(26)
+        Image($r('app.media.ic_computer')).width(26).height(26).fillColor($r('app.color.pigo_text'))
         Button({ type: ButtonType.Normal }) {
           Row({ space: 6 }) {
-            Text(this.computerTitle()).fontSize(20).fontWeight(FontWeight.Medium).fontColor('#E8E8E8')
+            Text(this.computerTitle()).fontSize(20).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
               .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).layoutWeight(1)
-            Image($r('app.media.ic_chevron')).width(16).height(16)
+            Image($r('app.media.ic_chevron')).width(16).height(16).fillColor($r('app.color.pigo_text'))
           }
         }.id('computers').layoutWeight(1).height(48).padding(0).backgroundColor(Color.Transparent)
-          .accessibilityText('切换电脑').enabled(!this.busy).onClick(() => { this.leaveComputer(); })
+          .accessibilityText('切换电脑').enabled(!this.busy).onClick(() => { this.openComputers(); })
         Button({ type: ButtonType.Normal }) {
-          Image($r('app.media.ic_menu')).width(24).height(24)
+          Image($r('app.media.ic_menu')).width(24).height(24).fillColor($r('app.color.pigo_text'))
         }.width(40).height(44).backgroundColor(Color.Transparent).accessibilityText('关闭任务抽屉')
           .onClick(() => { this.setDrawer(false); })
       }.width('100%').padding({ left: 12 })
       Button({ type: ButtonType.Normal }) {
         Row({ space: 10 }) {
-          Image($r('app.media.ic_compose')).width(25).height(25)
-          Text('新建任务').fontSize(19).fontColor('#E8E8E8')
+          Image($r('app.media.ic_compose')).width(25).height(25).fillColor($r('app.color.pigo_text'))
+          Text('新建任务').fontSize(19).fontColor($r('app.color.pigo_text'))
         }.justifyContent(FlexAlign.Center).width('100%')
-      }.id('drawer-new-task').width('100%').height(50).borderRadius(18).backgroundColor('#242424')
-        .border({ width: 1, color: '#56565C' }).borderRadius(18).enabled(this.reachable && !this.busy && this.desktopHandoff && this.projects.length > 0)
+      }.id('drawer-new-task').width('100%').height(50).borderRadius(18).backgroundColor($r('app.color.pigo_panel'))
+        .border({ width: 1, color: $r('app.color.pigo_line') }).borderRadius(18).enabled(this.reachable && !this.busy && this.desktopHandoff && this.projects.length > 0)
         .bindMenu(this.projects.map((path: string): MenuElement => ({ value: path.split('/').pop() || path,
           action: () => { this.activeTab = 'tasks'; void this.requestAction('/new', { cwd: path }); } })))
       if (!this.reachable) this.offlineNotice(true)
@@ -3351,15 +4106,15 @@ struct Index {
         ForEach(['all', 'pinned', 'recent', 'archived'], (view: string) => {
           Button(view === 'all' ? '全部' : view === 'pinned' ? '置顶' : view === 'recent' ? '最近' : '归档').chatAction()
             .id(`session-view-${view}`).layoutWeight(1).height(28).fontSize(11).borderRadius(8)
-            .backgroundColor(this.sessionView === view ? '#373737' : Color.Transparent).enabled(!this.busy && !this.sessionLoading && this.reachable)
+            .backgroundColor(this.sessionView === view ? $r('app.color.pigo_selected') : Color.Transparent).enabled(!this.busy && !this.sessionLoading && this.reachable)
             .onClick(() => { this.sessionView = view; this.scheduleSidebarSave(); void this.loadSessions(); })
         }, (view: string) => view)
       }.width('100%')
       this.sessionLibrary()
-      Text(this.base.split('://')[1] || '').id('active-computer').fontSize(11).fontColor('#666666').width('100%').padding({ left: 12 })
+      Text(this.base.split('://')[1] || '').id('active-computer').fontSize(11).fontColor($r('app.color.pigo_muted')).width('100%').padding({ left: 12 })
     }.width('84%').constraintSize({ maxWidth: 420 }).height('100%')
       .padding({ left: 12, right: 12, top: this.statusBarHeight + 12, bottom: this.bottomPad() + 18 })
-      .backgroundColor(PANEL_COLOR)
+      .borderRadius({ topRight: 26, bottomRight: 26 }).backgroundColor($r('app.color.pigo_panel'))
       .transition(TransitionEffect.move(TransitionEdge.START))
       .gesture(PanGesture({ direction: PanDirection.Horizontal }).onActionEnd((event: GestureEvent) => {
         if (event.offsetX < -45) this.setDrawer(false);
@@ -3368,8 +4123,8 @@ struct Index {
 
   @Builder
   statusNotice() {
-    Text(this.status).fontColor('#FFAD25').fontSize(13).width('100%')
-      .padding(12).backgroundColor('#342A15').borderRadius(12)
+    Text(this.status).fontColor($r('app.color.pigo_warning')).fontSize(13).width('100%')
+      .padding(12).backgroundColor($r('app.color.pigo_warning_panel')).borderRadius(12)
   }
 
   @Builder
@@ -3377,7 +4132,7 @@ struct Index {
     Column({ space: 12 }) {
       Row({ space: 12 }) {
         Text(preview.name).id('text-preview-title').layoutWeight(1)
-          .fontSize(18).fontWeight(FontWeight.Medium).fontColor(TEXT_COLOR)
+          .fontSize(18).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
           .maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis })
         Button('关闭').chatAction().id('text-preview-close').enabled(!this.savingPreview)
           .onClick(() => { this.textFilePreview = undefined; })
@@ -3391,19 +4146,19 @@ struct Index {
         }
       }.width('100%')
       if (this.previewNotice) {
-        Text(this.previewNotice).id('preview-notice').fontSize(13).fontColor(TEXT_COLOR).width('100%')
+        Text(this.previewNotice).id('preview-notice').fontSize(13).fontColor($r('app.color.pigo_text')).width('100%')
       }
       Scroll(this.previewScroller) {
         Column() {
           if (preview.text === undefined) {
             Text(preview.systemUri ? '点击「系统预览」打开文件。' : '已接收文件，可保存到本机。')
-              .fontSize(15).fontColor(MUTED_COLOR)
+              .fontSize(15).fontColor($r('app.color.pigo_muted'))
           } else if (!preview.text.length) {
-            Text('空文件').fontSize(15).fontColor(MUTED_COLOR)
+            Text('空文件').fontSize(15).fontColor($r('app.color.pigo_muted'))
           } else if (preview.markdown) {
-            ChatContent({ text: preview.text })
+            ChatContent({ text: preview.text, accent: this.accent() })
           } else {
-            Text(preview.text).fontSize(15).lineHeight(24).fontFamily('monospace').fontColor(TEXT_COLOR)
+            Text(preview.text).fontSize(15).lineHeight(24).fontFamily('monospace').fontColor($r('app.color.pigo_text'))
               .width('100%').wordBreak(WordBreak.BREAK_ALL).copyOption(CopyOptions.LocalDevice)
           }
         }.width('100%').alignItems(HorizontalAlign.Start).padding({ bottom: 16 })
@@ -3413,7 +4168,7 @@ struct Index {
         Row({ space: 8 }) {
           Button('上一页').chatAction().enabled((preview.offset ?? 0) > 0 && !this.savingPreview)
             .onClick(() => { this.changePreviewPage(false); })
-          Text(`第 ${this.previewOffsets.length + 1} 页`).fontSize(13).fontColor(MUTED_COLOR).layoutWeight(1)
+          Text(`第 ${this.previewOffsets.length + 1} 页`).fontSize(13).fontColor($r('app.color.pigo_muted')).layoutWeight(1)
             .textAlign(TextAlign.Center)
           Button('下一页').chatAction().enabled(preview.nextOffset !== undefined && !this.savingPreview)
             .onClick(() => { this.changePreviewPage(true); })
@@ -3421,27 +4176,41 @@ struct Index {
       }
     }.id('text-file-preview').width('100%').height('100%').alignItems(HorizontalAlign.Start)
       .padding({ left: 16, right: 16, top: this.statusBarHeight + 12, bottom: this.bottomPad() + 4 })
-      .backgroundColor(PAGE_COLOR).hitTestBehavior(HitTestMode.BLOCK_HIERARCHY)
+      .backgroundColor($r('app.color.launch_background')).hitTestBehavior(HitTestMode.BLOCK_HIERARCHY)
   }
 
   build() {
     Stack({ alignContent: Alignment.TopStart }) {
-      Column({ space: 8 }) {
-        if (this.loading) {
-          this.welcome()
-        } else if (this.isPaired) {
-          this.chat()
-          if (this.status) this.statusNotice()
-          if (!this.keyboardHeight || this.activeTab !== 'tasks' || this.showSettings || this.showFiles) this.bottomTabs()
-        } else {
-          Scroll() {
-            this.connection()
-          }.layoutWeight(1).width('100%').align(Alignment.TopStart)
-          if (this.status) this.statusNotice()
-        }
-      }.width('100%').height('100%').alignItems(HorizontalAlign.Start)
-        .padding({ left: 16, right: 16, top: this.statusBarHeight + 4, bottom: this.bottomPad() + 4 })
-        .backgroundColor(PAGE_COLOR)
+      Navigation() {
+        Column({ space: 8 }) {
+          if (this.loading) {
+            this.welcome()
+          } else if (this.activeTab === 'mine') {
+            this.mineView()
+          } else if (this.isPaired) {
+            this.chat()
+          } else {
+            this.welcome()
+          }
+          if (!this.loading) {
+            if (this.status) this.statusNotice()
+            if (!this.keyboardHeight) this.bottomTabs()
+            else if (this.isPaired && this.activeTab !== 'mine' &&
+              (this.activeTab !== 'tasks' || this.showSettings || this.showFiles)) this.bottomTabs()
+          }
+        }.width('100%').height('100%').alignItems(HorizontalAlign.Start)
+          .padding({ top: this.loading || (!this.isPaired && this.activeTab !== 'mine') ? 0 : 8,
+            bottom: this.bottomPad() + 6 })
+      }.width('100%').height('100%')
+        .mode(NavigationMode.Stack).hideBackButton(true).hideToolBar(true)
+        .title({ builder: this.pageHeader, height: 62 }, { backgroundColor: Color.Transparent })
+        .hideTitleBar(this.loading || (!this.isPaired && this.activeTab !== 'mine'))
+        .padding({ left: 16, right: 16, top: this.statusBarHeight + 8 })
+        .linearGradient({
+          direction: GradientDirection.LeftTop,
+          colors: [[this.accentTint(), 0], [$r('app.color.launch_background'), 0.48],
+            [$r('app.color.launch_background'), 0.80], [this.accentTint(), 1]]
+        })
       if (this.showSessions && this.isPaired) {
         Button({ type: ButtonType.Normal }).chatAction().width('100%').height('100%').backgroundColor('#66000000').borderRadius(0)
           .accessibilityText('关闭会话列表').onClick(() => { this.setDrawer(false); })
@@ -3459,35 +4228,36 @@ struct Index {
         Column() {
           Column({ space: 16 }) {
             if (this.recording) {
-              Image(this.holdCancel ? $r('app.media.ic_close') : $r('app.media.ic_mic')).width(40).height(40)
+              Image(this.holdCancel ? $r('app.media.ic_close') : $r('app.media.ic_mic')).width(40).height(40).fillColor(this.holdCancel ? '#FFFFFF' : $r('app.color.pigo_text'))
               Text(this.holdCancel ? '松开手指，取消发送' : '手指上滑，取消发送')
-                .fontSize(15).fontColor(this.holdCancel ? '#FFFFFF' : '#D8D8D8')
+                .fontSize(15).fontColor(this.holdCancel ? '#FFFFFF' : $r('app.color.pigo_text'))
               Text(this.recordSeconds >= 50 ? `还可说 ${60 - this.recordSeconds} 秒` : `${this.recordSeconds}″`)
-                .fontSize(13).fontColor(this.holdCancel ? '#FFFFFF' : '#A8A8A8')
+                .fontSize(13).fontColor(this.holdCancel ? '#FFFFFF' : $r('app.color.pigo_muted'))
               if (this.liveVoiceText && !this.holdCancel) {
-                Text(this.liveVoiceText).fontSize(14).fontColor('#D8D8D8').maxLines(3)
+                Text(this.liveVoiceText).fontSize(14).fontColor($r('app.color.pigo_text')).maxLines(3)
                   .textOverflow({ overflow: TextOverflow.Ellipsis }).textAlign(TextAlign.Center)
               }
             } else if (this.voicePreparing || (this.voiceFinishing && !this.voiceCancelling && !this.voiceHint)) {
-              LoadingProgress().width(36).height(36).color('#E8E8E8')
-              Text(this.voicePreparing ? '正在准备麦克风…' : '正在转为文字…').fontSize(15).fontColor('#D8D8D8')
+              LoadingProgress().width(36).height(36).color($r('app.color.pigo_text'))
+              Text(this.voicePreparing ? '正在准备麦克风…' : '正在转为文字…').fontSize(15).fontColor($r('app.color.pigo_text'))
             } else {
-              Text(this.voiceHint).fontSize(15).fontColor('#E8E8E8').textAlign(TextAlign.Center)
+              Text(this.voiceHint).fontSize(15).fontColor($r('app.color.pigo_text')).textAlign(TextAlign.Center)
             }
           }.id('voice-feedback').width(250).padding(26).alignItems(HorizontalAlign.Center).borderRadius(20)
-            .backgroundColor(this.holdCancel ? '#B74747' : '#EE303030')
+            .backgroundColor(this.holdCancel ? '#B74747' : $r('app.color.pigo_control'))
         }.width('100%').height('100%').justifyContent(FlexAlign.Center)
           .hitTestBehavior(HitTestMode.None)
       }
       if (this.textFilePreview) this.textPreviewPage(this.textFilePreview)
-    }.width('100%').height('100%').backgroundColor(PAGE_COLOR)
+    }.width('100%').height('100%').backgroundColor($r('app.color.launch_background'))
       .bindSheet(this.showToolDetails, this.toolDetailsSheet(), {
         detents: ['65%', SheetSize.LARGE], dragBar: true, showClose: true,
-        backgroundColor: PANEL_COLOR, maskColor: '#99000000',
+        backgroundColor: $r('app.color.pigo_panel'), maskColor: '#99000000',
         onDisappear: () => { this.closeToolDetails(); }
       })
       .priorityGesture(PanGesture({ direction: PanDirection.Horizontal }).onActionEnd((event: GestureEvent) => {
-        if (this.textFilePreview || this.holdActive || this.recording || this.voicePreparing || this.voiceFinishing || !this.isPaired || Math.abs(event.offsetX) <= 45 ||
+        if (this.textFilePreview || this.holdActive || this.recording || this.voicePreparing || this.voiceFinishing ||
+          !this.isPaired || this.activeTab === 'mine' || Math.abs(event.offsetX) <= 45 ||
           Math.abs(event.offsetX) <= Math.abs(event.offsetY) * 1.3) return;
         if (this.showSessions && event.offsetX < 0) this.setDrawer(false);
         else if (this.showFiles && event.offsetX > 0 && !this.busy) this.fileBack();

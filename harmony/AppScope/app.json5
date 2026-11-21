@@ -4,6 +4,7 @@
     "vendor": "alex",
     "versionCode": 1,
     "versionName": "0.1.0",
+    "cloudStructuredDataSyncEnabled": true,
     "icon": "$media:pigo",
     "label": "$string:app_name"
   }

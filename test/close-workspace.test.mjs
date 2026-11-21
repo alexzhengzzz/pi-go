@@ -1,0 +1,180 @@
+// Closing a workspace from the phone must remove it from Desktop's project list
+// (via the host), forget the phone-side grant, and drop it from the next listing.
+import assert from "node:assert/strict";
+import { mkdtemp, mkdir, rm, readFile, realpath } from "node:fs/promises";
+import { createServer } from "node:http";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { test } from "node:test";
+import { localRequest } from "../desktop/local-ipc.mjs";
+
+const project = new URL("../", import.meta.url).pathname;
+const profile = "a".repeat(64);
+
+function fakeWorker(context, ipc, { id, cwd, idle, name }) {
+  const path = join(ipc, `w-${process.pid}-${Math.random().toString(16).slice(2, 10)}.sock`);
+  const session = { id, cwd, name, idle, queued: false,
+    acceptsImage: true, model: { provider: "pi-go-test", id: "fixture", name: "Fixture" } };
+  const server = createServer(async (req, res) => {
+    const reply = (status, data) => { res.writeHead(status, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); };
+    if (req.method === "GET" && (req.url === "/session" || req.url === "/chat")) {
+      return reply(200, req.url === "/session" ? { session } : { session, messages: [], liveText: "", historyCursor: undefined });
+    }
+    reply(404, { error: "not_found" });
+  });
+  const stop = () => new Promise((resolve) => { server.closeAllConnections(); server.close(() => resolve()); });
+  const ready = new Promise((resolve) => server.listen(path, () => resolve(path)));
+  context.after(async () => { await stop(); });
+  return { ready, close: stop };
+}
+
+// A Pi Desktop host that records close requests and shuts the matching fake workers down,
+// mirroring how removing a workspace stops its Pi processes.
+function fakeHost(context, ipc, workers, onClosed) {
+  const path = join(ipc, `host-${process.pid}.sock`);
+  const closed = [];
+  const server = createServer(async (req, res) => {
+    const reply = (status, data) => { res.writeHead(status, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); };
+    if (req.method === "GET" && req.url === "/health") return reply(200, { protocol: "pi-go-desktop-host/1", profile });
+    if (req.method !== "POST") return reply(404, { error: "not_found" });
+    let body = "";
+    for await (const chunk of req) body += chunk;
+    const input = JSON.parse(body || "{}");
+    if (req.url === "/authorize") return reply(200, { cwd: input.cwd, profile });
+    if (req.url === "/catalog") return reply(200, { sessions: [] });
+    if (req.url === "/projects") return reply(200, { projects: [] });
+    if (req.url === "/close-workspace") {
+      closed.push(input.cwd);
+      if (onClosed?.(input, reply)) return;
+      await Promise.all(workers.filter((worker) => worker.cwd === input.cwd).map((worker) => worker.close()));
+      return reply(200, { closed: true, cwd: input.cwd });
+    }
+    reply(404, { error: "not_found" });
+  });
+  const stop = () => new Promise((resolve) => { server.closeAllConnections(); server.close(() => resolve()); });
+  const ready = new Promise((resolve) => server.listen(path, () => resolve(path)));
+  context.after(async () => { await stop(); });
+  return { ready, closed, stop };
+}
+
+async function pairBroker(context, ipc, port) {
+  const bridge = spawn(process.execPath, [join(project, "desktop/broker.mjs"), String(port)], { env: { ...process.env, PIGO_IPC_DIR: ipc } });
+  context.after(async () => {
+    await localRequest(join(ipc, `bridge-${port}.sock`), "POST", "/stop").catch(() => bridge.kill());
+    await once(bridge, "exit").catch(() => {});
+  });
+  const admin = join(ipc, `bridge-${port}.sock`);
+  let issued;
+  for (let attempt = 0; attempt < 60 && !issued; attempt++) {
+    issued = await localRequest(admin, "POST", "/ticket").catch(() => undefined);
+    if (!issued) await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  assert.equal(issued?.status, 200);
+  const config = JSON.parse(await readFile(issued.data.file, "utf8"));
+  const paired = await fetch(`${config.url}/pair`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ticket: config.ticket }) });
+  const { token } = await paired.json();
+  const headers = { authorization: `Bearer ${token}` };
+  const post = async (route, value, useHeaders = headers) => {
+    const response = await fetch(`${config.url}${route}`, { method: "POST", headers: { ...useHeaders, "content-type": "application/json" }, body: JSON.stringify(value) });
+    return { status: response.status, data: await response.json() };
+  };
+  const get = async (route) => (await fetch(`${config.url}${route}`, { headers })).json();
+  return { config, headers, post, get };
+}
+
+async function reservePort() {
+  const reservation = createServer().listen(0, "127.0.0.1");
+  await once(reservation, "listening");
+  const { port } = reservation.address();
+  await new Promise((resolve) => reservation.close(resolve));
+  return port;
+}
+
+test("phone closes workspaces on the host, forgets grants and stops hosting sessions", { timeout: 30000 }, async (context) => {
+  const ipc = await mkdtemp(join(tmpdir(), "pigo-close-"));
+  context.after(async () => { await rm(ipc, { force: true, recursive: true }); });
+  const projectDir = await realpath(await mkdtemp(join(tmpdir(), "pigo-close-project-")));
+  context.after(async () => { await rm(projectDir, { force: true, recursive: true }); });
+  const port = await reservePort();
+
+  const a = fakeWorker(context, ipc, { id: "aaaaaaa1-0000-4000-8000-00000000000a", cwd: "/proj/a", idle: false, name: "Deploy site" });
+  const b = fakeWorker(context, ipc, { id: "bbbbbbb2-0000-4000-8000-00000000000b", cwd: "/proj/b", idle: true, name: "Idle notes" });
+  const host = fakeHost(context, ipc, [
+    { cwd: "/proj/a", close: () => a.close() },
+    { cwd: "/proj/b", close: () => b.close() },
+  ]);
+  await Promise.all([a.ready, b.ready, host.ready]);
+
+  const phone = await pairBroker(context, ipc, port);
+
+  // Unauthenticated and malformed requests never reach the host.
+  assert.equal((await phone.post("/close-workspace", { cwd: projectDir }, {})).status, 401);
+  assert.deepEqual(await phone.post("/close-workspace", {}), { status: 400, data: { error: "invalid_target" } });
+  assert.deepEqual(await phone.post("/close-workspace", { cwd: "/not/shared" }), { status: 403, data: { error: "desktop_workspace_unshared" } });
+  assert.deepEqual(host.closed, []);
+
+  // Authorize a granted workspace through the host, exactly like the real pairing flow.
+  const grant = await localRequest(join(ipc, `bridge-${port}.sock`), "POST", "/grant", { cwd: projectDir });
+  assert.equal(grant.status, 200);
+  let list = await phone.get("/sessions");
+  assert.deepEqual(new Set(list.projects), new Set([projectDir, "/proj/a", "/proj/b"]));
+
+  // Closing a granted-only workspace forwards to the host and revokes the grant,
+  // so the next network refresh no longer lists it.
+  assert.deepEqual(await phone.post("/close-workspace", { cwd: projectDir }), { status: 200, data: { closed: true } });
+  assert.deepEqual(host.closed, [projectDir]);
+  list = await phone.get("/sessions");
+  assert.deepEqual(new Set(list.projects), new Set(["/proj/a", "/proj/b"]));
+
+  // Closing the workspace hosting the selected session resets the selection...
+  const opened = await phone.post("/open", { id: "aaaaaaa1-0000-4000-8000-00000000000a" });
+  assert.equal(opened.status, 200);
+  assert.equal((await phone.get("/chat")).session.id, "aaaaaaa1-0000-4000-8000-00000000000a");
+  assert.deepEqual(await phone.post("/close-workspace", { cwd: "/proj/a" }), { status: 200, data: { closed: true } });
+  // ...and the stopped worker disappears from the catalog like a dead Pi process.
+  assert.equal((await phone.get("/chat")).session.id, "bbbbbbb2-0000-4000-8000-00000000000b");
+  list = await phone.get("/sessions");
+  assert.deepEqual(list.projects, ["/proj/b"]);
+
+  // Closing the last workspace leaves the phone with no shared sessions at all.
+  assert.deepEqual(await phone.post("/close-workspace", { cwd: "/proj/b" }), { status: 200, data: { closed: true } });
+  const chat = await phone.get("/chat");
+  assert.equal(chat.session, undefined);
+  assert.equal(chat.state, "no_shared_sessions");
+  assert.deepEqual((await phone.get("/sessions")).projects, []);
+  assert.deepEqual(host.closed, [projectDir, "/proj/a", "/proj/b"]);
+});
+
+test("host refusals and outages surface their own errors instead of pretending success", { timeout: 30000 }, async (context) => {
+  const ipc = await mkdtemp(join(tmpdir(), "pigo-close-refusal-"));
+  context.after(async () => { await rm(ipc, { force: true, recursive: true }); });
+  const port = await reservePort();
+  const refusals = new Map();
+  const host = fakeHost(context, ipc, [], (input, reply) => {
+    const refusal = refusals.get(input.cwd);
+    if (!refusal) return false;
+    reply(refusal.status, { error: refusal.error });
+    return true;
+  });
+  await host.ready;
+
+  const phone = await pairBroker(context, ipc, port);
+  const grant = await localRequest(join(ipc, `bridge-${port}.sock`), "POST", "/grant", { cwd: "/tmp" });
+  assert.equal(grant.status, 200);
+  const granted = await realpath("/tmp");
+  assert.deepEqual(new Set((await phone.get("/sessions")).projects), new Set([granted]));
+
+  // Desktop-side refusals pass their status and code straight through to the phone.
+  refusals.set(granted, { status: 404, error: "desktop_workspace_not_registered" });
+  assert.deepEqual(await phone.post("/close-workspace", { cwd: granted }), { status: 404, data: { error: "desktop_workspace_not_registered" } });
+  refusals.set(granted, { status: 409, error: "desktop_workspace_kind_unsupported" });
+  assert.deepEqual(await phone.post("/close-workspace", { cwd: granted }), { status: 409, data: { error: "desktop_workspace_kind_unsupported" } });
+  // A failed close keeps the grant so the workspace stays reachable for the next attempt.
+  assert.deepEqual(new Set((await phone.get("/sessions")).projects), new Set([granted]));
+
+  // Without a reachable Desktop host the close is refused instead of silently skipped.
+  await host.stop();
+  assert.deepEqual(await phone.post("/close-workspace", { cwd: granted }), { status: 409, data: { error: "desktop_handoff_required" } });
+});

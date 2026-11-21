@@ -7,7 +7,7 @@ import { huks } from '@kit.UniversalKeystoreKit';
 
 // Sidebar UI choices worth remembering between launches; plain state, no secrets.
 export const SIDEBAR_VIEWS: string[] = ['all', 'pinned', 'recent', 'archived'];
-export const SIDEBAR_MAX_COLLAPSED = 100;
+export const SIDEBAR_MAX_EXPANDED = 100;
 export const SIDEBAR_MAX_ENTRIES = 24;
 
 export interface Companion {
@@ -24,7 +24,7 @@ export interface ComputerBook {
 }
 
 export interface SidebarState {
-  collapsedSpaces: string[];
+  expandedSpaces: string[];
   tasksExpanded: boolean;
   sessionView: string;
 }
@@ -50,7 +50,7 @@ interface StoredCompanions {
 }
 
 interface StoredSidebarState {
-  collapsedSpaces?: string[];
+  expandedSpaces?: string[];
   tasksExpanded?: boolean;
   sessionView?: string;
 }
@@ -153,7 +153,7 @@ export class CredentialVault {
     return this.writing;
   }
 
-  // Collapse and filter choices are plain UI state, so they stay unsealed beside the vault.
+  // Expanded-space and filter choices are plain UI state, so they stay unsealed beside the vault.
   async loadSidebar(): Promise<SidebarBook> {
     const book: SidebarBook = { version: 1, entries: [] };
     try {
@@ -168,8 +168,8 @@ export class CredentialVault {
         if (entries.some((kept: SidebarEntry): boolean => kept.address === address)) return;
         const view: string = entry.state.sessionView ?? '';
         const restored: SidebarState = {
-          collapsedSpaces: (Array.isArray(entry.state.collapsedSpaces) ? entry.state.collapsedSpaces : [])
-            .filter((path: string): boolean => typeof path === 'string').slice(0, SIDEBAR_MAX_COLLAPSED),
+          expandedSpaces: (Array.isArray(entry.state.expandedSpaces) ? entry.state.expandedSpaces : [])
+            .filter((path: string): boolean => typeof path === 'string').slice(0, SIDEBAR_MAX_EXPANDED),
           tasksExpanded: entry.state.tasksExpanded !== false,
           sessionView: SIDEBAR_VIEWS.includes(view) ? view : 'all'
         };

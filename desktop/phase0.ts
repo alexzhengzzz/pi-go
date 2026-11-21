@@ -140,6 +140,7 @@ function createProbe() {
   let runId: string | undefined;
   const requests = new Map<string, string>();
   const streams = new Set<ServerResponse>();
+  const streamTargets = new Map<ServerResponse, { id: string; cwd: string }>();
   const status = () => {
     const ctx = runtime?.ctx;
     return ctx && { id: ctx.sessionManager.getSessionId(), cwd: ctx.cwd, name: ctx.sessionManager.getSessionName(),
@@ -148,9 +149,11 @@ function createProbe() {
       model: ctx.model && modelRow(ctx.model), thinkingLevel: ctx.thinkingLevel };
   };
   const emit = (type: string, data: object) => {
-    const frame = `data: ${JSON.stringify({ type, sessionId: status()?.id, ...data })}\n\n`;
+    const current = status();
+    const frame = `data: ${JSON.stringify({ type, sessionId: current?.id, ...data })}\n\n`;
     for (const stream of streams) {
-      if (!stream.write(frame)) stream.destroy();
+      const target = streamTargets.get(stream);
+      if ((target && (current?.id !== target.id || current.cwd !== target.cwd)) || !stream.write(frame)) stream.destroy();
     }
   };
   const stopPing = () => {
@@ -199,15 +202,26 @@ function createProbe() {
         return reply(response, 200, { token: secret });
       }
       if (!privateSocket && !same(request.headers.authorization, token)) return fail(401, "unpaired");
+      const targetParams = privateSocket && request.url?.includes('_pigoSession=') ?
+        new URL(request.url, 'http://pi-go').searchParams : undefined;
+      const targetId = targetParams?.get('_pigoSession');
+      const targetCwd = targetParams?.get('_pigoCwd');
+      const target = targetId && targetCwd ? { id: targetId, cwd: targetCwd } : undefined;
+      if (targetParams) {
+        const current = status();
+        if (!target || switching || current?.id !== target.id || current.cwd !== target.cwd) return fail(409, "session_changed");
+      }
       if (route === "GET /events") {
         if (streams.size >= 4) return fail(429, "too_many_streams");
         request.socket.setTimeout(0);
         response.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-store", "Connection": "keep-alive" });
         response.write(`data: ${JSON.stringify({ type: "ready", session: status() })}\n\n`);
         streams.add(response);
+        if (target) streamTargets.set(response, target);
         startPing();
         response.on("close", () => {
           streams.delete(response);
+          streamTargets.delete(response);
           if (!streams.size) stopPing();
         });
         return;
@@ -749,7 +763,7 @@ export default function (pi: ExtensionAPI) {
     },
   });
   pi.registerCommand("pi-go-bridge-stop", {
-    description: "Stop the shared loopback bridge and revoke its credentials",
+    description: "Stop the shared bridge and keep the paired device for restart",
     handler: async (args, ctx) => {
       const port = args.trim() ? Number(args.trim()) : 18977;
       if (!Number.isInteger(port) || port < 1024 || port > 65535) return;

@@ -32,7 +32,7 @@ index fff6ac6..96470da 100644
 +    broadcast: ctx.broadcast,
 +    onPendingCounts: (counts) => workspaceActivity.handlePendingCounts(counts),
 +  })
-+  registerPiGoHost(workspaceManager, extensionUiRouter)
++  registerPiGoHost(workspaceManager, extensionUiRouter, ctx.notesManager)
    wireExtensionUiIpc<IpcMainInvokeEvent>({
      handle: (channel, handler) => ipcMain.handle(channel, handler),
      assertTrustedSender,
