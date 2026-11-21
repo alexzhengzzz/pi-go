@@ -14,14 +14,20 @@ function method(name) {
 const methods = ['setDrawer', 'loadSessions', 'requestAction', 'positionTranscript', 'poll', 'loadSessionStatus', 'applyRunningStatus', 'backgroundRunning', 'backgroundActive', 'sessionState', 'sessionRunning'];
 methods.push('cacheChat', 'presentChat', 'send', 'mergeTranscript', 'sameMessage', 'applyLiveSnapshot',
   'handleFrame', 'queueStreamPaint', 'flushStreamDeltas', 'finishSend', 'reconcileSteering');
-methods.push('chooseComputer', 'leaveComputer', 'persistComputers', 'pair', 'resetFileTree');
+methods.push('chooseComputer', 'leaveComputer', 'persistComputers', 'pair', 'resetFileTree', 'closeFileEditor');
 methods.push('appendFileTreeRows', 'updateFileTree', 'toggleFileDirectory', 'loadFileDirectory');
-const Page = new Function('Curve', 'BridgeFailure', 'CachePaintFrame', 'validUsb', 'MAX_COMPUTERS', stripTypeScriptTypes(`const STREAM_PAINT_INTERVAL_MS = 32;\nconst MAX_LIVE_TEXT_LENGTH = 16000;\nclass Harness {\n${methods.map(method).join('\n')}\n}`) + '; return Harness;')(
+methods.push('openSpaceActions', 'confirmCloseSpace', 'closeWorkspace', 'armTranscriptFollow', 'onKeyboardChange');
+methods.push('dockedSessions', 'sessionPaneWidth', 'compactSessionPane', 'onWindowWidthChange');
+const splitWidth = page.match(/^const SPLIT_WINDOW_WIDTH = \d+;$/m)[0];
+const Page = new Function('Curve', 'BridgeFailure', 'CachePaintFrame', 'validUsb', 'MAX_COMPUTERS', 'Edge', '$r', 'DialogAlignment', stripTypeScriptTypes(`${splitWidth}\nconst STREAM_PAINT_INTERVAL_MS = 32;\nconst MAX_LIVE_TEXT_LENGTH = 16000;\nclass Harness {\n${methods.map(method).join('\n')}\n}`) + '; return Harness;')(
   { EaseOut: 0 },
   class BridgeFailure extends Error {},
   class CachePaintFrame { constructor(at) { this.at = at; } },
   (address) => address === 'http://127.0.0.1:18977',
-  12
+  12,
+  { Bottom: 'bottom' },
+  resource => resource,
+  { Bottom: 'bottom' }
 );
 function fixture() {
   const state = new Page();
@@ -44,6 +50,40 @@ function fixture() {
 }
 const historyHandler = page.match(/\.id\('history'\)[\s\S]*?\.onClick\(\(\) => \{([^}]+)\}\)/)[1];
 const clickHistory = new Function(historyHandler);
+
+test('editor keyboard events leave the hidden chat transcript alone', () => {
+  const state = fixture();
+  Object.assign(state, {
+    editingPath: 'aa.md', keyboardHeight: 300, transcriptFollow: false,
+    transcript: { currentOffset() { assert.fail('editor keyboard queried the chat scroller'); } }
+  });
+  for (const activeTab of ['files', 'tasks']) {
+    state.activeTab = activeTab;
+    state.showFiles = activeTab === 'files';
+    state.onKeyboardChange();
+  }
+  assert.equal(state.transcriptFollow, false);
+});
+
+test('chat keyboard events handle an unmounted scroller and preserve scroll-follow behavior', () => {
+  const state = fixture();
+  const positions = [];
+  let offset;
+  Object.assign(state, {
+    activeTab: 'tasks', keyboardHeight: 300, transcriptViewport: 200, transcriptContentHeight: 500,
+    transcriptFollow: false,
+    transcript: { currentOffset: () => offset, scrollEdge: (edge) => positions.push(edge) }
+  });
+  state.onKeyboardChange();
+  assert.equal(state.transcriptFollow, false);
+  offset = { yOffset: 290 };
+  state.onKeyboardChange();
+  assert.equal(state.transcriptFollow, true);
+  offset = { yOffset: 20 };
+  state.onKeyboardChange();
+  assert.equal(state.transcriptFollow, false);
+  assert.deepEqual(positions, ['bottom']);
+});
 
 test('adding a USB computer does not use or replace the active TLS connection when pairing fails', async () => {
   const state = fixture();
@@ -97,6 +137,62 @@ test('reopening the sidebar uses the fresh catalog without another request', () 
   assert.equal(requests, 0);
   assert.equal(state.busy, false);
   assert.equal(state.sessions[0].id, 'one');
+});
+
+test('an open drawer docks on unfold and folding back reveals the same conversation', () => {
+  const state = fixture();
+  Object.assign(state, { windowWidth: 459, isPaired: true, activeTab: 'tasks', currentId: 'one', draft: 'Keep this' });
+  clickHistory.call(state);
+  assert.equal(state.showSessions, true);
+  assert.equal(state.dockedSessions(), false);
+
+  state.windowWidth = 711;
+  state.onWindowWidthChange();
+  assert.equal(state.dockedSessions(), true);
+  assert.equal(state.showSessions, false);
+  assert.ok(711 - state.sessionPaneWidth() >= 460);
+  clickHistory.call(state);
+  assert.equal(state.showSessions, false);
+
+  state.windowWidth = 939;
+  state.onWindowWidthChange();
+  assert.equal(state.dockedSessions(), true);
+  assert.ok(state.sessionPaneWidth() <= 288);
+
+  state.windowWidth = 459;
+  state.onWindowWidthChange();
+  assert.equal(state.dockedSessions(), false);
+  assert.equal(state.showSessions, false);
+  assert.equal(state.currentId, 'one');
+  assert.equal(state.draft, 'Keep this');
+});
+
+test('the user-chosen sidebar width fits the window and is restored when there is room', () => {
+  const state = fixture();
+  Object.assign(state, { windowWidth: 711, isPaired: true, activeTab: 'tasks', preferredSessionPaneWidth: 320 });
+  assert.equal(state.sessionPaneWidth(), 320);
+
+  state.windowWidth = 600;
+  assert.equal(state.sessionPaneWidth(), 240);
+  state.windowWidth = 711;
+  assert.equal(state.sessionPaneWidth(), 320);
+
+  state.preferredSessionPaneWidth = 0;
+  assert.equal(state.sessionPaneWidth(), 160);
+  assert.equal(state.compactSessionPane(), true);
+  state.preferredSessionPaneWidth = 207;
+  assert.equal(state.compactSessionPane(), true);
+  state.preferredSessionPaneWidth = 208;
+  assert.equal(state.compactSessionPane(), false);
+
+  state.windowWidth = 600;
+  state.preferredSessionPaneWidth = undefined;
+  assert.equal(state.sessionPaneWidth(), 224);
+  assert.equal(state.compactSessionPane(), false);
+
+  state.windowWidth = 1100;
+  state.preferredSessionPaneWidth = 800;
+  assert.equal(state.sessionPaneWidth(), 420);
 });
 
 test('the workspace tree fetches folders on demand and paginates within a branch', async () => {
@@ -179,6 +275,61 @@ test('refresh failure keeps the cached spaces and tasks', async () => {
   assert.deepEqual(state.projects, ['/project']);
   assert.equal(state.busy, false);
   assert.equal(state.sessionLoading, false);
+});
+
+test('one space action picker offers creation and removal and requires confirmation before closing', async () => {
+  const state = fixture();
+  const requests = [];
+  let selection = 0;
+  let confirmation;
+  Object.assign(state, {
+    isPaired: true, desktopHandoff: true,
+    getUIContext: () => ({
+      getPromptAction: () => ({ showActionMenu: async ({ buttons }) => {
+        assert.deepEqual(buttons.map(({ text }) => text), ['新建任务', '移除空间']);
+        return { index: selection };
+      } }),
+      showAlertDialog: options => { confirmation = options; }
+    }),
+    requestAction: async (...args) => { requests.push(args); return false; }
+  });
+  await state.openSpaceActions('/project');
+  assert.deepEqual(requests, [['/new', { cwd: '/project' }]]);
+
+  selection = 1;
+  await state.openSpaceActions('/project');
+  assert.equal(confirmation.title, '移除空间');
+  confirmation.primaryButton.action();
+  assert.equal(requests.length, 1);
+  confirmation.secondaryButton.action();
+  assert.deepEqual(requests[1], ['/close-workspace', { cwd: '/project' }]);
+});
+
+test('removing a space reports errors in the drawer and removes the row after confirmation', async () => {
+  const state = fixture();
+  const messages = [];
+  let attempts = 0;
+  Object.assign(state, {
+    showSessions: true, workspaceCwd: '/project', expandedSpaces: ['/project'],
+    getUIContext: () => ({ getPromptAction: () => ({ showToast: ({ message }) => messages.push(message) }) }),
+    scheduleSidebarSave: () => {}, schedule: () => {},
+    request: async (path, payload) => {
+      assert.equal(path, '/close-workspace');
+      assert.deepEqual(payload, { cwd: '/project' });
+      if (attempts++ === 0) throw new Error('offline');
+      return { closed: true };
+    }
+  });
+  await state.closeWorkspace('/project');
+  assert.deepEqual(state.projects, ['/project']);
+  assert.deepEqual(state.expandedSpaces, ['/project']);
+  assert.deepEqual(messages, [state.status]);
+
+  await state.closeWorkspace('/project');
+  assert.deepEqual(state.projects, []);
+  assert.deepEqual(state.expandedSpaces, []);
+  assert.equal(messages.at(-1), '已移除空间「project」');
+  assert.equal(state.sessionCatalogLoaded, false);
 });
 
 test('results from before a computer switch or catalog mutation are discarded', async () => {

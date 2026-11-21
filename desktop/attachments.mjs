@@ -2,6 +2,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { mkdirSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
+export const maxHistoryImageBase64 = Math.ceil(8 * 1024 * 1024 / 3) * 4;
 export const maxImageBytes = 512 * 1024;
 export const maxImagesPerPrompt = 4;
 export const maxFileBytes = 8 * 1024 * 1024;

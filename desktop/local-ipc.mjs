@@ -76,7 +76,7 @@ export function localUpload(socketPath, path, bytes, timeout = 15000) {
   });
 }
 
-export function localRequest(socketPath, method, path, value, timeout = 4000) {
+export function localRequest(socketPath, method, path, value, timeout = 4000, maxResponseBytes = 2 * 1024 * 1024) {
   const body = value === undefined ? undefined : JSON.stringify(value);
   return new Promise((resolve, reject) => {
     const req = request({ socketPath, path, method, agent: false, signal: AbortSignal.timeout(timeout),
@@ -86,7 +86,7 @@ export function localRequest(socketPath, method, path, value, timeout = 4000) {
       let size = 0;
       res.on('data', (chunk) => {
         size += chunk.length;
-        if (size > 2 * 1024 * 1024) res.destroy(new Error('oversized_worker_response'));
+        if (size > maxResponseBytes) res.destroy(new Error('oversized_worker_response'));
         else chunks.push(chunk);
       });
       res.on('error', reject);

@@ -11,7 +11,7 @@ import { startDiscovery } from './lan-discovery.mjs';
 import { listFiles, previewFile, saveFile, openWorkspaceDownload, findWorkspaceFileByName } from './workspace-files.mjs';
 import { SessionMetadata, stateDirectory } from './session-metadata.mjs';
 import { computerSessions } from './computer-sessions.mjs';
-import { maxFileBytes, maxImageBytes, maxPromptBody, safeAttachmentName } from './attachments.mjs';
+import { maxFileBytes, maxHistoryImageBase64, maxImageBytes, maxPromptBody, safeAttachmentName } from './attachments.mjs';
 
 const remote = process.argv[3] === '--remote';
 const lan = !remote && Boolean(process.argv[3]);
@@ -73,8 +73,8 @@ function acceptRemoteRequest(response) {
   return true;
 }
 
-function workerPath(path, session) {
-  if (!remote) return path;
+function workerPath(path, session, requireTarget = false) {
+  if (!remote && !requireTarget) return path;
   const url = new URL(path, 'http://pi-go');
   url.searchParams.set('_pigoSession', session.id);
   url.searchParams.set('_pigoCwd', session.cwd);
@@ -357,7 +357,7 @@ const publicHandler = async (request, response) => {
     if (remote && !acceptRemoteRequest(response)) return;
     lastSeen = Date.now();
     if (route === 'GET /health') return reply(response, 200, { protocol: 'pi-go-bridge/1' });
-    if (!['GET /session', 'GET /chat', 'GET /history', 'GET /tool-detail', 'GET /sessions', 'GET /sessions/status', 'GET /models', 'GET /commands', 'GET /events', 'GET /files/download', 'POST /open', 'POST /new', 'POST /prompt', 'POST /upload', 'POST /abort', 'POST /answer', 'POST /receipt', 'POST /model', 'POST /rename', 'POST /session-meta', 'POST /close-workspace', 'POST /files/list', 'POST /files/read', 'POST /files/save'].includes(route)) return error(response, 404, 'not_found');
+    if (!['GET /session', 'GET /chat', 'GET /history', 'GET /tool-detail', 'GET /message-image', 'GET /message-text', 'GET /sessions', 'GET /sessions/status', 'GET /models', 'GET /commands', 'GET /events', 'GET /files/download', 'POST /open', 'POST /new', 'POST /prompt', 'POST /upload', 'POST /abort', 'POST /answer', 'POST /receipt', 'POST /model', 'POST /rename', 'POST /session-meta', 'POST /close-workspace', 'POST /files/list', 'POST /files/read', 'POST /files/save'].includes(route)) return error(response, 404, 'not_found');
     if (route === 'GET /events') {
       if (streams.size >= 4) return error(response, 429, 'too_many_streams');
       request.socket.setTimeout(0);
@@ -431,13 +431,21 @@ const publicHandler = async (request, response) => {
       if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
       if (typeof input.cwd !== 'string' || (!live.some(({ session }) => session.cwd === input.cwd) && !context.granted.includes(input.cwd))) return error(response, 403, 'desktop_workspace_unshared');
       try {
-        const result = path === '/files/list' ? listFiles(input.cwd, input.path, input.cursor) :
-          path === '/files/read' ? previewFile(input.cwd, input.path) : saveFile(input.cwd, input.path, input.text, input.version);
-        return reply(response, 200, result);
+        if (path === '/files/list') return reply(response, 200, listFiles(input.cwd, input.path, input.cursor));
+        if (path === '/files/save') return reply(response, 200, saveFile(input.cwd, input.path, input.text, input.version));
+        try { return reply(response, 200, previewFile(input.cwd, input.path)); }
+        catch (cause) {
+          if (cause.code !== 'ENOENT' || input.lookup !== 'name' || input.path.includes('/')) throw cause;
+          const match = await findWorkspaceFileByName(input.cwd, input.path);
+          if (response.destroyed) return;
+          if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
+          return reply(response, 200, previewFile(input.cwd, match));
+        }
       } catch (cause) {
         const code = cause.code === 'ENOENT' ? 'file_not_found' : cause.code === 'EACCES' || cause.code === 'EPERM' || cause.code === 'ELOOP' ? 'path_forbidden' : cause.message;
         const status = { invalid_path: 400, invalid_file: 400, path_forbidden: 403, file_not_found: 404,
-          file_conflict: 409, file_too_large: 413, not_text_file: 415, not_directory: 400 }[code];
+          file_conflict: 409, file_too_large: 413, not_text_file: 415, not_directory: 400,
+          ambiguous_file_name: 409, file_lookup_limit: 422 }[code];
         if (status) return error(response, status, code);
         throw cause;
       }
@@ -559,9 +567,14 @@ const publicHandler = async (request, response) => {
       if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
       return reply(response, answer?.status ?? 409, answer?.data ?? { error: 'interaction_unavailable' });
     }
-    const result = await localRequest(current.socket, request.method, workerPath(request.url, current.session), input).catch(() => undefined);
+    const isImage = route === 'GET /message-image';
+    const sessionScopedMessage = isImage || route === 'GET /message-text';
+    const version = selectionVersion;
+    const result = await localRequest(current.socket, request.method, workerPath(request.url, current.session, sessionScopedMessage), input,
+      isImage ? 8000 : undefined, isImage ? maxHistoryImageBase64 + 1024 : undefined).catch(() => undefined);
     if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
     if (!result) return error(response, 409, 'session_unavailable');
+    if (sessionScopedMessage && version !== selectionVersion) return error(response, 409, 'session_changed');
     if ((route === 'GET /chat' || (remote && route === 'GET /models')) && result.status === 200 &&
         (result.data.session?.id !== current.session.id || (remote && result.data.session?.cwd !== current.session.cwd))) {
       return error(response, 409, 'session_changed');

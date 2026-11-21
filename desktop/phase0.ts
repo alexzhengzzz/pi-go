@@ -10,10 +10,12 @@ import { ipcDirectory, localRequest, workerSocket } from "./local-ipc.mjs";
 import { pairingRuntime } from "./pairing-runtime.mjs";
 import { localLanAddress } from "./lan-tls.mjs";
 import { maxPromptBody, validPromptImage, validPromptImageBuffer, stageAttachment, stagedAttachment, safeAttachmentName,
-  maxImageBytes, maxFileBytes, maxImagesPerPrompt, maxFilesPerPrompt } from "./attachments.mjs";
+  maxHistoryImageBase64, maxImageBytes, maxFileBytes, maxImagesPerPrompt, maxFilesPerPrompt } from "./attachments.mjs";
 
 const host = "127.0.0.1";
 const maxBody = 16 * 1024;
+const messagePreviewLength = 8000;
+const messageTextPageLength = 128 * 1024;
 const digest = (value: string) => createHash("sha256").update(value).digest();
 const same = (value: unknown, expected: Buffer | undefined) =>
   typeof value === "string" && expected !== undefined && timingSafeEqual(digest(value), expected);
@@ -31,27 +33,56 @@ const modelRow = (model: ModelLike) =>
 
 type LiveToolStatus = { id: string; name: string; detail: string; state: "unknown" | "run" | "ok" | "fail"; ms?: number };
 type ToolActivity = { summary: LiveToolStatus; args: unknown; result?: unknown };
+type ImagePart = { type: "image"; mimeType: string; data: string };
 
-function toolResultText(result: unknown): string {
+function imageParts(content: unknown): ImagePart[] {
+  return Array.isArray(content) ? content.filter((part): part is ImagePart => part?.type === "image") : [];
+}
+
+function replyImage(response: ServerResponse, content: unknown, index: number) {
+  const part = imageParts(content)[index];
+  if (!part) return reply(response, 404, { error: "image_not_found" });
+  const { mimeType, data } = part;
+  if (typeof mimeType !== "string" || !/^image\/(?:jpeg|png|gif|webp|bmp|heic|heif|avif|tiff)$/i.test(mimeType) ||
+    typeof data !== "string" || !data.length) return reply(response, 415, { error: "unsupported_image" });
+  if (data.length > maxHistoryImageBase64) return reply(response, 413, { error: "image_too_large" });
+  return reply(response, 200, { image: { mimeType: mimeType.toLowerCase(), data } });
+}
+
+function messageText(content: unknown): string {
+  if (typeof content === "string") return content;
+  return Array.isArray(content) ? content.flatMap((part) =>
+    part?.type === "text" && typeof part.text === "string" ? [part.text] : []).join("\n") : "";
+}
+
+function messageTextSlice(text: string, offset: number, length: number): string {
+  const end = offset + length;
+  const chunk = text.slice(offset, end);
+  // Keep UTF-16 surrogate pairs together across response boundaries.
+  return end < text.length ? chunk.replace(/[\uD800-\uDBFF]$/, "") : chunk;
+}
+
+function toolResultText(result: unknown, separateImages: boolean): string {
   const content = (result as { content?: unknown })?.content;
   if (!Array.isArray(content)) return "";
   return content.map((part) => {
     if (part?.type === "text" && typeof part.text === "string") return part.text;
-    if (part?.type === "image") return "［图片输出］";
-    return "";
-  }).join("\n");
+    if (part?.type === "image" && !separateImages) return "［图片输出］";
+    return undefined;
+  }).filter((text) => text !== undefined).join("\n");
 }
 
-function toolDetails(activity: ToolActivity) {
+function toolDetails(activity: ToolActivity, separateImages: boolean) {
   const args = activity.args as { command?: unknown; path?: unknown } | undefined;
   const command = activity.summary.name === "bash" && typeof args?.command === "string" ? args.command : undefined;
   const input = command ?? (args === undefined ? "" : JSON.stringify(args, null, 2) ?? "");
-  const output = toolResultText(activity.result);
+  const output = toolResultText(activity.result, separateImages);
   const limit = 64 * 1024;
   return {
     input: input.slice(0, limit), output: output.slice(0, limit),
     command: command !== undefined, truncated: input.length > limit || output.length > limit,
     state: activity.summary.state,
+    imageCount: imageParts((activity.result as { content?: unknown })?.content).length,
     path: typeof args?.path === "string" && args.path.length <= 2048 ? args.path : undefined,
   };
 }
@@ -187,7 +218,7 @@ function createProbe() {
       }
       const path = (request.url ?? "").split("?")[0];
       const route = `${request.method} ${path}`;
-      if (privateSocket && !["GET /session", "GET /chat", "GET /history", "GET /tool-detail", "GET /sessions", "GET /models", "GET /commands", "GET /events", "POST /prompt", "POST /upload", "POST /abort", "POST /receipt", "POST /model", "POST /rename"].includes(route)) {
+      if (privateSocket && !["GET /session", "GET /chat", "GET /history", "GET /tool-detail", "GET /message-image", "GET /message-text", "GET /sessions", "GET /models", "GET /commands", "GET /events", "POST /prompt", "POST /upload", "POST /abort", "POST /receipt", "POST /model", "POST /rename"].includes(route)) {
         return fail(404, "not_found");
       }
       if (route === "POST /pair") {
@@ -255,10 +286,35 @@ function createProbe() {
         }));
         return reply(response, 200, { session: status(), commands });
       }
-      if (route === "GET /chat" || route === "GET /history" || route === "GET /tool-detail") {
+      if (route === "GET /message-text") {
+        const parameters = new URL(request.url ?? "/", "http://pi-go").searchParams;
+        if (parameters.get("id") !== status()?.id) return fail(409, "session_changed");
+        const messageId = parameters.get("message");
+        const entry = active.ctx.sessionManager.getBranch().find((entry) => entry.id === messageId);
+        if (entry?.type !== "message" || entry.message.role !== "assistant") return fail(404, "message_not_found");
+        const rawOffset = parameters.get("offset") ?? "0";
+        const offset = Number(rawOffset);
+        const text = messageText(entry.message.content);
+        if (!/^\d+$/.test(rawOffset) || !Number.isSafeInteger(offset) || offset > text.length ||
+          (offset && /[\uDC00-\uDFFF]/.test(text.charAt(offset)))) return fail(400, "invalid_text_offset");
+        const chunk = messageTextSlice(text, offset, messageTextPageLength);
+        const end = offset + chunk.length;
+        return reply(response, 200, { text: chunk, nextTextOffset: end < text.length ? end : undefined });
+      }
+      if (route === "GET /chat" || route === "GET /history" || route === "GET /tool-detail" || route === "GET /message-image") {
         const parameters = new URL(request.url ?? "/", "http://pi-go").searchParams;
         if (route !== "GET /chat" && parameters.get("id") !== status()?.id) return fail(409, "session_changed");
         const branch = active.ctx.sessionManager.getBranch();
+        const imageIndex = parameters.get("index");
+        const toolId = parameters.get("tool");
+        if (route === "GET /message-image") {
+          if (!imageIndex || !/^\d{1,6}$/.test(imageIndex)) return fail(400, "invalid_image_index");
+          if (!toolId) {
+            const entry = branch.find((entry) => entry.id === parameters.get("message"));
+            if (entry?.type !== "message" || !["user", "assistant"].includes(entry.message.role)) return fail(404, "image_not_found");
+            return replyImage(response, entry.message.content, Number(imageIndex));
+          }
+        }
         const toolsByMessage = new Map<string, ToolActivity[]>();
         const latestById = new Map<string, ToolActivity>();
         for (const entry of branch) {
@@ -284,21 +340,24 @@ function createProbe() {
             }
           }
         }
-        if (route === "GET /tool-detail") {
+        if (route === "GET /tool-detail" || route === "GET /message-image") {
           const id = parameters.get("tool") ?? "";
           const messageId = parameters.get("message");
           const saved = messageId ? toolsByMessage.get(messageId)?.find(({ summary }) => summary.id === id) : latestById.get(id);
           const live = !messageId || (saved && latestById.get(id) === saved) ? toolLog.get(id) : undefined;
           const activity = saved?.result !== undefined ? saved : live ?? saved;
           if (!activity) return fail(404, "tool_not_found");
-          return reply(response, 200, { toolDetail: toolDetails(activity) });
+          if (route === "GET /message-image") {
+            return replyImage(response, (activity.result as { content?: unknown })?.content, Number(imageIndex));
+          }
+          return reply(response, 200, { toolDetail: toolDetails(activity, parameters.get("images") === "1") });
         }
         const messages = branch.flatMap((entry) => {
           if (entry.type !== "message") return [];
           const { role, content } = entry.message;
           if (role !== "user" && role !== "assistant") return [];
           const parts = Array.isArray(content) ? content : [];
-          const text = typeof content === "string" ? content : parts.flatMap((part) => part.type === "text" ? [part.text] : []).join("\n");
+          const text = messageText(content);
           const thinking = role === "assistant" ? parts.flatMap((part) => part.type === "thinking" && typeof part.thinking === "string" ? [part.thinking] : []).join("\n") : "";
           const durationMs = role === "assistant" ? (entry.message as { durationMs?: number }).durationMs : undefined;
           const imageCount = parts.filter((part) => part.type === "image").length;
@@ -307,7 +366,9 @@ function createProbe() {
             const live = latestById.get(summary.id) === activity ? toolLog.get(summary.id)?.summary : undefined;
             return summary.state === "unknown" && live ? live : summary;
           });
-          return text || imageCount || thinking || tools?.length ? [{ id: entry.id, role, text: text.slice(0, 8000), imageCount, tools,
+          return text || imageCount || thinking || tools?.length ? [{
+            id: entry.id, role, text: messageTextSlice(text, 0, messagePreviewLength), imageCount, tools,
+            textTruncated: role === "assistant" && text.length > messagePreviewLength ? true : undefined,
             thinking: thinking ? thinking.slice(0, 16000) : undefined,
             thinkingMs: thinking ? durationMs : undefined }] : [];
         });

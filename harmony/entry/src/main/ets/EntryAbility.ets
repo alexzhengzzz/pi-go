@@ -42,12 +42,21 @@ export default class EntryAbility extends UIAbility {
   private trackAvoidAreas(mainWindow: window.Window): void {
     const update = (): void => {
       const ui = mainWindow.getUIContext();
-      const top = mainWindow.getWindowAvoidArea(window.AvoidAreaType.TYPE_SYSTEM);
-      const bottom = mainWindow.getWindowAvoidArea(window.AvoidAreaType.TYPE_NAVIGATION_INDICATOR);
-      AppStorage.setOrCreate<number>('pigoStatusBar', ui.px2vp(top.topRect.height));
-      AppStorage.setOrCreate<number>('pigoNavBar', ui.px2vp(bottom.bottomRect.height));
+      const system = mainWindow.getWindowAvoidArea(window.AvoidAreaType.TYPE_SYSTEM);
+      const indicator = mainWindow.getWindowAvoidArea(window.AvoidAreaType.TYPE_NAVIGATION_INDICATOR);
+      const cutout = mainWindow.getWindowAvoidArea(window.AvoidAreaType.TYPE_CUTOUT);
+      const left = Math.max(system.leftRect.width, indicator.leftRect.width, cutout.leftRect.width);
+      const right = Math.max(system.rightRect.width, indicator.rightRect.width, cutout.rightRect.width);
+      const rect = mainWindow.getWindowProperties().windowRect;
+      AppStorage.setOrCreate<number>('pigoLeftInset', ui.px2vp(left));
+      AppStorage.setOrCreate<number>('pigoRightInset', ui.px2vp(right));
+      AppStorage.setOrCreate<number>('pigoStatusBar', ui.px2vp(Math.max(system.topRect.height, cutout.topRect.height)));
+      AppStorage.setOrCreate<number>('pigoNavBar', ui.px2vp(Math.max(indicator.bottomRect.height, cutout.bottomRect.height)));
+      AppStorage.setOrCreate<number>('pigoWindowWidth', ui.px2vp(Math.max(0, rect.width - left - right)));
+      AppStorage.setOrCreate<number>('pigoWindowHeight', ui.px2vp(rect.height));
     };
     update();
+    mainWindow.on('windowSizeChange', () => { update(); });
     mainWindow.on('avoidAreaChange', () => { update(); });
     mainWindow.on('keyboardHeightChange', (height: number) => {
       AppStorage.setOrCreate<number>('pigoKeyboard', mainWindow.getUIContext().px2vp(height));

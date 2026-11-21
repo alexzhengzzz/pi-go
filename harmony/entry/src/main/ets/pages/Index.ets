@@ -1,6 +1,7 @@
-import { FrameCallback, KeyboardAvoidMode } from '@kit.ArkUI';
+import { FrameCallback, KeyboardAvoidMode, window } from '@kit.ArkUI';
 import { inputMethod } from '@kit.IMEKit';
 import { ChatContent } from '../ChatContent';
+import { ChatImage } from '../ChatImage';
 import { http } from '@kit.NetworkKit';
 import { util } from '@kit.ArkTS';
 import { scanBarcode, scanCore } from '@kit.ScanKit';
@@ -66,6 +67,7 @@ interface ChatMessage {
   id: string;
   role: string;
   text: string;
+  textTruncated?: boolean;
   imageCount?: number;
   thinking?: string;
   thinkingMs?: number;
@@ -105,6 +107,7 @@ interface ToolDetails {
   input: string;
   output: string;
   command: boolean;
+  imageCount?: number;
   truncated: boolean;
   state: string;
   path?: string;
@@ -123,8 +126,18 @@ interface ReceivedFilePreview {
   markdown?: boolean;
   localPath?: string;
   systemUri?: string;
+  imageUri?: string;
+  workspaceRoot?: string;
+  workspacePath?: string;
+  version?: string;
   offset?: number;
   nextOffset?: number;
+}
+
+interface MarkdownTableReader {
+  source: string;
+  cwd: string;
+  documentPath: string;
 }
 
 interface StreamFrame {
@@ -205,17 +218,25 @@ interface BridgeReply {
   nextCursor?: number;
   messages?: ChatMessage[];
   historyCursor?: string;
+  nextTextOffset?: number;
   liveText?: string;
   liveSeq?: number;
   liveThinking?: string;
   liveThinkSeq?: number;
   tools?: LiveTool[];
   toolDetail?: ToolDetails;
+  image?: HistoryImage;
   promptError?: string;
+}
+
+interface HistoryImage {
+  mimeType: string;
+  data: string;
 }
 
 interface Payload {
   path?: string;
+  lookup?: string;
   cursor?: number;
   version?: string;
   revision?: number;
@@ -274,6 +295,10 @@ const RECEIVED_FILE_TTL_S = 7 * 24 * 3600;
 const STREAM_PAINT_INTERVAL_MS = 32;
 const MAX_LIVE_TEXT_LENGTH = 16000;
 const MAX_DOWNLOAD_BYTES = 64 * 1024 * 1024;
+const MAX_INLINE_IMAGE_BYTES = 8 * 1024 * 1024;
+const SPLIT_WINDOW_WIDTH = 600;
+const SHORT_WINDOW_HEIGHT = 480;
+const HISTORY_IMAGE_EXTENSIONS = ['.jpeg', '.png', '.gif', '.webp', '.bmp', '.heic', '.heif', '.avif', '.tiff'];
 const MAX_DOWNLOAD_ERROR_BYTES = 4096;
 const MAX_TEXT_PREVIEW_BYTES = 128 * 1024;
 
@@ -282,6 +307,29 @@ function textPreviewFormat(name: string): string {
   if (/\.(?:txt|text|log|csv|tsv|json|jsonl|yaml|yml|toml|ini|conf|cfg|xml|sql|sh|py|js|mjs|ts|ets|css|swift|java|go|rs|c|h|cpp|hpp)$/i.test(name) ||
     /^(?:readme|license|notice|changelog|dockerfile|makefile|\.gitignore|\.editorconfig)$/i.test(name)) return 'text';
   return '';
+}
+
+function isImageFile(name: string): boolean {
+  return /\.(?:jpe?g|png|gif|webp|bmp|heic|heif|avif|tiff?|svg|ico)$/i.test(name);
+}
+
+function markdownWorkspacePath(target: string, cwd: string, documentPath: string): string {
+  const path = target.split(/[?#]/)[0];
+  try {
+    const decoded = decodeURIComponent(path);
+    if (!decoded || /^[a-z][a-z0-9+.-]*:/i.test(decoded)) return '';
+    if (decoded.startsWith('/')) return normalizeWorkspacePath(cwd, decoded);
+    if (decoded.startsWith('~') || /[\\\u0000-\u001f]/.test(decoded)) return '';
+    const parts = documentPath ? documentPath.split('/').slice(0, -1) : [];
+    for (const part of decoded.split('/')) {
+      if (!part || part === '.') continue;
+      if (part === '..') {
+        if (!parts.length) return '';
+        parts.pop();
+      } else parts.push(part);
+    }
+    return normalizeWorkspacePath(cwd, parts.join('/'));
+  } catch { return ''; }
 }
 
 function validUsb(address: string): boolean {
@@ -321,8 +369,10 @@ function messageFileChips(text: string, cwd: string): string[] {
   let match = references.exec(text);
   while (match && chips.length < 4) {
     const destination = match[1] ?? match[2];
+    const inlineImage = destination !== undefined && text[match.index - 1] === '!';
     let token = destination ?? match[3] ?? match[4] ?? match[5] ?? match[6].replace(/[.,;:!?]+$/, '');
     match = references.exec(text);
+    if (inlineImage) continue;
     if (destination !== undefined) {
       try { token = decodeURIComponent(destination); } catch { continue; }
     }
@@ -410,6 +460,10 @@ struct Index {
   private restoreChain: Promise<void> = Promise.resolve();
   @StorageLink('pigoStatusBar') statusBarHeight: number = 38;
   @StorageLink('pigoNavBar') navBarHeight: number = 28;
+  @StorageProp('pigoLeftInset') private leftInset: number = 0;
+  @StorageProp('pigoRightInset') private rightInset: number = 0;
+  @StorageProp('pigoWindowWidth') @Watch('onWindowWidthChange') private windowWidth: number = 0;
+  @StorageProp('pigoWindowHeight') private windowHeight: number = 800;
   @StorageLink('pigoKeyboard') @Watch('onKeyboardChange') keyboardHeight: number = 0;
   @State private showModelMenu: boolean = false;
   @State private currentModel?: ModelOption = undefined;
@@ -435,6 +489,8 @@ struct Index {
   @State private attachments: DraftAttachment[] = [];
   @State private project: string = '';
   private workspaceCwd: string = '';
+  private imageQueue: Promise<void> = Promise.resolve();
+  private lastImageCachePrune: number = 0;
   @State private showFiles: boolean = false;
   @State private fileRoot: string = '';
   @State private fileTreeRows: FileTreeRow[] = [];
@@ -442,8 +498,10 @@ struct Index {
   private fileTreeIndex: number = 0;
   @State private openingFile: boolean = false;
   @State private editingPath: string = '';
+  private editingRoot: string = '';
   @State private fileText: string = '';
   @State private fileOriginal: string = '';
+  @State private editorNotice: string = '';
   private fileVersion: string = '';
   @State private sessionName: string = '';
   @State private showSettings: boolean = false;
@@ -462,6 +520,12 @@ struct Index {
   @State private thinkingOpenIds: string[] = [];
   @State private liveTools: LiveTool[] = [];
   @State private showToolDetails: boolean = false;
+  @State private markdownTableReader?: MarkdownTableReader = undefined;
+  @State private markdownRotationUnavailable: boolean = false;
+  private markdownRotation: Promise<void> = Promise.resolve();
+  private markdownRotationRevision: number = 0;
+  private markdownWindow?: window.Window;
+  private markdownPreviousOrientation?: window.Orientation;
   @State private textFilePreview?: ReceivedFilePreview = undefined;
   @State private savingPreview: boolean = false;
   @State private previewNotice: string = '';
@@ -490,8 +554,12 @@ struct Index {
   private runningCatalogAt: number = 0;
   private sessionStatusLoading: boolean = false;
   @State private messages: ChatMessage[] = [];
+  @State private loadingMessageText: string = '';
   @State private queuedSteering: QueuedSteering[] = [];
-  @State @Watch('onDrawerChange') private showSessions: boolean = false;
+  @State private showSessions: boolean = false;
+  @State private preferredSessionPaneWidth?: number = undefined;
+  @State private sessionPaneDragging: boolean = false;
+  private sessionPaneDragStart: number = 0;
   @State private expandedSpaces: string[] = [];
   @State private tasksExpanded: boolean = true;
   @State private offlineDismissed: boolean = false;
@@ -582,8 +650,13 @@ struct Index {
   private readonly chatCache: Map<string, BridgeReply> = new Map<string, BridgeReply>();
 
   onBackPress(): boolean {
+    if (this.markdownTableReader) { this.closeMarkdownTableReader(); return true; }
     if (this.textFilePreview) {
       if (!this.savingPreview) this.textFilePreview = undefined;
+      return true;
+    }
+    if (this.editingPath) {
+      this.returnToFilePreview();
       return true;
     }
     if (this.recording || this.voicePreparing || this.voiceFinishing) { this.resetVoice(); return true; }
@@ -622,6 +695,7 @@ struct Index {
     this.flushSidebarSave();
   }
   aboutToDisappear(): void {
+    if (this.markdownTableReader) this.closeMarkdownTableReader();
     this.visible = false;
     this.cancelSchedule();
     this.stopStream();
@@ -697,7 +771,7 @@ struct Index {
     this.minePage = '';
     this.status = '';
     this.noSession = '正在加载该电脑的会话…';
-    this.showSessions = true;
+    this.showSessions = this.windowWidth < SPLIT_WINDOW_WIDTH;
     this.sessionCatalogLoaded = false;
     this.applySidebar(record.address);
     this.reachable = false;
@@ -734,6 +808,7 @@ struct Index {
     const token = endpoint ? endpoint.token : this.token;
     const ca = endpoint ? endpoint.ca : this.ca;
     const pin = endpoint ? endpoint.pin : this.pin;
+    const imageRequest = path.startsWith('/message-image?');
     const headers: Record<string, string> = {};
     if (token) headers['Authorization'] = `Bearer ${token}`;
     if (input) headers['Content-Type'] = 'application/json';
@@ -746,7 +821,7 @@ struct Index {
         usingProxy: false,
         maxRedirects: 0,
         connectTimeout: 2500,
-        readTimeout: path === '/open' || path === '/new' ? 16000 : 6500
+        readTimeout: path === '/open' || path === '/new' || path === '/close-workspace' ? 16000 : 6500
       };
       if (ca && pin) {
         opts.caData = ca;
@@ -1046,6 +1121,7 @@ struct Index {
   }
 
   private leaveComputer(revoked: boolean = false, next?: Companion): void {
+    if (this.markdownTableReader) this.closeMarkdownTableReader();
     this.textFilePreview = undefined;
     this.closeToolDetails();
     const address = this.base;
@@ -1071,10 +1147,7 @@ struct Index {
     }
     this.addingComputer = false;
     this.offlineDismissed = false;
-    this.editingPath = '';
-    this.fileText = '';
-    this.fileOriginal = '';
-    this.fileVersion = '';
+    this.closeFileEditor();
     this.resetFileTree();
     this.sessionName = '';
     this.liveText = '';
@@ -1199,10 +1272,6 @@ struct Index {
     this.noSession = '';
     if (this.workspaceCwd !== session.cwd) {
       this.resetFileTree();
-      this.editingPath = '';
-      this.fileText = '';
-      this.fileOriginal = '';
-      this.fileVersion = '';
       if (this.showFiles) { this.showFiles = false; this.activeTab = 'tasks'; }
     }
     this.workspaceCwd = session.cwd;
@@ -1228,8 +1297,9 @@ struct Index {
       const connected = !this.reachable;
       this.reachable = true;
       this.offlineDismissed = false;
-      if (this.showSessions && (!this.sessionCatalogLoaded || connected) && !this.busy) void this.loadSessions();
-      if (this.showSessions) {
+      const libraryVisible = this.showSessions || this.dockedSessions();
+      if (libraryVisible && (!this.sessionCatalogLoaded || connected) && !this.busy) void this.loadSessions();
+      if (libraryVisible) {
         this.sessionStatusAt = Date.now();
         void this.loadSessionStatus();
       } else if (this.backgroundActive() || Date.now() - this.sessionStatusAt >= 5000) {
@@ -1242,7 +1312,7 @@ struct Index {
         this.flushStreamDeltas(false);
         this.closeToolDetails();
         this.noSession = result.state === 'session_closed' ? '原会话已关闭，请在会话列表选择历史记录或其他会话。' :
-          result.state === 'no_shared_sessions' ? '电脑已连接，请从左上角会话列表选择一条对话。' : '请从左上角会话列表选择一个会话。';
+          result.state === 'no_shared_sessions' ? '电脑已连接，请在任务列表选择一条对话。' : '请在任务列表选择一个会话。';
         if (this.currentId) {
           this.rememberDraft(this.currentId);
           this.resetCommands();
@@ -1357,7 +1427,7 @@ struct Index {
 
   private sameMessage(saved: ChatMessage, incoming: ChatMessage): boolean {
     if (saved.id !== incoming.id || saved.role !== incoming.role || saved.text !== incoming.text ||
-      saved.thinking !== incoming.thinking || saved.thinkingMs !== incoming.thinkingMs || saved.imageCount !== incoming.imageCount) return false;
+      saved.textTruncated !== incoming.textTruncated || saved.thinking !== incoming.thinking || saved.thinkingMs !== incoming.thinkingMs || saved.imageCount !== incoming.imageCount) return false;
     const left = saved.tools ?? [];
     const right = incoming.tools ?? [];
     return left.length === right.length && left.every((tool: LiveTool, index: number): boolean => {
@@ -1507,17 +1577,24 @@ struct Index {
 
   private closeFileEditor(): void {
     this.editingPath = '';
+    this.editingRoot = '';
     this.fileText = '';
     this.fileOriginal = '';
     this.fileVersion = '';
+    this.editorNotice = '';
+  }
+
+  private returnToFilePreview(discard: boolean = false): void {
+    if (this.busy) return;
+    if (!discard && this.fileText !== this.fileOriginal) {
+      this.editorNotice = '请先保存或放弃文件修改。';
+      return;
+    }
+    this.showTextPreview(this.editingRoot, this.editingPath, this.fileOriginal, this.fileVersion);
+    this.closeFileEditor();
   }
 
   private fileBack(): void {
-    if (this.editingPath) {
-      if (this.fileText !== this.fileOriginal) { this.status = '请先保存或放弃文件修改。'; return; }
-      this.closeFileEditor();
-      return;
-    }
     if (this.busy || this.openingSession) return;
     this.showFiles = false;
     this.activeTab = 'tasks';
@@ -1584,50 +1661,88 @@ struct Index {
     } finally { this.busy = false; }
   }
 
-  private fileFailure(error: Error): void {
+  private fileFailure(error: Error, editing: boolean = false): void {
     if (error instanceof BridgeFailure && error.status === 401) { this.leaveComputer(true); return; }
-    this.status = error.message === 'file_conflict' ? '电脑上的文件已变化，未覆盖。请复制手机修改后重新打开文件。' :
+    const notice = error.message === 'file_conflict' ? '电脑上的文件已变化，未覆盖。请复制手机修改后重新打开文件。' :
       error.message === 'file_too_large' ? '文本文件上限为 64 KiB，修改已保留。' :
       error.message === 'not_text_file' ? '此文件不是可编辑的 UTF-8 文本。' :
+      error.message === 'file_not_found' ? '当前工作区找不到该文件。' :
+      error.message === 'ambiguous_file_name' ? '工作区有多个同名文件，请使用完整的相对路径。' :
+      error.message === 'file_lookup_limit' ? '工作区过大，无法按文件名查找。请使用完整的相对路径。' :
       error.message === 'path_forbidden' ? '此路径不可访问（不支持符号链接）。' :
       '文件操作未确认。请检查连接和项目授权；修改不会自动重发。';
+    if (editing) this.editorNotice = notice;
+    else if (this.textFilePreview) this.previewNotice = notice;
+    else this.status = notice;
   }
 
-  private async openFile(path: string): Promise<void> {
-    if (this.busy || this.openingSession) return;
+  private showTextPreview(cwd: string, path: string, text: string, version?: string): void {
+    this.dismissKeyboard();
+    this.closeToolDetails();
+    this.previewOffsets = [];
+    this.previewNotice = '';
+    this.status = '';
+    const name = path.split('/').pop() ?? path;
+    this.textFilePreview = { name: name, text: text, markdown: textPreviewFormat(name) === 'markdown',
+      workspaceRoot: cwd, workspacePath: path, version: version };
+  }
+
+  private async openFile(cwd: string, path: string, lookupName: boolean = false): Promise<void> {
+    if (this.busy || this.openingSession || this.openingFile || !cwd) return;
+    if (!this.reachable) { this.status = '电脑离线，稍后再试。'; return; }
     const epoch = this.epoch;
     this.busy = true;
     try {
-      const result = await this.request('/files/read', { cwd: this.fileRoot, path: path });
+      const lookup = lookupName && !path.includes('/') ? 'name' : undefined;
+      const result = await this.request('/files/read', { cwd: cwd, path: path, lookup: lookup });
       if (epoch !== this.epoch) return;
-      this.editingPath = path;
-      this.fileText = result.text ?? '';
-      this.fileOriginal = this.fileText;
-      this.fileVersion = result.version ?? '';
-      this.status = '';
+      if (result.text === undefined || !result.path || !result.version) throw new Error('invalid_file');
+      this.showTextPreview(cwd, result.path, result.text, result.version);
     } catch (error) {
       if (epoch !== this.epoch) return;
       const message = (error as Error).message;
-      // 非文本或超大文件：不再报错，直接把原文件发到手机并用系统预览打开。
-      if (message === 'not_text_file' || message === 'file_too_large') {
-        await this.openWorkspaceFile(this.fileRoot, path);
+      if (message === 'not_text_file' || message === 'file_too_large' || message === 'not_found' ||
+        (message === 'file_not_found' && lookupName && !path.includes('/'))) {
+        await this.openWorkspaceFile(cwd, path, lookupName);
         return;
       }
       this.fileFailure(error);
     } finally { this.busy = false; }
   }
 
+  private async openReferencedFile(cwd: string, path: string, lookupName: boolean): Promise<void> {
+    if (this.busy || this.openingSession) return;
+    const name = path.split('/').pop() ?? path;
+    if (textPreviewFormat(name)) await this.openFile(cwd, path, lookupName);
+    else await this.openWorkspaceFile(cwd, path, lookupName);
+  }
+
+  private editPreview(preview: ReceivedFilePreview): void {
+    if (this.busy || this.savingPreview || this.editingPath || preview.text === undefined ||
+      !preview.version || !preview.workspaceRoot || !preview.workspacePath) return;
+    this.editingRoot = preview.workspaceRoot;
+    this.editingPath = preview.workspacePath;
+    this.fileText = preview.text;
+    this.fileOriginal = preview.text;
+    this.fileVersion = preview.version;
+    this.editorNotice = '';
+    this.textFilePreview = undefined;
+  }
+
   private async saveFile(): Promise<void> {
-    if (this.busy || this.openingSession || !this.editingPath) return;
+    if (this.busy || this.openingSession || !this.reachable || !this.editingPath || this.fileText === this.fileOriginal) return;
     const epoch = this.epoch;
+    const text = this.fileText;
     this.busy = true;
+    this.editorNotice = '';
     try {
-      const result = await this.request('/files/save', { cwd: this.fileRoot, path: this.editingPath, text: this.fileText, version: this.fileVersion });
+      const result = await this.request('/files/save', { cwd: this.editingRoot, path: this.editingPath, text: text, version: this.fileVersion });
       if (epoch !== this.epoch) return;
-      this.fileVersion = result.version ?? '';
-      this.fileOriginal = this.fileText;
-      this.status = '文件已保存。';
-    } catch (error) { if (epoch === this.epoch) this.fileFailure(error); }
+      if (!result.version) throw new Error('invalid_file');
+      this.fileVersion = result.version;
+      this.fileOriginal = text;
+      this.editorNotice = '已保存到电脑。';
+    } catch (error) { if (epoch === this.epoch) this.fileFailure(error, true); }
     finally { this.busy = false; }
   }
 
@@ -1657,7 +1772,7 @@ struct Index {
     return Array.from(hash.digestSync().data, (byte: number): string => byte.toString(16).padStart(2, '0')).join('');
   }
 
-  private async downloadFile(cwd: string, path: string, temporary: string, lookupName: boolean): Promise<void> {
+  private async downloadFile(cwd: string, path: string, temporary: string, lookupName: boolean, limit: number = MAX_DOWNLOAD_BYTES): Promise<void> {
     const req = http.createHttp();
     let file: fileIo.File | undefined;
     try {
@@ -1672,7 +1787,7 @@ struct Index {
         maxRedirects: 0,
         connectTimeout: 4000,
         readTimeout: 60000,
-        maxLimit: MAX_DOWNLOAD_BYTES
+        maxLimit: limit
       };
       if (this.ca && this.pin) {
         opts.caData = this.ca;
@@ -1689,7 +1804,7 @@ struct Index {
       });
       req.on('dataReceive', (chunk: ArrayBuffer) => {
         if (writeError) return;
-        if (received + chunk.byteLength > MAX_DOWNLOAD_BYTES) {
+        if (received + chunk.byteLength > limit) {
           writeError = 'file_too_large';
           return;
         }
@@ -1723,7 +1838,7 @@ struct Index {
         throw new BridgeFailure(status, code);
       }
       if (writeError) throw new Error(writeError);
-      if (expected > MAX_DOWNLOAD_BYTES) throw new Error('file_too_large');
+      if (expected > limit) throw new Error('file_too_large');
       if (received !== expected) throw new Error('incomplete_download');
     } finally {
       req.destroy();
@@ -1747,7 +1862,7 @@ struct Index {
     }
   }
 
-  private readTextFilePreview(path: string, name: string, start: number = 0): ReceivedFilePreview | undefined {
+  private readTextFilePreview(path: string, name: string, start: number = 0, cwd?: string, workspacePath?: string): ReceivedFilePreview | undefined {
     const format = textPreviewFormat(name);
     if (!format) return undefined;
     const file = fileIo.openSync(path, fileIo.OpenMode.READ_ONLY);
@@ -1778,6 +1893,7 @@ struct Index {
       } catch { return undefined; }
       if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(text)) return undefined;
       return { name: name, text: text, markdown: format === 'markdown', localPath: path, offset: start,
+        workspaceRoot: cwd, workspacePath: workspacePath,
         nextOffset: start + end < size ? start + end : undefined };
     } finally { fileIo.closeSync(file); }
   }
@@ -1810,9 +1926,13 @@ struct Index {
       this.status = '';
       this.textFilePreview = { name: name, localPath: local };
       try {
-        const textPreview = this.readTextFilePreview(local, name);
+        const textPreview = this.readTextFilePreview(local, name, 0, cwd, path);
         if (textPreview) { this.textFilePreview = textPreview; return; }
         const uri = fileUri.getUriFromPath(local);
+        if (isImageFile(name)) {
+          this.textFilePreview = { name: name, localPath: local, imageUri: uri };
+          return;
+        }
         const previewable = await filePreview.canPreview(context, uri);
         if (epoch !== this.epoch || this.textFilePreview?.localPath !== local || !previewable) return;
         this.textFilePreview = { name: name, localPath: local, systemUri: uri };
@@ -1835,7 +1955,7 @@ struct Index {
     const offset = forward ? preview?.nextOffset : this.previewOffsets[this.previewOffsets.length - 1];
     if (!preview?.localPath || offset === undefined) return;
     try {
-      const page = this.readTextFilePreview(preview.localPath, preview.name, offset);
+      const page = this.readTextFilePreview(preview.localPath, preview.name, offset, preview.workspaceRoot, preview.workspacePath);
       if (!page) throw new Error('preview_read_failed');
       if (forward) this.previewOffsets.push(preview.offset ?? 0);
       else this.previewOffsets.pop();
@@ -1877,6 +1997,20 @@ struct Index {
     } finally { this.savingPreview = false; }
   }
 
+  private async imagePreviewError(preview: ReceivedFilePreview): Promise<void> {
+    if (this.textFilePreview?.imageUri !== preview.imageUri) return;
+    this.previewNotice = '图片无法解码';
+    if (!preview.localPath || !preview.imageUri || preview.systemUri) return;
+    try {
+      const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      if (await filePreview.canPreview(context, preview.imageUri) && this.textFilePreview?.imageUri === preview.imageUri) {
+        this.textFilePreview = { name: preview.name, localPath: preview.localPath, imageUri: preview.imageUri,
+          systemUri: preview.imageUri };
+        this.previewNotice = '应用内无法显示这张图片，可尝试系统预览。';
+      }
+    } catch {}
+  }
+
   private async reopenSystemPreview(preview: ReceivedFilePreview): Promise<void> {
     if (!preview.systemUri) return;
     try {
@@ -1885,8 +2019,196 @@ struct Index {
     } catch { this.previewNotice = '无法打开系统预览，仍可保存文件。'; }
   }
 
+  private cacheChatImage(cwd: string, key: string, extensions: string[], write: (path: string) => Promise<string>): Promise<string> {
+    const epoch = this.epoch;
+    const sessionId = this.currentId;
+    const checkContext = (): void => {
+      if (epoch !== this.epoch || sessionId !== this.currentId) throw new Error('session_changed');
+    };
+    const load = this.imageQueue.then(async (): Promise<string> => {
+      checkContext();
+      const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      const directory = `${context.cacheDir}/${RECEIVED_FILE_DIR}`;
+      if (!fileIo.accessSync(directory)) fileIo.mkdirSync(directory, true);
+      if (Date.now() - this.lastImageCachePrune >= 3600000) {
+        this.pruneReceivedFiles(directory);
+        this.lastImageCachePrune = Date.now();
+      }
+      const local = `${directory}/image-${this.localFilePrefix(cwd, key)}`;
+      const cached = extensions.find((extension: string): boolean => fileIo.accessSync(local + extension));
+      if (cached !== undefined) return local + cached;
+      if (!this.reachable) throw new Error('disconnected');
+      const temporary = `${directory}/.download-${util.generateRandomUUID()}`;
+      try {
+        const extension = await write(temporary);
+        checkContext();
+        fileIo.renameSync(temporary, local + extension);
+        return local + extension;
+      } finally {
+        if (fileIo.accessSync(temporary)) fileIo.unlinkSync(temporary);
+      }
+    });
+    this.imageQueue = load.then((): void => {}, (): void => {});
+    return load;
+  }
+
+  private loadHistoryImage(sessionId: string, messageId: string, index: number, toolId: string): Promise<string> {
+    if (!sessionId || sessionId !== this.currentId) return Promise.reject(new Error('session_changed'));
+    const identity = JSON.stringify([sessionId, messageId, index, toolId]);
+    return this.cacheChatImage(this.workspaceCwd, identity, HISTORY_IMAGE_EXTENSIONS, async (local: string): Promise<string> => {
+      const tool = toolId ? `&tool=${encodeURIComponent(toolId)}` : '';
+      const reply = await this.request(`/message-image?id=${encodeURIComponent(sessionId)}&message=${encodeURIComponent(messageId)}&index=${index}${tool}`);
+      if (!reply.image?.data) throw new Error('image_not_found');
+      const extension = `.${reply.image.mimeType.slice('image/'.length)}`;
+      if (!HISTORY_IMAGE_EXTENSIONS.includes(extension)) throw new Error('unsupported_image');
+      const bytes = new util.Base64Helper().decodeSync(reply.image.data);
+      if (bytes.length > MAX_INLINE_IMAGE_BYTES) throw new Error('image_too_large');
+      const fd = fileIo.openSync(local, fileIo.OpenMode.CREATE | fileIo.OpenMode.WRITE_ONLY);
+      try {
+        let offset = 0;
+        while (offset < bytes.length) {
+          const count = fileIo.writeSync(fd.fd, offset === 0 ? bytes.buffer : bytes.slice(offset).buffer);
+          if (count <= 0) throw new Error('write_failed');
+          offset += count;
+        }
+      } finally { fileIo.closeSync(fd); }
+      return extension;
+    });
+  }
+
+  private loadMarkdownImage(target: string, cwd: string, documentPath: string): Promise<string> {
+    const path = markdownWorkspacePath(target, cwd, documentPath);
+    if (!path) return Promise.reject(new Error('image_not_found'));
+    const extension = path.match(/\.[a-z0-9]{1,10}$/i)?.[0] ?? '';
+    return this.cacheChatImage(cwd, JSON.stringify([path, this.currentId]), [extension], async (local: string): Promise<string> => {
+      await this.downloadFile(cwd, path, local, false, MAX_INLINE_IMAGE_BYTES);
+      return extension;
+    });
+  }
+
+  private showChatImage(source: string, label: string): void {
+    this.dismissKeyboard();
+    this.closeToolDetails();
+    this.previewNotice = '';
+    this.previewOffsets = [];
+    const remote = /^https?:\/\//i.test(source);
+    const extension = remote ? '' : source.match(/\.[a-z0-9]{1,10}$/i)?.[0] ?? '';
+    const name = label.toLowerCase().endsWith(extension.toLowerCase()) ? label : label + extension;
+    this.textFilePreview = { name: name, localPath: remote ? undefined : source,
+      imageUri: remote ? source : fileUri.getUriFromPath(source) };
+  }
+
+  private async showFullReply(messageId: string): Promise<void> {
+    if (this.loadingMessageText || !this.reachable || !this.currentId) return;
+    const epoch = this.epoch;
+    const id = this.currentId;
+    const path = `/message-text?id=${encodeURIComponent(id)}&message=${encodeURIComponent(messageId)}`;
+    this.loadingMessageText = messageId;
+    try {
+      const pages: string[] = [];
+      let offset = 0;
+      while (true) {
+        const reply = await this.request(`${path}&offset=${offset}`);
+        if (epoch !== this.epoch || id !== this.currentId) return;
+        if (reply.text === undefined) throw new Error('invalid_message_text');
+        pages.push(reply.text);
+        if (reply.nextTextOffset === undefined) break;
+        if (reply.nextTextOffset <= offset) throw new Error('invalid_message_text');
+        offset = reply.nextTextOffset;
+      }
+      this.showTextPreview(this.workspaceCwd, '回复.md', pages.join(''));
+    } catch {
+      if (epoch === this.epoch && id === this.currentId) {
+        this.getUIContext().getPromptAction().showToast({ message: '暂时无法加载完整回复，请重试' });
+      }
+    } finally {
+      this.loadingMessageText = '';
+    }
+  }
+
+  private async openMarkdownLink(target: string, cwd: string, documentPath: string): Promise<void> {
+    if (/^https?:\/\/[^\s]+$/i.test(target)) {
+      try {
+        const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+        await context.openLink(target);
+      } catch {
+        this.getUIContext().getPromptAction().showToast({ message: '无法打开链接' });
+      }
+      return;
+    }
+    const path = markdownWorkspacePath(target, cwd, documentPath);
+    if (path) await this.openReferencedFile(cwd, path, !documentPath);
+  }
+
+  private openMarkdownTableReader(source: string, cwd: string, documentPath: string): void {
+    if (this.markdownTableReader) return;
+    this.dismissKeyboard();
+    const revision = ++this.markdownRotationRevision;
+    this.markdownRotationUnavailable = false;
+    this.markdownTableReader = { source: source, cwd: cwd, documentPath: documentPath };
+    this.markdownRotation = this.markdownRotation.then(async (): Promise<void> => {
+      if (revision !== this.markdownRotationRevision) return;
+      const context = this.getUIContext().getHostContext();
+      if (!context) throw new Error('no_window_context');
+      const mainWindow = await window.getLastWindow(context);
+      if (revision !== this.markdownRotationRevision) return;
+      this.markdownPreviousOrientation = mainWindow.getPreferredOrientation();
+      this.markdownWindow = mainWindow;
+      await mainWindow.setPreferredOrientation(window.Orientation.LANDSCAPE);
+    }).catch((): void => {
+      if (revision === this.markdownRotationRevision) this.markdownRotationUnavailable = true;
+    });
+  }
+
+  private closeMarkdownTableReader(): void {
+    this.markdownRotationRevision++;
+    this.markdownTableReader = undefined;
+    this.markdownRotation = this.markdownRotation.then(async (): Promise<void> => {
+      const mainWindow = this.markdownWindow;
+      const previous = this.markdownPreviousOrientation;
+      this.markdownWindow = undefined;
+      this.markdownPreviousOrientation = undefined;
+      if (mainWindow && previous !== undefined) await mainWindow.setPreferredOrientation(previous);
+    }).catch((): void => {});
+  }
+
+  @Builder
+  richChatText(text: string, cwd: string, documentPath: string = '', allowLandscape: boolean = true) {
+    ChatContent({ text: text, accent: this.accent(), allowLandscape: allowLandscape,
+      loadImage: (target: string): Promise<string> => this.loadMarkdownImage(target, cwd, documentPath),
+      openImage: (source: string, label: string): void => { this.showChatImage(source, label); },
+      openLink: (target: string): void => {
+        if (!allowLandscape && markdownWorkspacePath(target, cwd, documentPath)) this.closeMarkdownTableReader();
+        void this.openMarkdownLink(target, cwd, documentPath);
+      },
+      openLandscape: (source: string): void => { this.openMarkdownTableReader(source, cwd, documentPath); }
+    })
+  }
+
+  @Builder
+  historyImages(count: number, sessionId: string, messageId: string, toolId: string = '') {
+    ForEach(Array.from({ length: count }, (_: Object, index: number): number => index), (index: number) => {
+      ChatImage({
+        label: count === 1 ? '图片' : `图片 ${index + 1}`,
+        load: (): Promise<string> => this.loadHistoryImage(sessionId, messageId, index, toolId),
+        open: (source: string, label: string): void => { this.showChatImage(source, label); }
+      })
+    }, (index: number): string => `${sessionId}-${messageId}-${toolId}-${index}`)
+  }
+
   private messageFiles(message: ChatMessage): string[] {
-    return messageFileChips(message.text, this.workspaceCwd);
+    if (message.role !== 'user') return messageFileChips(message.text, this.workspaceCwd);
+    const start = message.text.lastIndexOf('\n\n[Pi Go 附件] 手机上传了 ');
+    if (start < 0) return [];
+    const prefix = `：${this.workspaceCwd.replace(/\/$/, '')}/.pi-go/attachments/`;
+    const paths: string[] = [];
+    for (const line of message.text.slice(start).split('\n')) {
+      const index = line.indexOf(prefix);
+      if (index < 0) continue;
+      const path = normalizeWorkspacePath(this.workspaceCwd, line.slice(index + 1));
+      if (/^\.pi-go\/attachments\/[a-f0-9]{16}-[^/]+$/.test(path) && !paths.includes(path)) paths.push(path);
+    }
+    return paths;
   }
 
   private toolFile(tool: LiveTool): string {
@@ -1922,7 +2244,7 @@ struct Index {
   private transcriptMessageKey(message: ChatMessage): string {
     const thinking = message.thinking && this.thinkingOpenIds.includes(message.id) ? 'open' : '';
     const tools = message.tools?.map((tool: LiveTool): string => this.toolKey(tool)).join(',') ?? '';
-    return `${message.id}:${thinking}:${tools}`;
+    return `${message.id}:${thinking}:${tools}:${message.textTruncated ?? false}`;
   }
 
   private unlistedLiveTools(): LiveTool[] {
@@ -1968,7 +2290,7 @@ struct Index {
     this.toolDetailError = '';
     const message = this.selectedToolMessageId ? `&message=${encodeURIComponent(this.selectedToolMessageId)}` : '';
     try {
-      const reply = await this.request(`/tool-detail?id=${encodeURIComponent(this.currentId)}&tool=${encodeURIComponent(tool.id)}${message}`);
+      const reply = await this.request(`/tool-detail?id=${encodeURIComponent(this.currentId)}&tool=${encodeURIComponent(tool.id)}${message}&images=1`);
       if (revision !== this.toolDetailRevision) return;
       this.selectedToolDetails = reply.toolDetail;
       if (!reply.toolDetail) this.toolDetailError = '没有可用的工具详情';
@@ -1996,14 +2318,42 @@ struct Index {
     if (await this.requestAction('/session-meta', payload)) await this.loadSessions();
   }
 
-  // 长按空间菜单确认后执行：电脑端移除工作区（不删文件），手机端立即收起，下次刷新不再出现。
+  private async openSpaceActions(path: string): Promise<void> {
+    const epoch = this.epoch;
+    const prompt = this.getUIContext().getPromptAction();
+    let selected: number;
+    try {
+      const result = await prompt.showActionMenu({
+        title: path.split('/').pop() || path,
+        buttons: [
+          { text: '新建任务', color: $r('app.color.pigo_text') },
+          { text: '移除空间', color: $r('app.color.pigo_error') }
+        ]
+      });
+      selected = result.index;
+    } catch { return; }
+    if (epoch !== this.epoch || !this.projects.includes(path)) return;
+    if (selected === 1) {
+      this.confirmCloseSpace(path);
+    } else if (selected === 0) {
+      if (!this.reachable || !this.desktopHandoff) {
+        prompt.showToast({ message: this.reachable ? '此电脑未启用 Pi Go 集成，无法新建任务。' : '请先连接电脑再新建任务。' });
+        return;
+      }
+      this.activeTab = 'tasks';
+      void this.requestAction('/new', { cwd: path });
+    }
+  }
+
   private confirmCloseSpace(path: string): void {
     const name = path.split('/').pop() || path;
-    if (!this.isPaired || !this.reachable) { this.status = '请先连接电脑再关闭工作区。'; return; }
-    if (this.busy || this.openingSession) { this.status = '请等待当前操作结束后再关闭工作区。'; return; }
+    const prompt = this.getUIContext().getPromptAction();
+    if (!this.isPaired || !this.reachable) { prompt.showToast({ message: '请先连接电脑再移除空间。' }); return; }
+    if (this.busy || this.openingSession) { prompt.showToast({ message: '请等待当前操作结束后再移除空间。' }); return; }
+    const epoch = this.epoch;
     this.getUIContext().showAlertDialog({
-      title: '关闭工作区',
-      message: `将在电脑端关闭「${name}」：Pi Desktop 侧边栏移除该工作区，其中的进行中任务会停止。文件和会话历史不会被删除。`,
+      title: '移除空间',
+      message: `「${name}」将从 Pi Desktop 的侧边栏移除，进行中的任务会停止。文件和会话历史会保留。`,
       autoCancel: true,
       alignment: DialogAlignment.Bottom,
       primaryButton: {
@@ -2011,23 +2361,27 @@ struct Index {
         action: () => {}
       },
       secondaryButton: {
-        value: '关闭工作区',
+        value: '移除空间',
         fontColor: $r('app.color.pigo_error'),
-        action: () => { void this.closeWorkspace(path); }
+        action: () => { if (epoch === this.epoch) void this.closeWorkspace(path); }
       }
     });
   }
 
   private async closeWorkspace(path: string): Promise<void> {
-    if (!(await this.requestAction('/close-workspace', { cwd: path }))) return;
+    const epoch = this.epoch;
+    if (!(await this.requestAction('/close-workspace', { cwd: path }))) {
+      if (epoch === this.epoch && this.status) this.getUIContext().getPromptAction().showToast({ message: this.status });
+      return;
+    }
     // 本地立即镜像桌面端的移除，避免等待下一次网络刷新才消失。
     this.projects = this.projects.filter((item: string): boolean => item !== path);
     this.expandedSpaces = this.expandedSpaces.filter((item: string): boolean => item !== path);
     this.scheduleSidebarSave();
-    this.getUIContext().getPromptAction().showToast({ message: `已关闭工作区 ${path.split('/').pop() || path}` });
+    this.getUIContext().getPromptAction().showToast({ message: `已移除空间「${path.split('/').pop() || path}」` });
     if (this.workspaceCwd === path) {
       // 当前会话所在的电脑端工作区已关闭，回到任务列表等桥接状态刷新。
-      this.showSessions = true;
+      this.showSessions = !this.dockedSessions();
       this.schedule(0);
     } else void this.loadSessions();
   }
@@ -2092,7 +2446,7 @@ struct Index {
       if (cached && !navigationConfirmed && !(error instanceof BridgeFailure && error.status === 401)) {
         this.pendingSessionReveal = '';
         if (previous) this.presentChat(previous, false);
-        this.showSessions = true;
+        this.showSessions = !this.dockedSessions();
       }
       if (error instanceof BridgeFailure && error.status === 401) this.leaveComputer(true);
       else if (error instanceof BridgeFailure && error.message === 'desktop_handoff_required' && path === '/close-workspace') this.status = '此电脑的 Desktop 未启用 Pi Go 集成，无法远程关闭工作区。';
@@ -2103,6 +2457,7 @@ struct Index {
       else if (error instanceof BridgeFailure && error.message === 'desktop_workspace_kind_unsupported') this.status = '该工作区是桌面管理的临时检出，请在电脑上关闭。';
       else if (error instanceof BridgeFailure && error.message === 'desktop_close_failed') this.status = '电脑端关闭工作区失败，请稍后重试。';
       else if (error instanceof BridgeFailure && error.message === 'desktop_workspace_untrusted') this.status = '该工作区未在 Pi Desktop 中登记或信任。';
+      else if (error instanceof BridgeFailure && error.message === 'desktop_handoff_unconfirmed' && path === '/close-workspace') this.status = '请在 Pi Desktop 查看空间是否已移除。';
       else if (error instanceof BridgeFailure && error.message === 'desktop_handoff_unconfirmed') this.status = '桌面未确认操作。请确认是否已打开标签，不要重复新建。';
       else if (error instanceof BridgeFailure && error.message === 'session_occupied') this.status = '同一历史会话出现在多个桌面运行时，请关闭重复标签。';
       else if (error instanceof BridgeFailure && error.message === 'interaction_unavailable') {
@@ -2186,7 +2541,7 @@ struct Index {
       }
     }.id(`file-chip-${path}`).backgroundColor($r('app.color.pigo_panel')).borderRadius(12)
       .padding({ left: 14, right: 14, top: 10, bottom: 10 }).enabled(!this.openingFile)
-      .onClick(() => { void this.openWorkspaceFile(this.workspaceCwd, path, lookupName); })
+      .onClick(() => { void this.openReferencedFile(this.workspaceCwd, path, lookupName); })
   }
 
   @Builder
@@ -2248,9 +2603,12 @@ struct Index {
             }
             if (this.selectedToolDetails.output) {
               this.toolDetailBlock(this.selectedToolDetails.state === 'fail' ? '错误输出' : '输出', this.selectedToolDetails.output)
-            } else {
+            } else if (!this.selectedToolDetails.imageCount) {
               Text(this.selectedTool.state === 'run' && !this.idle ? '正在运行…' : '没有文本输出')
                 .fontSize(14).fontColor($r('app.color.pigo_muted'))
+            }
+            if (this.selectedToolDetails.imageCount) {
+              this.historyImages(this.selectedToolDetails.imageCount, this.currentId, this.selectedToolMessageId, this.selectedTool.id)
             }
             if (this.selectedToolDetails.truncated) {
               Text('较长的输入或输出仅显示前 64K 字符').fontSize(12).fontColor($r('app.color.pigo_muted'))
@@ -2876,6 +3234,10 @@ struct Index {
     return this.keyboardHeight > 0 ? 0 : this.navBarHeight;
   }
 
+  private headerHeight(): number {
+    return this.windowHeight < SHORT_WINDOW_HEIGHT ? 52 : 62;
+  }
+
   private dismissKeyboard(): void {
     // 焦点转移到页面根节点，软键盘随输入框失焦一并收起；
     // 再结束输入会话兑底，避免个别输入法在失焦后仍驻留。
@@ -2887,13 +3249,17 @@ struct Index {
 
   private armTranscriptFollow(): void {
     // 键盘弹起时：原本就贴底则保持贴底（跟随压缩重贴），在翻历史则不打扰。
-    const gap = this.transcriptContentHeight - this.transcriptViewport - this.transcript.currentOffset().yOffset;
+    const offset = this.transcript.currentOffset();
+    if (!offset) return;
+    const gap = this.transcriptContentHeight - this.transcriptViewport - offset.yOffset;
     this.transcriptFollow = gap <= 120;
     if (this.transcriptFollow) this.transcript.scrollEdge(Edge.Bottom);
   }
 
   private onKeyboardChange(): void {
-    if (this.keyboardHeight > 0) this.armTranscriptFollow();
+    if (this.keyboardHeight <= 0 || this.activeTab !== 'tasks' || this.showFiles || this.showSettings ||
+      this.showSessions || this.editingPath || this.textFilePreview) return;
+    this.armTranscriptFollow();
   }
 
   private restoreSettings(): void {
@@ -3427,7 +3793,7 @@ struct Index {
       Text(this.minePage === 'theme' ? '系统主题' : this.minePage === 'computers' ?
         (this.addingComputer ? '添加电脑' : '我的电脑') : '我的')
         .fontSize(this.minePage ? 21 : 26).fontWeight(FontWeight.Bold).fontColor($r('app.color.pigo_text'))
-    }.width('100%').height(62).padding({ left: 9, right: 9 })
+    }.width('100%').height(this.headerHeight()).padding({ left: 9, right: 9 })
     .backgroundColor($r('app.color.pigo_panel')).borderRadius(21)
     .border({ width: 1, color: $r('app.color.pigo_line') }).attributeModifier(immersiveSurface(this.darkMode))
   }
@@ -3506,64 +3872,68 @@ struct Index {
         .onClick(() => {
           if (row.kind === 'directory') void this.toggleFileDirectory(row.path);
           else if (row.kind === 'more') void this.loadFileDirectory(row.path, true);
-          else void this.openFile(row.path);
+          else void this.openFile(this.fileRoot, row.path);
         })
     }
   }
 
   @Builder
-  workspaceFiles() {
-    if (this.editingPath) {
-      Text(this.fileRoot).fontSize(12).width('100%').copyOption(CopyOptions.LocalDevice)
-      Text(this.editingPath).fontSize(15).width('100%')
+  fileEditorPage() {
+    Column({ space: 12 }) {
+      Text(this.editingPath).fontSize(18).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
+        .width('100%').maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis })
       TextArea({ text: this.fileText }).id('file-editor').layoutWeight(1).width('100%').maxLength(65536)
-        .enabled(!this.busy).onChange((value: string) => { this.fileText = value; })
+        .fontFamily('monospace').enabled(!this.busy).onChange((value: string) => { this.fileText = value; })
+      if (this.editorNotice) {
+        Text(this.editorNotice).id('file-editor-notice').fontSize(13).fontColor($r('app.color.pigo_text')).width('100%')
+      }
       Row({ space: 8 }) {
         Button('预览').chatAction().id('file-editor-preview').enabled(!this.busy).onClick(() => {
-          this.dismissKeyboard();
-          const name = this.editingPath.split('/').pop() ?? this.editingPath;
-          this.previewOffsets = [];
-          this.previewNotice = '';
-          this.textFilePreview = { name: name, text: this.fileText, markdown: textPreviewFormat(name) === 'markdown' };
+          this.showTextPreview(this.editingRoot, this.editingPath, this.fileText);
         })
-        Button('保存').chatAction().id('file-save').enabled(this.reachable && !this.busy && this.fileText !== this.fileOriginal)
+        Button(this.busy ? '正在保存…' : '保存到电脑').chatAction().id('file-save')
+          .enabled(this.reachable && !this.busy && this.fileText !== this.fileOriginal)
           .onClick(() => { void this.saveFile(); })
-        Button(this.fileText !== this.fileOriginal ? '放弃修改并返回' : '返回目录').chatAction().id('file-back').enabled(!this.busy)
-          .onClick(() => { this.fileText = this.fileOriginal; this.closeFileEditor(); })
+        Button(this.fileText !== this.fileOriginal ? '放弃修改' : '返回').chatAction().id('file-back').enabled(!this.busy)
+          .onClick(() => { this.returnToFilePreview(true); })
       }.width('100%')
-    } else {
-      Column() {
-        Row({ space: 10 }) {
-          Image($r('app.media.ic_folder')).width(23).height(23).fillColor(this.accent())
-          Column({ space: 2 }) {
-            Text(this.project || '项目根目录').fontSize(15).fontWeight(FontWeight.Medium)
-              .fontColor($r('app.color.pigo_text')).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
-            Text(this.fileRoot).fontSize(11).fontColor($r('app.color.pigo_muted')).maxLines(1)
-              .textOverflow({ overflow: TextOverflow.Ellipsis }).copyOption(CopyOptions.LocalDevice)
-          }.layoutWeight(1).alignItems(HorizontalAlign.Start)
-          Button({ type: ButtonType.Normal }) {
-            SymbolGlyph($r('sys.symbol.arrow_clockwise')).fontSize(19).fontColor([this.accent()])
-          }.id('file-refresh').width(44).height(44).padding(0).borderRadius(10)
-            .backgroundColor(Color.Transparent).accessibilityText('刷新工作区')
-            .enabled(!this.busy && !this.openingSession && this.reachable)
-            .onClick(() => { void this.loadFileDirectory(''); })
-        }.width('100%').padding({ left: 14, right: 6, top: 4, bottom: 4 })
-        Divider().color($r('app.color.pigo_line'))
-        if (this.fileTreeRows.length) {
-          List({ initialIndex: this.fileTreeIndex }) {
-            ForEach(this.fileTreeRows, (row: FileTreeRow) => {
-              ListItem() { this.workspaceTreeRow(row) }
-            }, (row: FileTreeRow): string => `${row.kind}:${row.expanded ?? false}:${row.path}`)
-          }.width('100%').layoutWeight(1).padding({ top: 4, bottom: 4, left: 4, right: 4 })
-            .onScrollIndex((start: number) => { this.fileTreeIndex = Math.max(0, start); })
-        } else {
-          Text(this.busy ? '正在读取目录…' : '未能读取目录')
-            .fontSize(13).fontColor($r('app.color.pigo_muted')).width('100%').padding(16)
-        }
-      }.width('100%').layoutWeight(1).alignItems(HorizontalAlign.Start).borderRadius(18)
-        .backgroundColor($r('app.color.pigo_panel')).border({ width: 1, color: $r('app.color.pigo_line') })
-        .clip(true)
-    }
+    }.width('100%').constraintSize({ maxWidth: 840 }).height('100%').alignItems(HorizontalAlign.Start)
+      .padding({ left: 16, right: 16, top: this.statusBarHeight + 12, bottom: this.bottomPad() + 4 })
+  }
+
+  @Builder
+  workspaceFiles() {
+    Column() {
+      Row({ space: 10 }) {
+        Image($r('app.media.ic_folder')).width(23).height(23).fillColor(this.accent())
+        Column({ space: 2 }) {
+          Text(this.project || '项目根目录').fontSize(15).fontWeight(FontWeight.Medium)
+            .fontColor($r('app.color.pigo_text')).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+          Text(this.fileRoot).fontSize(11).fontColor($r('app.color.pigo_muted')).maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis }).copyOption(CopyOptions.LocalDevice)
+        }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+        Button({ type: ButtonType.Normal }) {
+          SymbolGlyph($r('sys.symbol.arrow_clockwise')).fontSize(19).fontColor([this.accent()])
+        }.id('file-refresh').width(44).height(44).padding(0).borderRadius(10)
+          .backgroundColor(Color.Transparent).accessibilityText('刷新工作区')
+          .enabled(!this.busy && !this.openingSession && this.reachable)
+          .onClick(() => { void this.loadFileDirectory(''); })
+      }.width('100%').padding({ left: 14, right: 6, top: 4, bottom: 4 })
+      Divider().color($r('app.color.pigo_line'))
+      if (this.fileTreeRows.length) {
+        List({ initialIndex: this.fileTreeIndex }) {
+          ForEach(this.fileTreeRows, (row: FileTreeRow) => {
+            ListItem() { this.workspaceTreeRow(row) }
+          }, (row: FileTreeRow): string => `${row.kind}:${row.expanded ?? false}:${row.path}`)
+        }.width('100%').layoutWeight(1).padding({ top: 4, bottom: 4, left: 4, right: 4 })
+          .onScrollIndex((start: number) => { this.fileTreeIndex = Math.max(0, start); })
+      } else {
+        Text(this.busy ? '正在读取目录…' : '未能读取目录')
+          .fontSize(13).fontColor($r('app.color.pigo_muted')).width('100%').padding(16)
+      }
+    }.width('100%').layoutWeight(1).alignItems(HorizontalAlign.Start).borderRadius(18)
+      .backgroundColor($r('app.color.pigo_panel')).border({ width: 1, color: $r('app.color.pigo_line') })
+      .clip(true)
   }
 
   @Builder
@@ -3618,11 +3988,13 @@ struct Index {
   @Builder
   chatHeader() {
     Row({ space: 10 }) {
-      Button({ type: ButtonType.Normal }) {
-        Image($r('app.media.ic_menu')).width(24).height(24).fillColor(this.accent())
-      }.id('history').width(44).height(44).padding(0).backgroundColor(this.accentTint()).borderRadius(14)
-        .accessibilityText('打开任务抽屉').enabled(!this.busy && !this.showFiles)
-        .onClick(() => { this.setDrawer(true); })
+      if (!this.dockedSessions()) {
+        Button({ type: ButtonType.Normal }) {
+          Image($r('app.media.ic_menu')).width(24).height(24).fillColor(this.accent())
+        }.id('history').width(44).height(44).padding(0).backgroundColor(this.accentTint()).borderRadius(14)
+          .accessibilityText('打开任务抽屉').enabled(!this.busy && !this.showFiles)
+          .onClick(() => { this.setDrawer(true); })
+      }
       Column({ space: 4 }) {
         Text(this.showFiles ? '工作区文件' : this.showSettings ? '会话设置' : this.activeTab === 'pending' ? '运行中' : this.chatTitle())
           .fontSize(18).fontWeight(FontWeight.Bold).fontColor($r('app.color.pigo_text')).maxLines(1)
@@ -3632,8 +4004,8 @@ struct Index {
             .accessibilityText(this.reachable ? '电脑已连接' : '电脑离线')
           Text(`${this.computerTitle()}${this.project ? '  |  ' + this.project : ''}`)
             .fontSize(12).fontColor($r('app.color.pigo_muted')).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
-        }.width('100%').onClick(() => { this.setDrawer(true); })
-      }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+        }.width('100%').onClick(() => { if (!this.dockedSessions()) this.setDrawer(true); })
+      }.layoutWeight(1).alignItems(HorizontalAlign.Start).padding({ left: this.dockedSessions() ? 8 : 0 })
       Row({ space: 0 }) {
         Button({ type: ButtonType.Normal }) {
           Image($r('app.media.ic_compose')).width(25).height(25).fillColor($r('app.color.pigo_text'))
@@ -3652,7 +4024,7 @@ struct Index {
             { value: '切换电脑', action: () => { if (!this.busy) this.openComputers(); } }
           ])
       }
-    }.width('100%').height(62).padding({ left: 8, right: 4 }).borderRadius(21)
+    }.width('100%').height(this.headerHeight()).padding({ left: 8, right: 4 }).borderRadius(21)
       .backgroundColor($r('app.color.pigo_panel')).border({ width: 1, color: $r('app.color.pigo_line') })
       .attributeModifier(immersiveSurface(this.darkMode, `#50${this.accent().slice(1)}`))
   }
@@ -3708,15 +4080,26 @@ struct Index {
                         Text(message.text).fontSize(16).lineHeight(26)
                           .copyOption(CopyOptions.LocalDevice).fontColor($r('app.color.pigo_text'))
                       } else {
-                        ChatContent({ text: message.text, accent: this.accent() })
-                        ForEach(this.messageFiles(message), (path: string) => {
-                          this.fileChip(path, true)
-                        }, (path: string) => path)
+                        this.richChatText(message.text, this.workspaceCwd)
+                      }
+                      ForEach(this.messageFiles(message), (path: string) => {
+                        this.fileChip(path, message.role !== 'user')
+                      }, (path: string) => path)
+                      if (message.textTruncated) {
+                        Button(this.loadingMessageText === message.id ? '正在加载全文…' : '查看完整回复').chatAction()
+                          .enabled(this.reachable && !this.loadingMessageText)
+                          .onClick(() => { void this.showFullReply(message.id); })
+                      } else if (message.role !== 'user') {
                         this.copyButton('复制回复', message.text)
                       }
                     }
-                    if (message.imageCount) Text(`图片 × ${message.imageCount}`).id(`image-message-${message.id}`).fontSize(13).fontColor($r('app.color.pigo_muted'))
+                    if (message.imageCount) {
+                      Column({ space: 6 }) {
+                        this.historyImages(message.imageCount, this.currentId, message.id)
+                      }.id(`image-message-${message.id}`).width('100%')
+                    }
                   }.alignItems(HorizontalAlign.Start).padding(message.role === 'user' ? 13 : 0)
+                    .width(message.role === 'user' ? undefined : '100%')
                     .constraintSize({ maxWidth: message.role === 'user' ? '88%' : '100%' })
                     .backgroundColor(message.role === 'user' ? this.accentTint() : Color.Transparent)
                     .borderRadius({ topLeft: 17, topRight: 6, bottomLeft: 17, bottomRight: 17 })
@@ -3733,7 +4116,7 @@ struct Index {
             if (this.liveThinking) this.thinkingCard('', this.liveThinking, -1, this.liveThinkingOpen)
             if (this.liveText) {
               Column({ space: 8 }) {
-                ChatContent({ text: this.liveText, accent: this.accent() })
+                this.richChatText(this.liveText, this.workspaceCwd)
                 ForEach(messageFileChips(this.liveText, this.workspaceCwd), (path: string) => {
                   this.fileChip(path, true)
                 }, (path: string) => path)
@@ -3764,15 +4147,24 @@ struct Index {
             // 点击手势会被带 copyOption 的消息文本夺走，改用触摸广播：手指一按下就收键盘。
             if (event.type === TouchType.Down && this.keyboardHeight > 0) this.dismissKeyboard();
           })
-          .onWillScroll((_xOffset: number, yOffset: number, _state: ScrollState, _source: ScrollSource) => {
-            if (yOffset < -2) this.transcriptFollow = false;
+          .onWillScroll((_xOffset: number, yOffset: number, _state: ScrollState, source: ScrollSource) => {
+            if (yOffset < -2 && source !== ScrollSource.SCROLLER && source !== ScrollSource.SCROLLER_ANIMATION) {
+              this.transcriptFollow = false;
+            }
           })
           .onScrollEdge((side: Edge) => {
             if (side === Edge.Bottom) this.transcriptFollow = true;
           })
-          .onAreaChange((_oldArea: Area, newArea: Area) => {
+          .onAreaChange((oldArea: Area, newArea: Area) => {
             this.transcriptViewport = Number(newArea.height);
-            if (this.keyboardHeight > 0 && this.transcriptFollow) this.transcript.scrollEdge(Edge.Bottom);
+            if (this.transcriptFollow && (oldArea.width !== newArea.width || oldArea.height !== newArea.height)) {
+              // Wait for the transcript to finish wrapping at the new width before scrolling.
+              setTimeout(() => {
+                if (this.currentId === transcriptId && this.transcriptFollow) {
+                  this.transcript.scrollTo({ xOffset: 0, yOffset: this.transcriptContentHeight, animation: false });
+                }
+              }, 0);
+            }
           })
       }, (transcriptId: string) => transcriptId)
       if (this.attachments.length) {
@@ -3876,7 +4268,8 @@ struct Index {
             .enabled(!!this.currentId && this.reachable && !this.pendingSend && !this.busy && !this.openingSession)
             .onTouch((event: TouchEvent) => { this.holdTouch(event); })
         } else {
-          TextArea({ placeholder: this.reachable ? '输入消息，/ 唤起命令' : '设备离线', text: this.draft })
+          TextArea({ placeholder: !this.reachable ? '设备离线' : this.windowWidth < 360 ? '输入消息' : '输入消息，/ 唤起命令',
+            text: this.draft })
             .id('draft').layoutWeight(1).constraintSize({ minHeight: 46, maxHeight: 118 }).onFocus(() => { this.armTranscriptFollow(); })
             .fontSize(16).fontColor($r('app.color.pigo_text')).placeholderColor($r('app.color.pigo_muted')).backgroundColor(Color.Transparent)
             .padding({ left: 0, right: 2, top: 13, bottom: 11 })
@@ -3960,7 +4353,18 @@ struct Index {
     }
   }
 
+  private swipeDrawer(event: GestureEvent): void {
+    if (Math.abs(event.offsetX) <= 45 || Math.abs(event.offsetX) <= Math.abs(event.offsetY) * 1.3) return;
+    if (this.showSessions) {
+      if (event.offsetX < 0) this.setDrawer(false);
+    } else if (event.offsetX > 0 && !this.busy) {
+      if (this.showFiles) this.fileBack();
+      else if (!this.showSettings) this.setDrawer(true);
+    }
+  }
+
   private setDrawer(open: boolean): void {
+    if (open && this.dockedSessions()) return;
     if (open) this.dismissKeyboard();
     this.getUIContext().animateTo({ duration: 220, curve: Curve.EaseOut }, () => { this.showSessions = open; });
     if (open) void this.loadSessionStatus();
@@ -3972,17 +4376,27 @@ struct Index {
     }
   }
 
-  // Opening the drawer should land on the current session's workspace position, not the list top.
-  private onDrawerChange(_prop: string): void {
-    if (!this.showSessions) { this.pendingLibraryReveal = false; return; }
-    this.pendingLibraryReveal = !!this.currentId;
-    this.libraryViewportY = -1;
-    this.libraryRowY = -1;
-    this.librarySpaceY = -1;
+  private dockedSessions(): boolean {
+    return this.isPaired && this.activeTab !== 'mine' && this.windowWidth >= SPLIT_WINDOW_WIDTH;
+  }
+
+  private sessionPaneWidth(preferred: number | undefined = this.preferredSessionPaneWidth): number {
+    const width = preferred ?? Math.max(224, Math.min(288, Math.floor(this.windowWidth * 0.34)));
+    return Math.max(160, Math.min(width, 420, this.windowWidth - 360));
+  }
+
+  private compactSessionPane(): boolean {
+    if (this.dockedSessions()) return this.sessionPaneWidth() < 208;
+    return this.windowWidth > 0 && this.windowWidth * 0.84 < 208;
+  }
+
+  private onWindowWidthChange(): void {
+    // Once the list is docked, folding back should leave the conversation visible.
+    if (this.dockedSessions()) this.showSessions = false;
   }
 
   private revealLibraryAnchor(): void {
-    if (!this.pendingLibraryReveal || !this.showSessions || this.libraryViewportY < 0) return;
+    if (!this.pendingLibraryReveal || (!this.showSessions && !this.dockedSessions()) || this.libraryViewportY < 0) return;
     if (this.library.currentOffset().yOffset > 2) { this.pendingLibraryReveal = false; return; } // user scrolled first
     const anchor: number = this.libraryRowY >= 0 ? this.libraryRowY : this.librarySpaceY;
     if (anchor < 0) return; // current row not laid out yet; retried on its next area update
@@ -4080,31 +4494,35 @@ struct Index {
           }, (model: ModelOption) => `${model.provider}-${model.id}`)
           if (!this.models.length) Text('没有可用模型，请在桌面检查配置。').fontSize(13).width('100%')
         }.width('100%')
-      }.constraintSize({ maxHeight: 260 }).width('100%').align(Alignment.TopStart)
-    }.width('100%')
+      }.constraintSize({ maxHeight: Math.min(260, Math.max(96, this.windowHeight - 140)) })
+        .width('100%').align(Alignment.TopStart)
+    }.width('100%').constraintSize({ maxWidth: 560 })
       .padding({ left: 14, right: 14, top: 14, bottom: this.bottomPad() + 14 })
       .backgroundColor($r('app.color.pigo_panel')).borderRadius({ topLeft: 28, topRight: 28 })
       .border({ width: { top: 1 }, color: $r('app.color.pigo_line') })
   }
 
   @Builder
-  offlineNotice(compact: boolean) {
-    Row({ space: 10 }) {
-      Text('!').fontSize(20).fontWeight(FontWeight.Bold).fontColor('#1B1B1B')
-        .textAlign(TextAlign.Center).width(25).height(25).borderRadius(13).backgroundColor('#FF9518')
+  offlineNotice(compact: boolean, narrow: boolean = false) {
+    Row({ space: narrow ? 6 : 10 }) {
+      if (!narrow) {
+        Text('!').fontSize(20).fontWeight(FontWeight.Bold).fontColor('#1B1B1B')
+          .textAlign(TextAlign.Center).width(25).height(25).borderRadius(13).backgroundColor('#FF9518')
+      }
       Column({ space: 4 }) {
-        Text(compact ? '设备已离线，当前为缓存内容' : '电脑设备已离线')
+        Text(narrow ? '电脑离线' : compact ? '设备已离线，当前为缓存内容' : '电脑设备已离线')
           .fontSize(compact ? 13 : 17).fontWeight(FontWeight.Medium).fontColor(compact ? $r('app.color.pigo_warning') : $r('app.color.pigo_text'))
         if (!compact) Text('请检查电脑与网络连接').fontSize(12).fontColor($r('app.color.pigo_muted'))
       }.layoutWeight(1).alignItems(HorizontalAlign.Start)
       if (!compact) Button('切换').chatAction().height(34).fontSize(13)
         .onClick(() => { if (!this.busy) this.openComputers(); })
       Button(compact ? '↻' : '重试').chatAction().id(compact ? 'drawer-retry' : 'offline-retry')
-        .height(34).fontSize(compact ? 23 : 13).enabled(!this.busy)
+        .height(34).width(narrow ? 40 : undefined).fontSize(compact ? 23 : 13).enabled(!this.busy)
+        .accessibilityText('重试连接')
         .onClick(() => { this.offlineDismissed = false; this.schedule(0); })
       if (!compact) Button('×').chatAction().width(26).height(30).fontSize(21)
         .accessibilityText('关闭离线提示').onClick(() => { this.offlineDismissed = true; })
-    }.width('100%').padding(compact ? 12 : 16).borderRadius(compact ? 9 : 24)
+    }.width('100%').padding(narrow ? 6 : compact ? 12 : 16).borderRadius(compact ? 9 : 24)
       .backgroundColor(compact ? $r('app.color.pigo_warning_panel') : $r('app.color.pigo_panel'))
   }
 
@@ -4120,7 +4538,8 @@ struct Index {
             Text(tab === 'tasks' ? '任务' : tab === 'pending' ? '运行中' : tab === 'files' ? '工作区' : '我的')
               .fontSize(11).fontColor(this.activeTab === tab ? this.accent() : $r('app.color.pigo_muted'))
           }
-        }.id(`tab-${tab}`).layoutWeight(1).height(48).padding(0).borderRadius(17)
+        }.id(`tab-${tab}`).layoutWeight(1).height(this.windowHeight < SHORT_WINDOW_HEIGHT ? 42 : 48)
+          .padding(0).borderRadius(17)
           .accessibilitySelected(this.activeTab === tab)
           .backgroundColor(this.activeTab === tab ? this.accentTint() : Color.Transparent)
           .enabled(!this.busy).onClick(() => {
@@ -4171,28 +4590,40 @@ struct Index {
         Button('连接电脑').chatAction().height(44).padding({ left: 24, right: 24 })
           .backgroundColor(this.accent()).fontColor(this.accentForeground()).onClick(() => { this.openComputers(); })
       }
-    }.width('100%').padding({ top: 76, bottom: 48, left: 20, right: 20 }).layoutWeight(1)
+    }.width('100%').padding({ top: this.windowHeight < SHORT_WINDOW_HEIGHT ? 8 : 76,
+      bottom: this.windowHeight < SHORT_WINDOW_HEIGHT ? 8 : 48, left: 20, right: 20 }).layoutWeight(1)
   }
 
   @Builder
   taskRow(session: SessionRow, nested: boolean) {
     Row({ space: 0 }) {
       Button({ type: ButtonType.Normal }) {
-        Row({ space: 8 }) {
-          Scroll() {
+        Flex({ direction: this.compactSessionPane() ? FlexDirection.Column : FlexDirection.Row,
+          justifyContent: this.compactSessionPane() ? FlexAlign.Center : FlexAlign.Start,
+          alignItems: this.compactSessionPane() ? ItemAlign.Start : ItemAlign.Center }) {
+          if (this.compactSessionPane()) {
             Text(session.name === '(no messages)' ? '新任务' : session.name || '未命名任务')
-              .fontSize(16).fontColor($r('app.color.pigo_text')).maxLines(1)
-          }.scrollable(ScrollDirection.Horizontal).scrollBar(BarState.Off).layoutWeight(1).align(Alignment.Start)
+              .fontSize(14).fontColor($r('app.color.pigo_text')).width('100%').maxLines(2)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+          } else {
+            Scroll() {
+              Text(session.name === '(no messages)' ? '新任务' : session.name || '未命名任务')
+                .fontSize(16).fontColor($r('app.color.pigo_text')).maxLines(1)
+            }.scrollable(ScrollDirection.Horizontal).scrollBar(BarState.Off).layoutWeight(1).align(Alignment.Start)
+          }
           if (this.sessionRunning(session.id)) {
             Row({ space: 4 }) {
               Text('').width(6).height(6).borderRadius(3)
                 .backgroundColor(this.stateColor(this.sessionState(session.id)))
               Text(this.stateLabel(this.sessionState(session.id))).fontSize(11)
                 .fontColor(this.stateColor(this.sessionState(session.id)))
-            }.accessibilityText(this.stateLabel(this.sessionState(session.id)))
+            }.margin({ left: this.compactSessionPane() ? 0 : 8, top: this.compactSessionPane() ? 2 : 0 })
+              .accessibilityText(this.stateLabel(this.sessionState(session.id)))
           }
-        }.width('100%')
-      }.id(`session-${session.id}`).layoutWeight(1).height(46).padding({ left: nested ? 40 : 12, right: 2 })
+        }.width('100%').height('100%')
+      }.id(`session-${session.id}`).layoutWeight(1)
+        .height(this.compactSessionPane() && this.sessionRunning(session.id) ? 54 : 46)
+        .padding({ left: this.compactSessionPane() ? (nested ? 16 : 6) : (nested ? 40 : 12), right: 2 })
         .backgroundColor(Color.Transparent).enabled(!this.busy && (this.reachable || session.id === this.currentId))
         .onClick(() => {
           if (this.openingSession) return;
@@ -4202,7 +4633,8 @@ struct Index {
         })
       Button({ type: ButtonType.Normal }) {
         Image($r('app.media.ic_more')).width(17).height(17).fillColor($r('app.color.pigo_text')).opacity(0.5)
-      }.id(`session-more-${session.id}`).width(30).height(40).backgroundColor(Color.Transparent)
+      }.id(`session-more-${session.id}`).width(this.compactSessionPane() ? 36 : 30).height(40).padding(0)
+        .backgroundColor(Color.Transparent)
         .accessibilityText('任务操作').enabled(this.reachable && !this.busy).bindMenu([
           { value: session.pinned ? '取消置顶' : '置顶', action: () => { void this.updateSessionMeta(session, true); } },
           { value: session.archived ? '取消归档' : '归档', action: () => { void this.updateSessionMeta(session, false); } }
@@ -4300,23 +4732,18 @@ struct Index {
   }
 
   @Builder
-  spaceContextMenu(path: string) {
-    Menu() {
-      MenuItem({ content: '关闭工作区' })
-        .onClick(() => { this.confirmCloseSpace(path); })
-    }
-  }
-
-  @Builder
   sessionLibrary() {
-    Row({ space: 6 }) {
+    Row({ space: 4 }) {
       TextInput({ placeholder: '搜索任务', text: this.sessionQuery }).id('session-query').maxLength(100)
         .layoutWeight(1).height(36).fontSize(13).fontColor($r('app.color.pigo_text')).placeholderColor($r('app.color.pigo_muted'))
-        .borderRadius(10).backgroundColor($r('app.color.pigo_panel')).enabled(!this.busy && !this.sessionLoading)
+        .padding({ left: 8, right: 8 }).borderRadius(10)
+        .backgroundColor(this.compactSessionPane() ? $r('app.color.pigo_control') : $r('app.color.pigo_panel'))
+        .enabled(!this.busy && !this.sessionLoading)
         .onChange((value: string) => { this.sessionQuery = value; }).onSubmit(() => { void this.loadSessions(); })
       Button({ type: ButtonType.Normal }) {
         Image($r('app.media.ic_search')).width(18).height(18).fillColor($r('app.color.pigo_text'))
-      }.id('session-search').width(36).height(36).backgroundColor($r('app.color.pigo_panel')).borderRadius(10)
+      }.id('session-search').width(36).height(36).padding(0).borderRadius(10)
+        .backgroundColor(this.compactSessionPane() ? $r('app.color.pigo_control') : $r('app.color.pigo_panel'))
         .accessibilityText('搜索任务').enabled(this.reachable && !this.busy && !this.sessionLoading).onClick(() => { void this.loadSessions(); })
     }.width('100%')
     Scroll(this.library) {
@@ -4327,7 +4754,8 @@ struct Index {
           Image($r('app.media.ic_chevron')).width(14).height(14).fillColor($r('app.color.pigo_text')).rotate({ angle: this.tasksExpanded ? 0 : -90 }).opacity(0.5)
           Blank()
           Text(`${this.sessionTotal}`).fontSize(12).fontColor($r('app.color.pigo_muted'))
-        }.width('100%').height(42).padding({ left: 12, right: 12 })
+        }.width('100%').height(this.compactSessionPane() ? 36 : 42)
+          .padding({ left: this.compactSessionPane() ? 4 : 12, right: this.compactSessionPane() ? 4 : 12 })
           .onClick(() => { this.toggleTasks(); })
         }
         if (this.tasksExpanded) {
@@ -4340,23 +4768,27 @@ struct Index {
         }
         if (!this.loadedQuery && this.sessionView === 'all') {
           Text(`空间 (${this.spacePaths().length})`).fontSize(14).fontColor($r('app.color.pigo_muted')).width('100%')
-            .padding({ left: 12, top: 24, bottom: 12 })
+            .padding({ left: this.compactSessionPane() ? 4 : 12, top: this.compactSessionPane() ? 12 : 24,
+              bottom: this.compactSessionPane() ? 4 : 12 })
           ForEach(this.spacePaths(), (path: string) => {
-            Row({ space: 8 }) {
-              Row({ space: 9 }) {
-                Image($r('app.media.ic_folder')).width(23).height(23).fillColor($r('app.color.pigo_text'))
-                Text(path.split('/').pop() || path).fontSize(18).fontColor($r('app.color.pigo_text'))
+            Row({ space: 4 }) {
+              Row({ space: this.compactSessionPane() ? 4 : 9 }) {
+                Image($r('app.media.ic_folder')).width(this.compactSessionPane() ? 17 : 23)
+                  .height(this.compactSessionPane() ? 17 : 23).fillColor($r('app.color.pigo_text'))
+                Text(path.split('/').pop() || path).fontSize(this.compactSessionPane() ? 14 : 18).fontColor($r('app.color.pigo_text'))
                   .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).layoutWeight(1)
-                Image($r('app.media.ic_chevron')).width(18).height(18).fillColor($r('app.color.pigo_text'))
+                Image($r('app.media.ic_chevron')).width(this.compactSessionPane() ? 12 : 18)
+                  .height(this.compactSessionPane() ? 12 : 18).fillColor($r('app.color.pigo_text'))
                   .rotate({ angle: this.expandedSpaces.includes(path) ? 0 : -90 }).opacity(0.6)
               }.layoutWeight(1).height(48).onClick(() => { this.toggleSpace(path); })
-                .bindContextMenu((): void => { this.spaceContextMenu(path); }, ResponseType.LongPress)
               Button({ type: ButtonType.Normal }) {
-                Image($r('app.media.ic_plus')).width(23).height(23).fillColor($r('app.color.pigo_text')).opacity(0.6)
-              }.id(`new-${path}`).width(34).height(44).backgroundColor(Color.Transparent).accessibilityText('在此空间新建任务')
-                .enabled(this.reachable && !this.busy && this.desktopHandoff && this.projects.includes(path))
-                .onClick(() => { this.activeTab = 'tasks'; void this.requestAction('/new', { cwd: path }); })
-            }.width('100%').padding({ left: 12 })
+                SymbolGlyph($r('sys.symbol.plus')).fontSize(20).fontColor([$r('app.color.pigo_text')])
+              }.id(`space-actions-${path}`).width(this.compactSessionPane() ? 40 : 44).height(44).padding(0).borderRadius(10)
+                .backgroundColor($r('app.color.pigo_control'))
+                .accessibilityText(`${path.split('/').pop() || path}空间操作`)
+                .enabled(!this.busy && !this.openingSession)
+                .onClick(() => { void this.openSpaceActions(path); })
+            }.width('100%').padding({ left: this.compactSessionPane() ? 4 : 12 })
               .onAreaChange((_oldArea: Area, newArea: Area) => {
                 if (path !== this.workspaceCwd) return;
                 this.librarySpaceY = Number(newArea.globalPosition.y);
@@ -4368,7 +4800,7 @@ struct Index {
           }, (path: string) => path)
         }
         if (!this.sessions.length) Text(this.loadedQuery ? '没有找到匹配的任务' : this.reachable ? '暂无任务，点击上方新建' : '连接电脑后加载任务')
-          .fontSize(14).fontColor($r('app.color.pigo_muted')).width('100%').padding(16)
+          .fontSize(14).fontColor($r('app.color.pigo_muted')).width('100%').padding(this.compactSessionPane() ? 6 : 16)
         if (this.sessionCursor !== undefined) Button('加载更多').chatAction().id('session-more').width('100%').height(38)
           .enabled(this.reachable && !this.busy && !this.sessionLoading).onClick(() => { void this.loadSessions(true); })
       }.width('100%').alignItems(HorizontalAlign.Start).padding({ bottom: 20 })
@@ -4381,49 +4813,92 @@ struct Index {
 
   @Builder
   sessionDrawer() {
-    Column({ space: 14 }) {
-      Row({ space: 10 }) {
-        Image($r('app.media.ic_computer')).width(26).height(26).fillColor($r('app.color.pigo_text'))
+    Column({ space: this.compactSessionPane() || this.windowHeight < SHORT_WINDOW_HEIGHT ? 8 : 14 }) {
+      Row({ space: this.compactSessionPane() ? 6 : 10 }) {
+        Image($r('app.media.ic_computer')).width(this.compactSessionPane() ? 20 : 26)
+          .height(this.compactSessionPane() ? 20 : 26).fillColor($r('app.color.pigo_text'))
         Button({ type: ButtonType.Normal }) {
           Row({ space: 6 }) {
-            Text(this.computerTitle()).fontSize(20).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
+            Text(this.computerTitle()).fontSize(this.compactSessionPane() ? 16 : 20)
+              .fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
               .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).layoutWeight(1)
             Image($r('app.media.ic_chevron')).width(16).height(16).fillColor($r('app.color.pigo_text'))
           }
         }.id('computers').layoutWeight(1).height(48).padding(0).backgroundColor(Color.Transparent)
           .accessibilityText('切换电脑').enabled(!this.busy).onClick(() => { this.openComputers(); })
-        Button({ type: ButtonType.Normal }) {
-          Image($r('app.media.ic_menu')).width(24).height(24).fillColor($r('app.color.pigo_text'))
-        }.width(40).height(44).backgroundColor(Color.Transparent).accessibilityText('关闭任务抽屉')
-          .onClick(() => { this.setDrawer(false); })
-      }.width('100%').padding({ left: 12 })
+        if (!this.dockedSessions()) {
+          Button({ type: ButtonType.Normal }) {
+            Image($r('app.media.ic_menu')).width(24).height(24).fillColor($r('app.color.pigo_text'))
+          }.width(40).height(44).backgroundColor(Color.Transparent).accessibilityText('关闭任务抽屉')
+            .onClick(() => { this.setDrawer(false); })
+        }
+      }.width('100%').padding({ left: this.compactSessionPane() ? 4 : 12 })
       Button({ type: ButtonType.Normal }) {
-        Row({ space: 10 }) {
-          Image($r('app.media.ic_compose')).width(25).height(25).fillColor($r('app.color.pigo_text'))
-          Text('新建任务').fontSize(19).fontColor($r('app.color.pigo_text'))
+        Row({ space: this.compactSessionPane() ? 6 : 10 }) {
+          Image($r('app.media.ic_compose')).width(this.compactSessionPane() ? 20 : 25)
+            .height(this.compactSessionPane() ? 20 : 25).fillColor($r('app.color.pigo_text'))
+          Text('新建任务').fontSize(this.compactSessionPane() ? 15 : 19).fontColor($r('app.color.pigo_text')).maxLines(1)
         }.justifyContent(FlexAlign.Center).width('100%')
-      }.id('drawer-new-task').width('100%').height(50).borderRadius(18).backgroundColor($r('app.color.pigo_panel'))
+      }.id('drawer-new-task').width('100%').height(this.compactSessionPane() ? 42 : 50).padding(0)
+        .backgroundColor($r('app.color.pigo_panel'))
         .border({ width: 1, color: $r('app.color.pigo_line') }).borderRadius(18).enabled(this.reachable && !this.busy && this.desktopHandoff && this.projects.length > 0)
         .bindMenu(this.projects.map((path: string): MenuElement => ({ value: path.split('/').pop() || path,
           action: () => { this.activeTab = 'tasks'; void this.requestAction('/new', { cwd: path }); } })))
-      if (!this.reachable) this.offlineNotice(true)
-      Row({ space: 2 }) {
+      if (!this.reachable) this.offlineNotice(true, this.compactSessionPane())
+      Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.SpaceBetween, alignContent: FlexAlign.SpaceBetween }) {
         ForEach(['all', 'pinned', 'recent', 'archived'], (view: string) => {
-          Button(view === 'all' ? '全部' : view === 'pinned' ? '置顶' : view === 'recent' ? '最近' : '归档').chatAction()
-            .id(`session-view-${view}`).layoutWeight(1).height(28).fontSize(11).borderRadius(8)
-            .backgroundColor(this.sessionView === view ? $r('app.color.pigo_selected') : Color.Transparent).enabled(!this.busy && !this.sessionLoading && this.reachable)
+          Button({ type: ButtonType.Normal }) {
+            Text(view === 'all' ? '全部' : view === 'pinned' ? '置顶' : view === 'recent' ? '最近' : '归档')
+              .fontSize(14).fontColor($r('app.color.pigo_text')).maxLines(1)
+              .fontWeight(this.sessionView === view ? FontWeight.Medium : FontWeight.Regular)
+          }.id(`session-view-${view}`).width(this.compactSessionPane() ? '49%' : '24%')
+            .height(36).padding(0).borderRadius(8)
+            .backgroundColor(this.sessionView === view ? $r('app.color.pigo_selected') : Color.Transparent)
+            .accessibilitySelected(this.sessionView === view).enabled(!this.busy && !this.sessionLoading && this.reachable)
             .onClick(() => { this.sessionView = view; this.scheduleSidebarSave(); void this.loadSessions(); })
         }, (view: string) => view)
-      }.width('100%')
+      }.width('100%').height(this.compactSessionPane() ? 76 : 36)
       this.sessionLibrary()
-      Text(this.base.split('://')[1] || '').id('active-computer').fontSize(11).fontColor($r('app.color.pigo_muted')).width('100%').padding({ left: 12 })
-    }.width('84%').constraintSize({ maxWidth: 420 }).height('100%')
-      .padding({ left: 12, right: 12, top: this.statusBarHeight + 12, bottom: this.bottomPad() + 18 })
-      .borderRadius({ topRight: 26, bottomRight: 26 }).backgroundColor($r('app.color.pigo_panel'))
+      Text(this.base.split('://')[1] || '').id('active-computer').fontSize(11).fontColor($r('app.color.pigo_muted'))
+        .width('100%').padding({ left: this.compactSessionPane() ? 4 : 12 })
+        .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+    }.id('session-sidebar').width(this.dockedSessions() ? this.sessionPaneWidth() : '84%')
+      .constraintSize({ maxWidth: 420 }).height('100%')
+      .padding({ left: this.compactSessionPane() ? 8 : 12, right: 12,
+        top: this.statusBarHeight + (this.compactSessionPane() ? 8 : 12), bottom: this.bottomPad() + 18 })
+      .borderRadius(this.dockedSessions() ? 0 : { topRight: 26, bottomRight: 26 })
+      .border({ width: { right: this.dockedSessions() ? 1 : 0 }, color: $r('app.color.pigo_line') })
+      .backgroundColor($r('app.color.pigo_panel'))
       .transition(TransitionEffect.move(TransitionEdge.START))
-      .gesture(PanGesture({ direction: PanDirection.Horizontal }).onActionEnd((event: GestureEvent) => {
-        if (event.offsetX < -45) this.setDrawer(false);
-      }))
+      .onGestureJudgeBegin(() => this.dockedSessions() ? GestureJudgeResult.REJECT : GestureJudgeResult.CONTINUE)
+      .gesture(PanGesture({ direction: PanDirection.Horizontal }).onActionEnd((event: GestureEvent) => { this.swipeDrawer(event); }))
+      .onAppear(() => {
+        // On entry, reveal the current session or its workspace when available.
+        this.pendingLibraryReveal = !!this.currentId;
+        this.libraryViewportY = -1;
+        this.libraryRowY = -1;
+        this.librarySpaceY = -1;
+      })
+  }
+
+  @Builder
+  sessionPaneHandle() {
+    Stack() {
+      Rect().width(4).height(44).radius(2)
+        .fill(this.sessionPaneDragging ? this.accent() : $r('app.color.pigo_muted'))
+    }.id('session-pane-resize').width(20).height('100%').offset({ x: this.sessionPaneWidth() - 10 })
+      .accessibilityText('左右拖动调整任务侧边栏宽度')
+      .gesture(PanGesture({ direction: PanDirection.Horizontal })
+        .onActionStart(() => {
+          this.sessionPaneDragStart = this.sessionPaneWidth();
+          this.sessionPaneDragging = true;
+        })
+        .onActionUpdate((event: GestureEvent) => {
+          this.preferredSessionPaneWidth = this.sessionPaneWidth(this.sessionPaneDragStart + event.offsetX);
+        })
+        .onActionEnd(() => { this.sessionPaneDragging = false; })
+        .onActionCancel(() => { this.sessionPaneDragging = false; }))
+      .onDisAppear(() => { this.sessionPaneDragging = false; })
   }
 
   @Builder
@@ -4443,8 +4918,14 @@ struct Index {
           .onClick(() => { this.textFilePreview = undefined; })
       }.width('100%')
       Row({ space: 8 }) {
-        Button(this.savingPreview ? '正在保存…' : '保存到本机').chatAction().id('preview-save-local')
-          .enabled(!this.savingPreview).onClick(() => { void this.savePreviewLocally(preview); })
+        if (preview.version && !this.editingPath) {
+          Button('编辑').chatAction().id('preview-edit').enabled(!this.busy && !this.savingPreview)
+            .onClick(() => { this.editPreview(preview); })
+        }
+        if (preview.localPath || preview.text !== undefined) {
+          Button(this.savingPreview ? '正在保存…' : '保存到本机').chatAction().id('preview-save-local')
+            .enabled(!this.savingPreview).onClick(() => { void this.savePreviewLocally(preview); })
+        }
         if (preview.systemUri) {
           Button('系统预览').chatAction().enabled(!this.savingPreview)
             .onClick(() => { void this.reopenSystemPreview(preview); })
@@ -4453,22 +4934,27 @@ struct Index {
       if (this.previewNotice) {
         Text(this.previewNotice).id('preview-notice').fontSize(13).fontColor($r('app.color.pigo_text')).width('100%')
       }
-      Scroll(this.previewScroller) {
-        Column() {
-          if (preview.text === undefined) {
-            Text(preview.systemUri ? '点击「系统预览」打开文件。' : '已接收文件，可保存到本机。')
-              .fontSize(15).fontColor($r('app.color.pigo_muted'))
-          } else if (!preview.text.length) {
-            Text('空文件').fontSize(15).fontColor($r('app.color.pigo_muted'))
-          } else if (preview.markdown) {
-            ChatContent({ text: preview.text, accent: this.accent() })
-          } else {
-            Text(preview.text).fontSize(15).lineHeight(24).fontFamily('monospace').fontColor($r('app.color.pigo_text'))
-              .width('100%').wordBreak(WordBreak.BREAK_ALL).copyOption(CopyOptions.LocalDevice)
-          }
-        }.width('100%').alignItems(HorizontalAlign.Start).padding({ bottom: 16 })
-      }.id('text-preview-body').scrollable(ScrollDirection.Vertical).scrollBar(BarState.Auto)
-        .layoutWeight(1).width('100%').align(Alignment.TopStart)
+      if (preview.imageUri) {
+        Image(preview.imageUri).id('image-preview').width('100%').layoutWeight(1).objectFit(ImageFit.Contain)
+          .accessibilityText(preview.name).onError(() => { void this.imagePreviewError(preview); })
+      } else {
+        Scroll(this.previewScroller) {
+          Column() {
+            if (preview.text === undefined) {
+              Text(preview.systemUri ? '点击「系统预览」打开文件。' : '已接收文件，可保存到本机。')
+                .fontSize(15).fontColor($r('app.color.pigo_muted'))
+            } else if (!preview.text.length) {
+              Text('空文件').fontSize(15).fontColor($r('app.color.pigo_muted'))
+            } else if (preview.markdown) {
+              this.richChatText(preview.text, preview.workspaceRoot ?? '', preview.workspacePath ?? '')
+            } else {
+              Text(preview.text).fontSize(15).lineHeight(24).fontFamily('monospace').fontColor($r('app.color.pigo_text'))
+                .width('100%').wordBreak(WordBreak.BREAK_ALL).copyOption(CopyOptions.LocalDevice)
+            }
+          }.width('100%').alignItems(HorizontalAlign.Start).padding({ bottom: 16 })
+        }.id('text-preview-body').scrollable(ScrollDirection.Vertical).scrollBar(BarState.Auto)
+          .layoutWeight(1).width('100%').align(Alignment.TopStart)
+      }
       if (preview.nextOffset !== undefined || (preview.offset ?? 0) > 0) {
         Row({ space: 8 }) {
           Button('上一页').chatAction().enabled((preview.offset ?? 0) > 0 && !this.savingPreview)
@@ -4479,54 +4965,92 @@ struct Index {
             .onClick(() => { this.changePreviewPage(true); })
         }.width('100%')
       }
-    }.id('text-file-preview').width('100%').height('100%').alignItems(HorizontalAlign.Start)
+    }.id('text-file-preview').width('100%').constraintSize({ maxWidth: preview.imageUri ? 1024 : 840 })
+      .height('100%').alignItems(HorizontalAlign.Start)
       .padding({ left: 16, right: 16, top: this.statusBarHeight + 12, bottom: this.bottomPad() + 4 })
-      .backgroundColor($r('app.color.launch_background')).hitTestBehavior(HitTestMode.BLOCK_HIERARCHY)
+  }
+
+  @Builder
+  markdownTableReaderPage(reader: MarkdownTableReader) {
+    Column({ space: 8 }) {
+      Row({ space: 12 }) {
+        Text('表格').fontSize(18).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text')).layoutWeight(1)
+        Button('退出横屏').chatAction().id('markdown-exit-landscape').onClick(() => { this.closeMarkdownTableReader(); })
+      }.width('100%')
+      if (this.markdownRotationUnavailable) {
+        Text('当前窗口无法自动横屏，可左右滑动表格。').fontSize(13).fontColor($r('app.color.pigo_muted')).width('100%')
+      }
+      Scroll() {
+        Column() {
+          this.richChatText(reader.source, reader.cwd, reader.documentPath, false)
+        }.width('100%')
+      }.width('100%').layoutWeight(1).align(Alignment.TopStart)
+    }.width('100%').height('100%').padding({
+      left: 16, right: 16, top: this.statusBarHeight + 4, bottom: this.bottomPad()
+    }).backgroundColor($r('app.color.launch_background')).hitTestBehavior(HitTestMode.BLOCK_HIERARCHY)
+  }
+
+  @Builder
+  mainNavigation() {
+    Navigation() {
+      Column({ space: this.windowHeight < SHORT_WINDOW_HEIGHT ? 4 : 8 }) {
+        if (this.loading) {
+          this.welcome()
+        } else if (this.activeTab === 'mine') {
+          this.mineView()
+        } else if (this.isPaired) {
+          this.chat()
+        } else {
+          this.welcome()
+        }
+        if (!this.loading) {
+          if (this.status) this.statusNotice()
+          if (!this.keyboardHeight) this.bottomTabs()
+          else if (this.isPaired && this.activeTab !== 'mine' &&
+            (this.activeTab !== 'tasks' || this.showSettings || this.showFiles)) this.bottomTabs()
+        }
+      }.width('100%').height('100%').alignItems(HorizontalAlign.Start)
+        .padding({ top: this.loading || (!this.isPaired && this.activeTab !== 'mine') ? 0 : 8,
+          bottom: this.bottomPad() + 6 })
+    }.width('100%').height('100%').constraintSize({ maxWidth: this.activeTab === 'mine' || this.showSettings ? 600 : 840 })
+      .mode(NavigationMode.Stack).hideBackButton(true).hideToolBar(true)
+      .title({ builder: this.pageHeader, height: this.headerHeight() }, { backgroundColor: Color.Transparent })
+      .hideTitleBar(this.loading || (!this.isPaired && this.activeTab !== 'mine'))
+      .padding({ left: 16, right: 16, top: this.statusBarHeight + 8 })
   }
 
   build() {
     Stack({ alignContent: Alignment.TopStart }) {
-      Navigation() {
-        Column({ space: 8 }) {
-          if (this.loading) {
-            this.welcome()
-          } else if (this.activeTab === 'mine') {
-            this.mineView()
-          } else if (this.isPaired) {
-            this.chat()
-          } else {
-            this.welcome()
-          }
-          if (!this.loading) {
-            if (this.status) this.statusNotice()
-            if (!this.keyboardHeight) this.bottomTabs()
-            else if (this.isPaired && this.activeTab !== 'mine' &&
-              (this.activeTab !== 'tasks' || this.showSettings || this.showFiles)) this.bottomTabs()
-          }
-        }.width('100%').height('100%').alignItems(HorizontalAlign.Start)
-          .padding({ top: this.loading || (!this.isPaired && this.activeTab !== 'mine') ? 0 : 8,
-            bottom: this.bottomPad() + 6 })
-      }.width('100%').height('100%')
-        .mode(NavigationMode.Stack).hideBackButton(true).hideToolBar(true)
-        .title({ builder: this.pageHeader, height: 62 }, { backgroundColor: Color.Transparent })
-        .hideTitleBar(this.loading || (!this.isPaired && this.activeTab !== 'mine'))
-        .padding({ left: 16, right: 16, top: this.statusBarHeight + 8 })
-        .linearGradient({
-          direction: GradientDirection.LeftTop,
-          colors: [[this.accentTint(), 0], [$r('app.color.launch_background'), 0.48],
-            [$r('app.color.launch_background'), 0.80], [this.accentTint(), 1]]
-        })
-      if (this.showSessions && this.isPaired) {
+      Row() {
+        // Reserve the sidebar's space without rebuilding the conversation or moving the session list.
+        Blank().width(this.dockedSessions() ? this.sessionPaneWidth() : 0)
+        Stack({ alignContent: Alignment.Top }) {
+          this.mainNavigation()
+        }.height('100%').layoutWeight(1)
+          .onGestureJudgeBegin(() => this.dockedSessions() || this.showSessions || this.holdActive || this.recording ||
+            this.voicePreparing || this.voiceFinishing || !this.isPaired || this.activeTab === 'mine'
+            ? GestureJudgeResult.REJECT : GestureJudgeResult.CONTINUE)
+          .gesture(PanGesture({ direction: PanDirection.Horizontal }).onActionEnd((event: GestureEvent) => { this.swipeDrawer(event); }))
+      }.width('100%').height('100%').linearGradient({
+        direction: GradientDirection.LeftTop,
+        colors: [[this.accentTint(), 0], [$r('app.color.launch_background'), 0.48],
+          [$r('app.color.launch_background'), 0.80], [this.accentTint(), 1]]
+      })
+      if (this.showSessions && this.isPaired && !this.dockedSessions()) {
         Button({ type: ButtonType.Normal }).chatAction().width('100%').height('100%').backgroundColor('#66000000').borderRadius(0)
           .accessibilityText('关闭会话列表').onClick(() => { this.setDrawer(false); })
+          .gesture(PanGesture({ direction: PanDirection.Horizontal }).onActionEnd((event: GestureEvent) => { this.swipeDrawer(event); }))
+      }
+      if (this.dockedSessions() || (this.showSessions && this.isPaired)) {
         this.sessionDrawer()
       }
+      if (this.dockedSessions()) this.sessionPaneHandle()
       if (this.showModelMenu) {
         Button({ type: ButtonType.Normal }).chatAction().width('100%').height('100%').backgroundColor('#66000000').borderRadius(0)
           .accessibilityText('关闭模型菜单').onClick(() => { this.showModelMenu = false; })
         Column() {
           this.modelSheet()
-        }.width('100%').height('100%').justifyContent(FlexAlign.End)
+        }.width('100%').height('100%').justifyContent(FlexAlign.End).alignItems(HorizontalAlign.Center)
           .transition(TransitionEffect.move(TransitionEdge.BOTTOM).animation({ duration: 220, curve: Curve.EaseOut }))
       }
       if (this.recording || this.voicePreparing || (this.voiceFinishing && !this.voiceCancelling) || this.voiceHint) {
@@ -4553,22 +5077,25 @@ struct Index {
         }.width('100%').height('100%').justifyContent(FlexAlign.Center)
           .hitTestBehavior(HitTestMode.None)
       }
-      if (this.textFilePreview) this.textPreviewPage(this.textFilePreview)
-    }.width('100%').height('100%').backgroundColor($r('app.color.launch_background'))
+      if (this.editingPath || this.textFilePreview) {
+        Stack({ alignContent: Alignment.Top }) {
+          if (this.editingPath) this.fileEditorPage()
+          if (this.textFilePreview) {
+            Stack({ alignContent: Alignment.Top }) {
+              this.textPreviewPage(this.textFilePreview)
+            }.width('100%').height('100%').backgroundColor($r('app.color.launch_background'))
+              .hitTestBehavior(HitTestMode.BLOCK_HIERARCHY)
+          }
+        }.width('100%').height('100%').backgroundColor($r('app.color.launch_background'))
+          .hitTestBehavior(HitTestMode.BLOCK_HIERARCHY)
+      }
+      if (this.markdownTableReader) this.markdownTableReaderPage(this.markdownTableReader)
+    }.width('100%').height('100%').padding({ left: this.leftInset, right: this.rightInset })
+      .backgroundColor($r('app.color.launch_background'))
       .bindSheet(this.showToolDetails, this.toolDetailsSheet(), {
         detents: ['65%', SheetSize.LARGE], dragBar: true, showClose: true,
         backgroundColor: $r('app.color.pigo_panel'), maskColor: '#99000000',
         onDisappear: () => { this.closeToolDetails(); }
       })
-      .priorityGesture(PanGesture({ direction: PanDirection.Horizontal }).onActionEnd((event: GestureEvent) => {
-        if (this.textFilePreview || this.holdActive || this.recording || this.voicePreparing || this.voiceFinishing ||
-          !this.isPaired || this.activeTab === 'mine' || Math.abs(event.offsetX) <= 45 ||
-          Math.abs(event.offsetX) <= Math.abs(event.offsetY) * 1.3) return;
-        if (this.showSessions && event.offsetX < 0) this.setDrawer(false);
-        else if (this.showFiles && event.offsetX > 0 && !this.busy) this.fileBack();
-        else if (!this.showSessions && event.offsetX > 0 && !this.showFiles && !this.showSettings && !this.busy) {
-          this.setDrawer(true);
-        }
-      }))
   }
 }

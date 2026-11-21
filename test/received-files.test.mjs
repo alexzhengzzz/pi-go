@@ -9,9 +9,9 @@ function declaration(name) {
   assert.ok(start >= 0);
   return page.slice(start, page.indexOf('\n}', start) + 2);
 }
-const { messageFileChips, normalizeWorkspacePath } = new Function(stripTypeScriptTypes(
-  ['normalizeWorkspacePath', 'messageFileChips'].map(declaration).join('\n')
-) + '; return { messageFileChips, normalizeWorkspacePath };')();
+const { messageFileChips, normalizeWorkspacePath, markdownWorkspacePath } = new Function(stripTypeScriptTypes(
+  ['normalizeWorkspacePath', 'messageFileChips', 'markdownWorkspacePath'].map(declaration).join('\n')
+) + '; return { messageFileChips, normalizeWorkspacePath, markdownWorkspacePath };')();
 
 test('chat file cards preserve root filenames, quoted spaces and Markdown destinations', () => {
   assert.deepEqual(messageFileChips('请下载 `report.pdf`。 已生成 `exports/项目 报告.pdf`。', '/workspace'),
@@ -30,6 +30,13 @@ test('file cards reject external and traversal paths and cap the deduplicated re
   assert.deepEqual(messageFileChips('`/report.pdf`', '/'), ['report.pdf']);
   assert.equal(normalizeWorkspacePath('/workspace', './exports/report!.pdf'), 'exports/report!.pdf');
   assert.equal(normalizeWorkspacePath('/workspace', '/workspace-other/report.pdf'), '');
+});
+
+test('Markdown resolves local images relative to the document and stays within the workspace', () => {
+  assert.equal(markdownWorkspacePath('../images/项目%20图.png', '/workspace', 'docs/guide.md'), 'images/项目 图.png');
+  assert.equal(markdownWorkspacePath('%2e%2e/%2e%2e/image.png', '/workspace', 'docs/guide.md'), '');
+  assert.equal(markdownWorkspacePath('%2F%2Fhost/image.png', '/workspace', 'docs/guide.md'), '');
+  assert.deepEqual(messageFileChips('![图片](images/test.png) [文档](report.pdf)', '/workspace'), ['report.pdf']);
 });
 
 function method(name) {
@@ -86,8 +93,10 @@ function receiveFixture(respond, pickDestination = async () => []) {
       destroy() {}
     })
   };
-  const source = `${declaration('safeLocalFileName')}\n${declaration('textPreviewFormat')}\nclass Harness {
-    ${['downloadFile', 'openWorkspaceFile', 'downloadFailure', 'readTextFilePreview', 'savePreviewLocally'].map(method).join('\n')}
+  const source = `${['safeLocalFileName', 'textPreviewFormat', 'isImageFile'].map(declaration).join('\n')}\nclass Harness {
+    ${['downloadFile', 'openWorkspaceFile', 'downloadFailure', 'readTextFilePreview', 'savePreviewLocally',
+      'openReferencedFile', 'openFile', 'showTextPreview', 'editPreview', 'saveFile', 'fileFailure',
+      'returnToFilePreview', 'closeFileEditor'].map(method).join('\n')}
   }`;
   const Harness = new Function('fileIo', 'http', 'util', 'fileUri', 'filePreview', 'picker', 'BridgeFailure',
     'MAX_DOWNLOAD_BYTES', 'MAX_DOWNLOAD_ERROR_BYTES', 'RECEIVED_FILE_DIR', 'MAX_TEXT_PREVIEW_BYTES',
@@ -135,6 +144,20 @@ test('a complete streamed download handles short writes and previews the sandbox
   await state.openWorkspaceFile('/workspace', 'exports/report.pdf');
   assert.deepEqual([...files.values()], [[1, 2, 3, 4, 5]]);
   assert.equal(previews[0]?.uri, 'file://app/cache/pigo-files/source-report.pdf');
+});
+
+test('downloaded images use the in-app preview and retain their original file', async () => {
+  const { state, files, previews } = receiveFixture(async ({ header, chunk }) => {
+    header(4);
+    chunk(0xff, 0xd8, 0xff, 0xd9);
+    return 200;
+  });
+  await state.openWorkspaceFile('/workspace', 'exports/image.jpg');
+  const localPath = '/cache/pigo-files/source-image.jpg';
+  assert.equal(state.textFilePreview?.localPath, localPath);
+  assert.equal(state.textFilePreview?.imageUri, `file://app${localPath}`);
+  assert.deepEqual(files.get(localPath), [0xff, 0xd8, 0xff, 0xd9]);
+  assert.deepEqual(previews, []);
 });
 
 test('a truncated download removes its temporary file and preserves the previous copy', async () => {
@@ -195,14 +218,58 @@ test('downloaded Markdown and CSV open directly in the app', async () => {
   }
 });
 
+test('an editable preview saves the resolved path and shows the new text on return', async () => {
+  const { state } = receiveFixture(async () => assert.fail('editable text should use the text API'));
+  const requests = [];
+  state.request = async (route, input) => {
+    requests.push([route, input]);
+    if (route === '/files/read') return { path: 'notes/todo.md', text: '', version: 'original' };
+    return { version: 'saved' };
+  };
+  await state.openReferencedFile('/workspace', 'todo.md', true);
+  assert.equal(state.textFilePreview.text, '');
+  assert.equal(state.editingPath, undefined);
+  state.editPreview(state.textFilePreview);
+  state.fileRoot = '/other';
+  state.fileText = '# 更新';
+  state.returnToFilePreview();
+  assert.equal(state.textFilePreview, undefined);
+  assert.equal(state.fileText, '# 更新');
+  await state.saveFile();
+  state.returnToFilePreview();
+  assert.deepEqual(requests, [
+    ['/files/read', { cwd: '/workspace', path: 'todo.md', lookup: 'name' }],
+    ['/files/save', { cwd: '/workspace', path: 'notes/todo.md', text: '# 更新', version: 'original' }]
+  ]);
+  assert.equal(state.textFilePreview.text, '# 更新');
+  assert.equal(state.textFilePreview.version, 'saved');
+});
+
+test('a save conflict preserves the draft and the original version', async () => {
+  const { state } = receiveFixture(async () => assert.fail('editable text should use the text API'));
+  state.showTextPreview('/workspace', 'todo.md', '# original', 'original');
+  state.editPreview(state.textFilePreview);
+  state.fileText = '# draft';
+  state.request = async () => { throw new Error('file_conflict'); };
+  await state.saveFile();
+  assert.equal(state.fileText, '# draft');
+  assert.equal(state.fileOriginal, '# original');
+  assert.equal(state.fileVersion, 'original');
+  assert.match(state.editorNotice, /电脑上的文件已变化/);
+  state.returnToFilePreview(true);
+  assert.equal(state.textFilePreview.text, '# original');
+});
+
 test('binary bytes with a text filename are left to the system preview', async () => {
   const { state, previews } = receiveFixture(async ({ header, chunk }) => {
     header(3);
     chunk(0x61, 0, 0xff);
     return 200;
   });
-  await state.openWorkspaceFile('/workspace', 'wrong.txt');
+  state.request = async () => { throw new Error('not_text_file'); };
+  await state.openFile('/workspace', 'wrong.txt');
   assert.equal(state.textFilePreview?.text, undefined);
+  assert.equal(state.textFilePreview?.version, undefined);
   assert.equal(previews[0]?.title, 'wrong.txt');
 });
 

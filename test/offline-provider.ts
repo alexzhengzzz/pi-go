@@ -25,11 +25,16 @@ export default function (pi: ExtensionAPI) {
       const last = context.messages.at(-1);
       const approvalProbe = last?.role === "user" && Array.isArray(last.content) &&
         last.content.some((item) => item.type === "text" && item.text === "Pi Go fixture: check native tool approval");
+      const imageToolProbe = last?.role === "user" && Array.isArray(last.content) &&
+        last.content.some((item) => item.type === "text" && item.text === "Pi Go fixture: read image");
       const longAnswer = last?.role === "user" && Array.isArray(last.content) &&
         last.content.some((item) => item.type === "text" && item.text === "Pi Go fixture: long answer");
       const receivedImage = last?.role === "user" && Array.isArray(last.content) &&
         last.content.some((item) => item.type === "image" && item.mimeType === "image/jpeg");
-      const answer = receivedImage ? "fixture image received" : "fixture delta";
+      const markdownProbe = last?.role === "user" && Array.isArray(last.content) &&
+        last.content.some((item) => item.type === "text" && item.text === "Pi Go fixture: long Markdown");
+      const markdown = "# 长回复\n\n```txt\n" + "a".repeat(131057) + "🚀\n```\n\n最后一段";
+      const answer = markdownProbe ? markdown : receivedImage ? "fixture image received" : "fixture delta";
       const reasoning = model.reasoning === true;
       const thought = "fixture thinking before answering";
       const message: AssistantMessage = {
@@ -42,6 +47,13 @@ export default function (pi: ExtensionAPI) {
         usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
           cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
       };
+      if (imageToolProbe) {
+        message.content = [{ type: "toolCall", id: "pi-go-image-call", name: "read", arguments: { path: "fixture.jpg" } }];
+        message.stopReason = "toolUse";
+        stream.push({ type: "done", reason: "toolUse", message });
+        stream.end();
+        return stream;
+      }
       if (approvalProbe) {
         message.content = [{
           type: "toolCall", id: "pi-go-approval-call", name: "bash",

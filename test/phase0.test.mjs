@@ -579,7 +579,7 @@ test("shared bridge selects native runtimes without replacing their sessions", {
   const env = { PI_CODING_AGENT_DIR: agent, PI_OFFLINE: "1", PIGO_IPC_DIR: ipc, PIGO_ALLOW_RPC_SWITCH: "0" };
   await promisify(execFile)(pi, ["install", project], { cwd: first, env: { ...process.env, ...env } });
   const runtimeA = start(agent, first, env);
-  const runtimeB = start(agent, second, env);
+  const runtimeB = start(agent, second, env, true);
   runtimes.push(runtimeA, runtimeB);
   const [historic, sessionB] = await Promise.all([runtimeA, runtimeB].map(async (runtime) => {
     await runtime.rpc("prompt", { message: "Create a saved fixture." });
@@ -659,6 +659,22 @@ test("shared bridge selects native runtimes without replacing their sessions", {
     assert.equal(history.messages.filter((message) => message.role === "user" && JSON.stringify(message.content).includes(queue.text)).length, 1);
     assert.equal(history.messages.filter((message) => message.role === "user" && JSON.stringify(message.content).includes(second.text)).length, 1);
   }
+  const markdownTurn = runtimeB.messages.length;
+  await runtimeB.rpc("prompt", { message: "Pi Go fixture: long Markdown" });
+  await runtimeB.wait((event) => event.type === "agent_settled", markdownTurn);
+  const markdownChat = await (await bridge.get("/chat")).json();
+  const markdown = markdownChat.messages.find(({ text }) => text.startsWith("# 长回复"));
+  const completeMarkdown = "# 长回复\n\n```txt\n" + "a".repeat(131057) + "🚀\n```\n\n最后一段";
+  assert.ok(markdown, "long Markdown is present in the transcript");
+  assert.equal(markdown.textTruncated, true, "the transcript must report when it returns only a preview");
+  const textUrl = `/message-text?id=${sessionB.sessionId}&message=${markdown.id}`;
+  const firstText = await (await bridge.get(textUrl)).json();
+  assert.equal(firstText.nextTextOffset, 131071, "the page does not split the emoji at the boundary");
+  const remainingText = await (await bridge.get(`${textUrl}&offset=${firstText.nextTextOffset}`)).json();
+  assert.equal(firstText.text + remainingText.text, completeMarkdown);
+  assert.equal(remainingText.nextTextOffset, undefined);
+  assert.equal((await bridge.get(`${textUrl}&offset=-1`)).status, 400);
+  assert.equal((await bridge.get(`/message-text?id=${sessionA.sessionId}&message=${markdown.id}`)).status, 409);
   const image = (await readFile(join(project, "test/prompt-image.base64"), "utf8")).trim();
   const imagePrompt = { id: sessionB.sessionId, text: "", requestId: "image", image };
   assert.equal((await (await bridge.get("/session")).json()).session.acceptsImage, true);
@@ -674,11 +690,35 @@ test("shared bridge selects native runtimes without replacing their sessions", {
   await runtimeB.wait((event) => event.type === "agent_settled", imageTurn);
   assert.equal((await bridge.post("/prompt", imagePrompt)).status, 409);
   const withImage = await (await bridge.get("/chat")).json();
-  assert.equal(withImage.messages.filter((message) => message.imageCount === 1).length, 1);
+  const imageMessage = withImage.messages.find((message) => message.imageCount === 1);
+  assert.equal(imageMessage?.role, "user");
+  const imageUrl = `/message-image?id=${sessionB.sessionId}&message=${imageMessage.id}`;
+  const restoredImage = await bridge.get(`${imageUrl}&index=0`);
+  assert.equal(restoredImage.status, 200);
+  assert.deepEqual((await restoredImage.json()).image, { mimeType: "image/jpeg", data: image });
+  assert.equal((await bridge.get(`${imageUrl}&index=1`)).status, 404);
+  assert.equal((await bridge.get(`${imageUrl}&index=-1`)).status, 400);
+  assert.equal((await bridge.post("/open", { id: sessionA.sessionId })).status, 200);
+  assert.equal((await bridge.get(`${imageUrl}&index=0`)).status, 409);
+  assert.equal((await bridge.post("/open", { id: sessionB.sessionId })).status, 200);
   assert.ok(withImage.messages.some((message) => message.text === "fixture image received"));
   assert.ok(!JSON.stringify(withImage).includes(image));
   // 附件上传：内容寻址、幂等、落到所选会话工作区后以 token 引用发送。
   const jpeg = Buffer.from(image, "base64");
+  await writeFile(join(second, "fixture.jpg"), jpeg);
+  const toolImageTurn = runtimeB.messages.length;
+  await runtimeB.rpc("prompt", { message: "Pi Go fixture: read image" });
+  await runtimeB.wait((event) => event.type === "agent_settled", toolImageTurn);
+  const toolChat = await (await bridge.get("/chat")).json();
+  const toolMessage = toolChat.messages.find((message) => message.tools?.some((tool) => tool.id === "pi-go-image-call"));
+  assert.ok(toolMessage);
+  const detailUrl = `id=${sessionB.sessionId}&message=${toolMessage.id}&tool=pi-go-image-call`;
+  const imageDetail = (await (await bridge.get(`/tool-detail?${detailUrl}&images=1`)).json()).toolDetail;
+  assert.equal(imageDetail.imageCount, 1);
+  assert.ok(!imageDetail.output.includes("［图片输出］"));
+  const toolImage = await (await bridge.get(`/message-image?${detailUrl}&index=0`)).json();
+  assert.equal(toolImage.image.mimeType, "image/jpeg");
+  assert.ok(Buffer.from(toolImage.image.data, "base64").length);
   const secondReal = await realpath(second);
   const attachmentsRoot = join(secondReal, ".pi-go", "attachments");
   const uploadedImage = await (await bridge.upload("image", "手机照片.jpg", jpeg)).json();
@@ -696,16 +736,23 @@ test("shared bridge selects native runtimes without replacing their sessions", {
   const sneaky = await (await bridge.upload("file", "../../假目录/报告.pdf", Buffer.from("pdf-bytes"))).json();
   assert.equal(sneaky.attachment.name, "假目录报告.pdf");
   assert.ok(sneaky.attachment.path.startsWith(attachmentsRoot));
+  const secondJpeg = Buffer.concat([jpeg.subarray(0, 2), Buffer.from([0xff, 0xfe, 0, 3, 65]), jpeg.subarray(2)]);
+  const secondImage = (await (await bridge.upload("image", "照片 2.jpg", secondJpeg)).json()).attachment;
   const tokenImagePrompt = { id: sessionB.sessionId, text: "", requestId: "token-image",
-    attachments: [{ token: uploadedImage.attachment.token, kind: "image" }, { token: uploadedImage.attachment.token, kind: "image" }] };
+    attachments: [{ token: uploadedImage.attachment.token, kind: "image" }, { token: secondImage.token, kind: "image" }] };
   const fileUpload = await (await bridge.upload("file", "说明.txt", Buffer.from("手机附件内容", "utf8"))).json();
   assert.equal((await bridge.post("/prompt", tokenImagePrompt)).status, 202);
   const imageTurn2 = runtimeB.messages.length;
   await runtimeB.wait((event) => event.type === "agent_settled", imageTurn2);
   const tokenImageChat = await (await bridge.get("/chat")).json();
-  assert.equal(tokenImageChat.messages.filter((message) => message.imageCount === 1).length, 2);
+  assert.equal(tokenImageChat.messages.filter((message) => message.imageCount === 2).length, 1);
   assert.equal(tokenImageChat.messages.filter((message) => message.text === "fixture image received").length, 2);
   assert.ok(!JSON.stringify(tokenImageChat).includes(image));
+  const multiple = tokenImageChat.messages.find((message) => message.role === "user" && message.imageCount === 2);
+  const history = await (await bridge.get(`/history?id=${sessionB.sessionId}&before=${tokenImageChat.messages.at(-1).id}`)).json();
+  assert.ok(history.messages.some((message) => message.id === multiple.id));
+  assert.equal((await (await bridge.get(`/message-image?id=${sessionB.sessionId}&message=${multiple.id}&index=0`)).json()).image.data, image);
+  assert.equal((await (await bridge.get(`/message-image?id=${sessionB.sessionId}&message=${multiple.id}&index=1`)).json()).image.data, secondJpeg.toString("base64"));
   assert.deepEqual(await (await bridge.post("/prompt", { id: sessionB.sessionId, text: "x", requestId: "unknown-token",
     attachments: [{ token: "0123456789abcdef", kind: "file" }] })).json(), { error: "unknown_attachment" });
   assert.deepEqual(await (await bridge.post("/prompt", { id: sessionB.sessionId, text: "x", requestId: "bad-attach",
@@ -842,6 +889,21 @@ test("shared bridge selects native runtimes without replacing their sessions", {
   assert.equal(ambiguous.status, 409);
   assert.deepEqual(await ambiguous.json(), { error: "ambiguous_file_name" });
   assert.equal((await namedDownload("exports/nested.pdf", true)).status, 200);
+  await writeFile(join(second, "exports", "editable.md"), "# Draft");
+  const namedRead = () => bridge.post("/files/read", { cwd: fileCwd, path: "editable.md", lookup: "name" });
+  const editable = await (await namedRead()).json();
+  assert.equal(editable.path, "exports/editable.md");
+  assert.equal(editable.text, "# Draft");
+  await writeFile(join(second, "editable.md"), "# Root");
+  assert.equal((await (await namedRead()).json()).path, "editable.md");
+  assert.equal((await bridge.post("/files/save", { cwd: fileCwd, path: editable.path, version: editable.version, text: "# Edited" })).status, 200);
+  assert.equal(await readFile(join(second, "exports", "editable.md"), "utf8"), "# Edited");
+  assert.equal(await readFile(join(second, "editable.md"), "utf8"), "# Root");
+  await rm(join(second, "editable.md"));
+  await writeFile(join(second, "archive", "editable.md"), "# Archive");
+  const ambiguousRead = await namedRead();
+  assert.equal(ambiguousRead.status, 409);
+  assert.deepEqual(await ambiguousRead.json(), { error: "ambiguous_file_name" });
   const metaRow = (await (await bridge.get("/sessions")).json()).sessions.find((row) => row.id === sessionB.sessionId);
   const metadataInput = { id: metaRow.id, cwd: metaRow.cwd, revision: metaRow.revision, pinned: true };
   assert.equal((await bridge.post("/session-meta", { ...metadataInput, cwd: "/unshared" })).status, 404);
