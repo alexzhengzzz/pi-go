@@ -18,7 +18,7 @@ function fixture(permission = Promise.resolve(true), startup = Promise.resolve()
   const result = deferred();
   const sessions = [];
   class Session {
-    constructor() { sessions.push(this); this.cancelled = false; }
+    constructor() { sessions.push(this); this.cancelled = false; this.hasFinalTranscript = true; }
     begin() { return startup; }
     async cancel() { this.cancelled = true; await startup; }
     finish() { return result.promise; }
@@ -32,6 +32,7 @@ function fixture(permission = Promise.resolve(true), startup = Promise.resolve()
     draft: '', holdActive: true, recordTimer: -1, voiceHintTimer: -1,
     getUIContext: () => ({ getHostContext: () => ({}) }),
     showVoiceHint(text) { this.voiceHint = text; },
+    syncCommandPalette() {},
     async send() { this.sent = this.draft; }
   });
   return { state, sessions, result };
@@ -118,7 +119,19 @@ test('release sends once; busy session exposes recognized text for editing', asy
   }
 });
 
-// --- VoiceInput.ets engine tuning (hot words + VAD) -----------------------
+test('an incomplete transcript stays editable even in an idle session', async () => {
+  const { state, sessions, result } = fixture();
+  state.voiceMode = true;
+  await state.beginRecording();
+  sessions[0].hasFinalTranscript = false;
+  state.holdStart = Date.now() - 1000;
+  const end = state.endRecording(false);
+  result.resolve('partial speech');
+  await end;
+  assert.equal(state.draft, 'partial speech');
+  assert.equal(state.sent, undefined);
+  assert.equal(state.voiceMode, false);
+});
 
 const voiceSource = readFileSync(new URL('../harmony/entry/src/main/ets/VoiceInput.ets', import.meta.url), 'utf8');
 const lexiconStart = voiceSource.indexOf('const DEFAULT_SESSION_LEXICON');
@@ -151,7 +164,63 @@ test('normalizeLexicon validates, dedupes and falls back to defaults', () => {
   assert.equal(normalizeLexicon(many).length, 200);
 });
 
-test('engine start params carry session hot words and keep safe vadEnd', () => {
-  assert.ok(voiceSource.includes("'sessionGeneralLexicon'"), 'session hot words passed to startListening');
-  assert.ok(voiceSource.includes("'vadEnd': 10000"), 'vadEnd stays maximal so pauses never truncate speech');
+function engineFixture() {
+  const engine = {
+    setListener(listener) { this.listener = listener; },
+    startListening(params) { this.startParams = params; },
+    finish() { this.finishing = true; },
+    shutdown() {},
+  };
+  const speechRecognizer = {
+    async createEngine(params) { engine.createParams = params; return engine; },
+  };
+  const VoiceInputSession = new Function('speechRecognizer', 'util',
+    stripTypeScriptTypes(voiceSource.replace(/^import .*;\n|^export /gm, '')) +
+      '; return VoiceInputSession;')(speechRecognizer, { generateRandomUUID: () => 'press-1' });
+  const session = new VoiceInputSession();
+  const previews = [];
+  return {
+    engine, session, previews,
+    begin: () => session.begin(text => previews.push(text)),
+    result: (result, isFinal = false, isLast = false, id = 'press-1') =>
+      engine.listener.onResult(id, { result, isFinal, isLast }),
+    complete: () => engine.listener.onComplete('press-1', ''),
+  };
+}
+
+test('continuous dictation uses long mode, microphone input and session hot words', async () => {
+  const { engine, begin } = engineFixture();
+  await begin();
+  assert.equal(engine.createParams.extraParams.recognizerMode, 'long');
+  assert.equal(engine.startParams.extraParams.recognitionMode, 0);
+  assert.equal(engine.startParams.extraParams.maxAudioDuration, 60000);
+  assert.equal(engine.startParams.extraParams.vadEnd, undefined);
+  assert.deepEqual(engine.startParams.extraParams.sessionGeneralLexicon, DEFAULT_SESSION_LEXICON);
+});
+
+test('preview spans finalized clauses and shows the latest revision of the current clause', async () => {
+  const { begin, result, previews, session, complete, engine } = engineFixture();
+  await begin();
+  result('先检查构建。', true);
+  result('再提交');
+  result('再提交代码');
+  result('其他会话。', true, true, 'press-2');
+  assert.deepEqual(previews, ['先检查构建。', '先检查构建。再提交', '先检查构建。再提交代码']);
+  const finishing = session.finish();
+  await Promise.resolve();
+  assert.equal(engine.finishing, true);
+  result('再提交代码。', true, true);
+  complete();
+  assert.equal(await finishing, '先检查构建。再提交代码。');
+  assert.equal(session.hasFinalTranscript, true);
+});
+
+test('recognizer errors preserve the unfinished tail for review', async () => {
+  const { begin, result, session, engine } = engineFixture();
+  await begin();
+  result('先构建。', true);
+  result('再运行测试');
+  engine.listener.onError('press-1', 1002200011, '');
+  assert.equal(await session.finish(), '先构建。再运行测试');
+  assert.equal(session.hasFinalTranscript, false);
 });

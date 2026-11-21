@@ -6,14 +6,12 @@ const FINISH_WAIT_MS = 2500;
 const CANCEL_WAIT_MS = 600;
 const MAX_RECORD_MS = 60000;
 
-// Core Speech Kit constraints: hot words must be 2-20 chars each, at most 200
-// words shared between system and session lexicons. The offline zh-CN engine
-// mis-recognizes coding/agent vocabulary hardest (it is trained for daily
-// speech), so boosting these candidates is the main on-device accuracy lever.
+// Core Speech Kit accepts up to 200 session hot words, each 2–20 characters.
 const DEFAULT_SESSION_LEXICON: string[] = [
   // Agent / app context
   '智能体', '会话', '提示词', '上下文', '令牌', '模型', '任务', '工作区',
   '恢复会话', '新建会话', '撤销', '配对', '扫码', '局域网', '证书', '密钥',
+  '语音输入', '语音识别', '热词', '回归测试', '真机调试',
   '缓存', '日志', '同步', '断线', '重连', '离线', '在线',
   // Common developer actions
   '提交', '推送', '拉取', '分支', '合并', '回滚', '构建', '签名', '打包',
@@ -22,7 +20,8 @@ const DEFAULT_SESSION_LEXICON: string[] = [
   // Mixed zh/en vocabulary the offline engine tends to garble
   '鸿蒙', 'HarmonyOS', '方舟', 'ArkTS', 'ArkUI', 'TypeScript', 'JavaScript',
   'WebSocket', 'HTTP', 'HTTPS', 'JSON', 'API', 'SDK', 'RPC', 'ETS', 'Markdown',
-  'Git', 'Commit', 'Push', 'Diff', 'Token', 'TLS', 'UUID', 'npm', 'Node',
+  'Git', 'GitHub', 'Commit', 'Push', 'Diff', 'Token', 'TLS', 'UUID', 'npm', 'Node',
+  'Codex', 'Core Speech Kit', 'DevEco Studio', 'Pi Go', 'HAP',
   '组件', '页面', '路由', '回调', '异步', '并发', '线程', '进程',
   '权限', '麦克风', '通知栏', '真机', '模拟器'
 ];
@@ -72,7 +71,9 @@ export class VoiceInputSession {
   private releaseWaiter?: () => void = undefined;
   private readonly sentences: string[] = [];
   private partial: string = '';
+  private lastClauseFinal: boolean = false;
   private released: boolean = false;
+  private settleTask?: Promise<void> = undefined;
   public lastError: string = '';
 
   constructor(hotwords?: string[]) {
@@ -80,8 +81,11 @@ export class VoiceInputSession {
   }
 
   text(): string {
-    const joined = this.sentences.join('');
-    return joined || this.partial;
+    return this.sentences.join('') + this.partial;
+  }
+
+  get hasFinalTranscript(): boolean {
+    return this.released && this.lastClauseFinal && !this.partial && !this.lastError;
   }
 
   async begin(onPartial: (text: string) => void): Promise<void> {
@@ -91,18 +95,15 @@ export class VoiceInputSession {
 
   private async launch(onPartial: (text: string) => void): Promise<void> {
     const session = this;
-    const engineParams: Record<string, Object> = { 'locate': 'CN', 'recognizerMode': 'short' };
+    const engineParams: Record<string, Object> = { 'locate': 'CN', 'recognizerMode': 'long' };
     const createParams: speechRecognizer.CreateEngineParams = {
       language: 'zh-CN', online: 1, extraParams: engineParams
     };
     try {
       session.engine = await speechRecognizer.createEngine(createParams);
-      // vadEnd stays at the documented maximum (10000ms): a shorter value makes
-      // the engine end the whole recognition whenever the speaker pauses while
-      // thinking, silently dropping everything said afterwards. Keep the large
-      // value and end explicitly via finish() on release instead.
+      // In long mode a pause ends a clause. The hold ends the session via finish().
       const startParams: Record<string, Object> = {
-        'recognitionMode': 0, 'vadEnd': 10000, 'maxAudioDuration': MAX_RECORD_MS
+        'recognitionMode': 0, 'maxAudioDuration': MAX_RECORD_MS
       };
       if (this.hotwords.length > 0) {
         startParams['sessionGeneralLexicon'] = this.hotwords;
@@ -110,14 +111,25 @@ export class VoiceInputSession {
       session.engine.setListener({
         onStart: (_sessionId: string, _eventMessage: string) => {},
         onEvent: (_sessionId: string, _eventCode: number, _eventMessage: string) => {},
-        onResult: (_sessionId: string, result: speechRecognizer.SpeechRecognitionResult) => {
+        onResult: (sessionId: string, result: speechRecognizer.SpeechRecognitionResult) => {
+          if (sessionId !== session.sessionId || !session.engine || session.released) return;
           if (result.isFinal) {
-            if (result.result) session.sentences.push(result.result);
-          } else session.partial = result.result;
+            if (result.result.trim()) {
+              session.sentences.push(result.result);
+              session.partial = '';
+            }
+            session.lastClauseFinal = result.isLast;
+          } else {
+            session.partial = result.result;
+            session.lastClauseFinal = false;
+          }
           onPartial(session.text());
         },
-        onComplete: (_sessionId: string, _eventMessage: string) => { session.markReleased(); },
-        onError: (_sessionId: string, errorCode: number, _errorMessage: string) => {
+        onComplete: (sessionId: string, _eventMessage: string) => {
+          if (sessionId === session.sessionId && session.engine) session.markReleased();
+        },
+        onError: (sessionId: string, errorCode: number, _errorMessage: string) => {
+          if (sessionId !== session.sessionId || !session.engine || session.released) return;
           if (errorCode === 1002200012) session.lastError = 'microphone_permission';
           else if (!session.lastError) session.lastError = 'recognizer_error';
           session.markReleased();
@@ -143,13 +155,17 @@ export class VoiceInputSession {
     await this.settle(false);
   }
 
-  private async settle(finish: boolean): Promise<void> {
+  private settle(finish: boolean): Promise<void> {
+    if (!this.settleTask) this.settleTask = this.endRecognition(finish);
+    return this.settleTask;
+  }
+
+  private async endRecognition(finish: boolean): Promise<void> {
     try { await this.beginTask; } catch { }
     const engine = this.engine;
-    if (engine) {
+    if (engine && !this.released) {
       try {
-        if (this.released) { /* nothing to end: VAD or error already closed it. */ }
-        else if (finish) engine.finish(this.sessionId);
+        if (finish) engine.finish(this.sessionId);
         else engine.cancel(this.sessionId);
       } catch { }
       await this.waitForRelease(finish ? FINISH_WAIT_MS : CANCEL_WAIT_MS);

@@ -13,8 +13,9 @@ function method(name) {
 }
 const methods = ['setDrawer', 'loadSessions', 'requestAction', 'positionTranscript', 'poll', 'loadSessionStatus', 'applyRunningStatus', 'backgroundRunning', 'backgroundActive', 'sessionState', 'sessionRunning'];
 methods.push('cacheChat', 'presentChat', 'send', 'mergeTranscript', 'sameMessage', 'applyLiveSnapshot',
-  'handleFrame', 'queueStreamPaint', 'flushStreamDeltas');
-methods.push('chooseComputer', 'leaveComputer', 'persistComputers', 'pair');
+  'handleFrame', 'queueStreamPaint', 'flushStreamDeltas', 'finishSend', 'reconcileSteering');
+methods.push('chooseComputer', 'leaveComputer', 'persistComputers', 'pair', 'resetFileTree');
+methods.push('appendFileTreeRows', 'updateFileTree', 'toggleFileDirectory', 'loadFileDirectory');
 const Page = new Function('Curve', 'BridgeFailure', 'CachePaintFrame', 'validUsb', 'MAX_COMPUTERS', stripTypeScriptTypes(`const STREAM_PAINT_INTERVAL_MS = 32;\nconst MAX_LIVE_TEXT_LENGTH = 16000;\nclass Harness {\n${methods.map(method).join('\n')}\n}`) + '; return Harness;')(
   { EaseOut: 0 },
   class BridgeFailure extends Error {},
@@ -25,11 +26,12 @@ const Page = new Function('Curve', 'BridgeFailure', 'CachePaintFrame', 'validUsb
 function fixture() {
   const state = new Page();
   Object.assign(state, {
-    resetVoice: () => {},
+    resetVoice: () => {}, resetCommands: () => {}, syncCommandPalette: () => {},
+    fileDirectories: new Map(),
     busy: false, sessionLoading: false, epoch: 1, reachable: true,
     runningSessionIds: [], runningSessions: [], sessionStatusAt: 0, runningCatalogAt: 0, currentId: '', idle: true, queued: false,
     liveText: '', liveThinking: '', liveThinkSeq: 0, liveThinkingOpen: false, thinkingOpenIds: [],
-    liveTools: [], liveSeq: 0, liveRevision: 0, streamAlive: false,
+    liveTools: [], liveSeq: 0, liveRevision: 0, streamAlive: false, queuedSteering: [],
     deltaPaintTimer: -1, pendingLiveText: '', pendingLiveThinking: '',
     sessionCatalogLoaded: true, sessionCatalogUpdatedAt: Date.now(), sessionCatalogVersion: 0,
     sessions: [{ id: 'one', cwd: '/project', name: 'Cached task' }], projects: ['/project'],
@@ -95,6 +97,41 @@ test('reopening the sidebar uses the fresh catalog without another request', () 
   assert.equal(requests, 0);
   assert.equal(state.busy, false);
   assert.equal(state.sessions[0].id, 'one');
+});
+
+test('the workspace tree fetches folders on demand and paginates within a branch', async () => {
+  const state = fixture();
+  state.fileRoot = '/project';
+  const requests = [];
+  const entry = (path, kind = 'file') => ({ path, name: path.split('/').at(-1), kind });
+  state.request = async (_endpoint, { path, cursor }) => {
+    requests.push([path, cursor]);
+    if (!path) return { entries: [entry('src', 'directory'), entry('README.md')] };
+    if (path === 'src/empty') return { entries: [] };
+    if (cursor === 100) return { entries: [entry('src/index.ts'), entry('src/utils.ts')] };
+    return { entries: [entry('src/empty', 'directory'), entry('src/index.ts')], nextCursor: 100 };
+  };
+  const rows = () => state.fileTreeRows.map(({ path, kind, depth }) => [path, kind, depth]);
+  const rootRows = [['src', 'directory', 0], ['README.md', 'file', 0]];
+  await state.loadFileDirectory('');
+  assert.deepEqual(rows(), rootRows);
+  await state.toggleFileDirectory('src');
+  assert.deepEqual(rows(), [rootRows[0], ['src/empty', 'directory', 1], ['src/index.ts', 'file', 1],
+    ['src', 'more', 1], rootRows[1]]);
+  await state.loadFileDirectory('src', true);
+  await state.toggleFileDirectory('src/empty');
+  const expandedRows = [rootRows[0], ['src/empty', 'directory', 1], ['src/empty', 'empty', 2],
+    ['src/index.ts', 'file', 1], ['src/utils.ts', 'file', 1], rootRows[1]];
+  assert.deepEqual(rows(), expandedRows);
+  await state.toggleFileDirectory('src');
+  assert.deepEqual(rows(), rootRows);
+  await state.toggleFileDirectory('src');
+  assert.deepEqual(rows(), expandedRows);
+  assert.deepEqual(requests, [['', 0], ['src', 0], ['src', 100], ['src/empty', 0]]);
+  await state.loadFileDirectory('');
+  assert.deepEqual(rows(), rootRows);
+  await state.toggleFileDirectory('src');
+  assert.deepEqual(requests.slice(-2), [['', 0], ['src', 0]]);
 });
 
 test('stale catalog refresh keeps cached rows interactive and respects closing the drawer', async () => {
@@ -585,6 +622,44 @@ test('identical transcript polls reuse the existing array and preserve earlier h
   state.mergeTranscript([completed], 'latest');
   assert.deepEqual(state.messages, [history[0], completed]);
   assert.equal(state.historyCursor, 'oldest');
+});
+
+test('confirmed steering is visible before transcript refresh and repeated messages reconcile individually', () => {
+  const state = navigationFixture();
+  Object.assign(state, { idle: false, unconfirmed: new Map(), draftAttachments: new Map(), draft: 'Change direction' });
+  const original = { id: 'original', role: 'user', text: state.draft };
+  state.messages = [original];
+  const pending = id => ({ requestId: id, text: original.text, attachments: [], steeringAfter: original.id });
+  state.finishSend('one', pending('first'));
+  assert.deepEqual(state.queuedSteering.map(item => item.id), ['first']);
+  assert.deepEqual(state.messages, [original]);
+  assert.equal(state.draft, '');
+  assert.equal(state.pendingBottom, true);
+
+  state.pendingSend = pending('second');
+  state.messages.push({ ...original, id: 'delivered-first' });
+  state.reconcileSteering(false);
+  state.finishSend('one', state.pendingSend);
+  assert.deepEqual(state.queuedSteering.map(item => item.id), ['second']);
+  state.reconcileSteering(false);
+  assert.deepEqual(state.queuedSteering.map(item => item.id), ['second']);
+
+  state.messages.push({ ...original, id: 'delivered-second' });
+  state.reconcileSteering(false);
+  assert.deepEqual(state.queuedSteering, []);
+});
+
+test('queued attachment previews stay scoped to the conversation and clear when it settles', () => {
+  const state = navigationFixture();
+  Object.assign(state, { idle: false, unconfirmed: new Map(), draftAttachments: new Map(), draft: '', messages: [] });
+  state.finishSend('one', { requestId: 'file', text: '', steeringAfter: '', attachments: [{ kind: 'file', name: 'note.md' }] });
+  assert.deepEqual(state.queuedSteering[0].files, ['note.md']);
+  state.currentId = 'other';
+  state.reconcileSteering(true);
+  assert.equal(state.queuedSteering.length, 1);
+  state.currentId = 'one';
+  state.reconcileSteering(true);
+  assert.deepEqual(state.queuedSteering, []);
 });
 
 test('stream paints combine text and thinking and discard duplicate and finalized deltas', () => {

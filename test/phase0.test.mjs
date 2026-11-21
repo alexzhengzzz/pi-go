@@ -319,9 +319,9 @@ test("shared bridge /events forwards worker frames, follows selection and ends o
   await feed.return();
 });
 
-function start(agentDir, cwd, env = {}, tools = false) {
+function start(agentDir, cwd, env = {}, tools = false, skills = false) {
   const child = spawn(pi, ["--offline", "--mode", "rpc", ...(tools ? [] : ["--no-tools"]),
-    "--no-mcp", "--no-approve", "--no-skills", "--no-context-files", "-e", provider,
+    "--no-mcp", "--no-approve", ...(skills ? [] : ["--no-skills"]), "--no-context-files", "-e", provider,
     "--provider", "pi-go-test", "--model", "fixture"], { cwd, env: { ...process.env, ...env, PI_CODING_AGENT_DIR: agentDir } });
   const exit = once(child, "exit");
   const messages = [];
@@ -449,7 +449,11 @@ test("phase 0 against Pi 1.4.0 RPC, using an offline provider and disposable pro
   const input = { id: historic.sessionId, requestId: "offline-turn", text: "Continue the historical session." };
   assert.equal((await bridge.post("/prompt", input)).status, 202);
   assert.equal((await bridge.post("/prompt", input)).status, 409);
-  assert.equal((await feed.next()).value.idle, false);
+  // 运行开始即携带 runId/queued，手机立即可引导。
+  const started = (await feed.next()).value;
+  assert.equal(started.idle, false);
+  assert.match(started.runId ?? "", /^[a-f0-9]{32}$/);
+  assert.equal(started.queued, false);
   assert.equal((await feed.next()).value.text, "fixture delta");
   const streaming = await (await bridge.get("/chat")).json();
   assert.equal(streaming.session.id, historic.sessionId);
@@ -623,8 +627,28 @@ test("shared bridge selects native runtimes without replacing their sessions", {
     assert.equal((await bridge.post("/prompt", { ...queue, runId: "stale" })).status, 409);
     assert.equal((await bridge.post("/prompt", { ...queue, mode: "send" })).status, 409);
     const queued = { ...queue, runId: running.runId };
+    const feed = events(await bridge.get("/events"));
+    assert.equal((await feed.next()).value.type, "ready");
     assert.equal((await bridge.post("/prompt", queued)).status, 202);
     await runtimeB.wait((event) => event.method === "notify" && event.message === `Pi Go fixture mode: ${mode}`, turn);
+    // 排队状态即时广播：queue/status 帧携带 runId 与 queued，无需等 /chat 轮询。
+    for (;;) {
+      const next = await feed.next();
+      if (next.done) throw new Error("event stream ended before queue/status");
+      if (next.value.type === "queue/status") {
+        assert.equal(next.value.queued, true);
+        assert.equal(next.value.runId, running.runId);
+        break;
+      }
+    }
+    const queuedChat = (await (await bridge.get("/chat")).json()).session;
+    assert.equal(queuedChat.queued, true);
+    assert.equal(queuedChat.runId, running.runId);
+    await feed.return();
+    // 排队中允许继续追加第二条引导/补充（新 requestId），不再拒收。
+    const second = { ...queue, requestId: `queue-${mode}-second`,
+      text: `Pi Go extra interjection for ${mode}`, runId: running.runId };
+    assert.equal((await bridge.post("/prompt", second)).status, 202);
     assert.equal((await bridge.post("/prompt", queued)).status, 409);
     assert.deepEqual(await (await bridge.post("/receipt", { id: queue.id, requestId: queue.requestId })).json(),
       { dispatched: true, requestId: queue.requestId });
@@ -633,6 +657,7 @@ test("shared bridge selects native runtimes without replacing their sessions", {
     await runtimeB.wait((event) => event.type === "agent_settled", turn);
     const history = await runtimeB.rpc("get_messages");
     assert.equal(history.messages.filter((message) => message.role === "user" && JSON.stringify(message.content).includes(queue.text)).length, 1);
+    assert.equal(history.messages.filter((message) => message.role === "user" && JSON.stringify(message.content).includes(second.text)).length, 1);
   }
   const image = (await readFile(join(project, "test/prompt-image.base64"), "utf8")).trim();
   const imagePrompt = { id: sessionB.sessionId, text: "", requestId: "image", image };
@@ -909,4 +934,54 @@ test("shared bridge selects native runtimes without replacing their sessions", {
   assert.equal((await localRequest(admin, "POST", "/revoke-project", { cwd: listed.current.cwd })).status, 200);
   assert.deepEqual((await (await bridge.get("/sessions")).json()).projects, []);
   assert.equal((await bridge.post("/new", { cwd: listed.current.cwd })).status, 403);
+});
+
+test("phone bridge lists commands and delivers /skill: and extension commands", { timeout: 30000 }, async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-go-command-"));
+  const agent = join(root, "agent");
+  const work = join(root, "work");
+  await Promise.all([agent, work].map((directory) => mkdir(directory)));
+  await mkdir(join(agent, "skills", "summarize"), { recursive: true });
+  await writeFile(join(agent, "skills", "summarize", "SKILL.md"),
+    "---\nname: summarize\ndescription: Summarize material. Use when asked to summarize or condense text.\n---\n\nAlways answer with a one-line summary prefixed with [summarize].");
+  const runPi = promisify(execFile);
+  await runPi(pi, ["install", project], { cwd: work, env: { ...process.env, PI_CODING_AGENT_DIR: agent, PI_OFFLINE: "1" } });
+  const runtime = start(agent, work, {}, false, true);
+  context.after(async () => {
+    runtime.child.stdin.end();
+    const fallback = setTimeout(() => runtime.child.kill(), 1500);
+    await runtime.exit;
+    clearTimeout(fallback);
+    await rm(root, { force: true, recursive: true });
+  });
+  const bridge = await pair(runtime);
+  const state = await (await bridge.get("/session")).json();
+  const id = state.session.id;
+  const listed = await (await bridge.get("/commands")).json();
+  const commands = listed.commands;
+  assert.ok(Array.isArray(commands));
+  const names = commands.map(({ name }) => name);
+  assert.ok(names.includes("pi-go"));
+  assert.ok(names.includes("skill:summarize"));
+  const skill = commands.find(({ name }) => name === "skill:summarize");
+  assert.equal(skill.source, "skill");
+  assert.match(skill.description, /Summarize/);
+  assert.equal(skill.invoke, "/skill:summarize");
+  assert.deepEqual(await (await bridge.post("/prompt", { id, requestId: "unknown-cmd", text: "/no-such-command" })).json(), { error: "unknown_command" });
+  assert.deepEqual(await (await bridge.post("/prompt", { id, requestId: "attach-cmd", text: "/skill:summarize", attachments: [{ token: "aaaaaaaaaaaaaaaa", kind: "file" }] })).json(), { error: "command_attachments" });
+  const since = runtime.messages.length;
+  const input = { id, requestId: "skill-turn", text: "/skill:summarize chapter one of the fixture" };
+  assert.equal((await bridge.post("/prompt", input)).status, 202);
+  await runtime.wait((event) => event.type === "agent_settled", since);
+  const chat = await (await bridge.get("/chat")).json();
+  const userTurn = chat.messages.find(({ role, text }) => role === "user" && text.includes("chapter one"));
+  assert.ok(userTurn, JSON.stringify(chat.messages.map(({ text }) => text)));
+  assert.match(userTurn.text, /<skill name="summarize"/);
+  assert.match(userTurn.text, /one-line summary/);
+  assert.equal(chat.promptError, undefined);
+  const stopSince = runtime.messages.length;
+  const stopped = await (await bridge.post("/prompt", { id, requestId: "stop-cmd", text: "/pi-go-stop" })).json();
+  assert.equal(stopped.dispatched, true);
+  assert.equal(stopped.handled, true);
+  await runtime.wait((event) => event.method === "notify" && event.message === "Pi Go probe stopped", stopSince);
 });

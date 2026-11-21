@@ -110,6 +110,13 @@ interface ToolDetails {
   path?: string;
 }
 
+interface CommandRow {
+  name: string;
+  description?: string;
+  source?: string;
+  invoke?: string;
+}
+
 interface ReceivedFilePreview {
   name: string;
   text?: string;
@@ -126,6 +133,8 @@ interface StreamFrame {
   session?: SessionState;
   idle?: boolean;
   aborted?: boolean;
+  runId?: string;
+  queued?: boolean;
   text?: string;
   seq?: number;
   thinkingSeq?: number;
@@ -151,6 +160,20 @@ interface FileEntry {
   kind: string;
 }
 
+interface FileDirectory {
+  entries: FileEntry[];
+  nextCursor?: number;
+  expanded: boolean;
+}
+
+interface FileTreeRow {
+  path: string;
+  name: string;
+  kind: string;
+  depth: number;
+  expanded?: boolean;
+}
+
 interface RunningRow {
   id: string;
   name?: string;
@@ -160,6 +183,7 @@ interface RunningRow {
 
 interface BridgeReply {
   attachment?: UploadedAttachment;
+  commands?: CommandRow[];
   runningSessionIds?: string[];
   runningSessions?: RunningRow[];
   path?: string;
@@ -218,6 +242,16 @@ interface PendingSend {
   requestId: string;
   text: string;
   attachments: DraftAttachment[];
+  steeringAfter?: string;
+}
+
+interface QueuedSteering {
+  id: string;
+  sessionKey: string;
+  afterId: string;
+  text: string;
+  imageCount: number;
+  files: string[];
 }
 
 interface SecurePairingBundle {
@@ -403,11 +437,10 @@ struct Index {
   private workspaceCwd: string = '';
   @State private showFiles: boolean = false;
   @State private fileRoot: string = '';
-  @State private directoryPath: string = '';
-  @State private fileEntries: FileEntry[] = [];
-  @State private fileCursor?: number = undefined;
+  @State private fileTreeRows: FileTreeRow[] = [];
+  private readonly fileDirectories: Map<string, FileDirectory> = new Map();
+  private fileTreeIndex: number = 0;
   @State private openingFile: boolean = false;
-  private fileLoaded: boolean = false;
   @State private editingPath: string = '';
   @State private fileText: string = '';
   @State private fileOriginal: string = '';
@@ -457,6 +490,7 @@ struct Index {
   private runningCatalogAt: number = 0;
   private sessionStatusLoading: boolean = false;
   @State private messages: ChatMessage[] = [];
+  @State private queuedSteering: QueuedSteering[] = [];
   @State @Watch('onDrawerChange') private showSessions: boolean = false;
   @State private expandedSpaces: string[] = [];
   @State private tasksExpanded: boolean = true;
@@ -523,6 +557,12 @@ struct Index {
   @State private sessionLoading: boolean = false;
   private sessionCatalogLoaded: boolean = false;
   private sessionCatalogUpdatedAt: number = 0;
+  @State private commandRows: CommandRow[] = [];
+  @State private commandPalette: boolean = false;
+  @State private commandsLoading: boolean = false;
+  @State private commandError: string = '';
+  private commandRequest: number = 0;
+  private commandsLoadedAt: number = 0;
   private sessionCatalogVersion: number = 0;
   private sidebarBook: SidebarBook = { version: 1, entries: [] };
   private sidebarSaveTimer: number = -1;
@@ -860,6 +900,12 @@ struct Index {
       }
       return;
     }
+    if (frame.type === 'queue/status') {
+      // steering 排队状态即时回传：不重置流式内容，只更新 runId 与 queued。
+      if (typeof frame.runId === 'string' && frame.runId) this.runId = frame.runId;
+      if (frame.queued !== undefined) this.queued = frame.queued;
+      return;
+    }
     if (frame.type === 'session/status') {
       this.liveRevision += 1;
       if (frame.idle === true) {
@@ -870,6 +916,9 @@ struct Index {
       } else if (frame.idle === false) {
         this.flushStreamDeltas(false);
         this.idle = false;
+        // 运行开始即携带 runId，手机可立即引导，无需等 /chat 轮询。
+        if (typeof frame.runId === 'string' && frame.runId) this.runId = frame.runId;
+        if (frame.queued !== undefined) this.queued = frame.queued;
         this.liveText = '';
         this.liveThinking = '';
         this.liveThinkSeq = 0;
@@ -1010,6 +1059,7 @@ struct Index {
     this.pin = undefined;
     this.pairingBundle = '';
     this.currentId = '';
+    this.resetCommands();
     this.pendingSessionReveal = '';
     this.noSession = '';
     this.project = '';
@@ -1025,11 +1075,7 @@ struct Index {
     this.fileText = '';
     this.fileOriginal = '';
     this.fileVersion = '';
-    this.fileRoot = '';
-    this.directoryPath = '';
-    this.fileCursor = undefined;
-    this.fileLoaded = false;
-    this.fileEntries = [];
+    this.resetFileTree();
     this.sessionName = '';
     this.liveText = '';
     this.liveThinking = '';
@@ -1111,6 +1157,7 @@ struct Index {
   }
 
   private forgetDrafts(address: string): void {
+    this.queuedSteering = this.queuedSteering.filter((item: QueuedSteering): boolean => !item.sessionKey.startsWith(`${address}|`));
     for (const key of this.drafts.keys()) {
       if (key.startsWith(`${address}|`)) this.drafts.delete(key);
     }
@@ -1144,16 +1191,14 @@ struct Index {
       this.liveTools = [];
       this.liveSeq = 0;
       this.setInteraction();
+      this.resetCommands();
+      this.syncCommandPalette();
       this.pendingBottom = true;
       this.transcriptFollow = true;
     }
     this.noSession = '';
     if (this.workspaceCwd !== session.cwd) {
-      this.fileRoot = '';
-      this.directoryPath = '';
-      this.fileCursor = undefined;
-      this.fileLoaded = false;
-      this.fileEntries = [];
+      this.resetFileTree();
       this.editingPath = '';
       this.fileText = '';
       this.fileOriginal = '';
@@ -1198,7 +1243,10 @@ struct Index {
         this.closeToolDetails();
         this.noSession = result.state === 'session_closed' ? '原会话已关闭，请在会话列表选择历史记录或其他会话。' :
           result.state === 'no_shared_sessions' ? '电脑已连接，请从左上角会话列表选择一条对话。' : '请从左上角会话列表选择一个会话。';
-        if (this.currentId) this.rememberDraft(this.currentId);
+        if (this.currentId) {
+          this.rememberDraft(this.currentId);
+          this.resetCommands();
+        }
         this.currentId = '';
         this.project = '';
         this.sessionName = '';
@@ -1224,10 +1272,12 @@ struct Index {
       const incoming = result.messages ?? [];
       const currentSnapshot = moved || liveRevision === this.liveRevision;
       if (currentSnapshot) this.applySession(result.session);
+      if (connected && !moved) this.syncCommandPalette();
       if (moved || incoming[incoming.length - 1]?.id !== this.messages[this.messages.length - 1]?.id) {
         this.pendingBottom = true;
       }
       this.mergeTranscript(incoming, result.historyCursor);
+      this.reconcileSteering(currentSnapshot && result.session.idle);
       if (currentSnapshot) this.applyLiveSnapshot(result, moved || !this.streamAlive);
       if (this.selectedTool?.state === 'run' || this.selectedTool?.state === 'unknown') {
         const selectedId = this.selectedTool.id;
@@ -1455,10 +1505,6 @@ struct Index {
     } finally { this.sessionLoading = false; }
   }
 
-  private parentOf(path: string): string {
-    return path.split('/').slice(0, -1).join('/');
-  }
-
   private closeFileEditor(): void {
     this.editingPath = '';
     this.fileText = '';
@@ -1473,32 +1519,69 @@ struct Index {
       return;
     }
     if (this.busy || this.openingSession) return;
-    if (this.directoryPath) void this.browseFiles(this.parentOf(this.directoryPath));
-    else { this.showFiles = false; this.activeTab = 'tasks'; }
+    this.showFiles = false;
+    this.activeTab = 'tasks';
   }
 
-  private async browseFiles(path: string, more: boolean = false): Promise<void> {
-    if (this.busy || this.openingSession) return;
-    if (this.editingPath && this.fileText !== this.fileOriginal) {
-      this.status = '请先保存或放弃文件修改。'; return;
+  private resetFileTree(): void {
+    this.fileRoot = '';
+    this.fileDirectories.clear();
+    this.fileTreeRows = [];
+    this.fileTreeIndex = 0;
+  }
+
+  private appendFileTreeRows(rows: FileTreeRow[], path: string, depth: number): void {
+    const directory = this.fileDirectories.get(path);
+    if (!directory?.expanded) return;
+    for (const entry of directory.entries) {
+      const expanded = entry.kind === 'directory' && (this.fileDirectories.get(entry.path)?.expanded ?? false);
+      rows.push({ path: entry.path, name: entry.name, kind: entry.kind, depth: depth, expanded: expanded });
+      if (expanded) this.appendFileTreeRows(rows, entry.path, depth + 1);
     }
+    if (!directory.entries.length) rows.push({ path: path, name: '空目录', kind: 'empty', depth: depth });
+    if (directory.nextCursor !== undefined) {
+      rows.push({ path: path, name: '加载更多', kind: 'more', depth: depth });
+    }
+  }
+
+  private updateFileTree(): void {
+    const rows: FileTreeRow[] = [];
+    this.appendFileTreeRows(rows, '', 0);
+    this.fileTreeRows = rows;
+  }
+
+  private async toggleFileDirectory(path: string): Promise<void> {
+    if (this.busy || this.openingSession) return;
+    const directory = this.fileDirectories.get(path);
+    if (!directory) {
+      await this.loadFileDirectory(path);
+      return;
+    }
+    directory.expanded = !directory.expanded;
+    this.updateFileTree();
+  }
+
+  private async loadFileDirectory(path: string, more: boolean = false): Promise<void> {
+    if (this.busy || this.openingSession || !this.fileRoot) return;
+    const directory = this.fileDirectories.get(path);
+    if (more && directory?.nextCursor === undefined) return;
     const epoch = this.epoch;
+    const root = this.fileRoot;
     this.busy = true;
     try {
-      const result = await this.request('/files/list', { cwd: this.fileRoot, path: path, cursor: more ? this.fileCursor : 0 });
-      if (epoch !== this.epoch) return;
-      this.directoryPath = path;
-      this.fileEntries = more ? this.fileEntries.concat(result.entries ?? []) : result.entries ?? [];
-      this.fileCursor = result.nextCursor;
-      this.editingPath = '';
-      this.fileText = '';
-      this.fileOriginal = '';
-      this.fileVersion = '';
-      this.fileLoaded = true;
-      this.showFiles = true;
+      const result = await this.request('/files/list', { cwd: root, path: path, cursor: more ? directory?.nextCursor : 0 });
+      if (epoch !== this.epoch || root !== this.fileRoot) return;
+      const page = result.entries ?? [];
+      const previous = more ? directory?.entries ?? [] : [];
+      const loadedPaths = new Set(previous.map((entry: FileEntry): string => entry.path));
+      const entries = previous.concat(page.filter((entry: FileEntry): boolean => !loadedPaths.has(entry.path)));
+      if (!path && !more) this.fileDirectories.clear();
+      this.fileDirectories.set(path, { entries: entries, nextCursor: result.nextCursor, expanded: true });
+      this.updateFileTree();
       this.status = '';
-    } catch (error) { if (epoch === this.epoch) this.fileFailure(error); }
-    finally { this.busy = false; }
+    } catch (error) {
+      if (epoch === this.epoch && root === this.fileRoot) this.fileFailure(error);
+    } finally { this.busy = false; }
   }
 
   private fileFailure(error: Error): void {
@@ -2000,6 +2083,7 @@ struct Index {
         if (epoch !== this.epoch) return false;
         if (chat.session?.id !== result.session.id) throw new Error('session_changed');
         this.presentChat(chat, !cached, liveRevision === this.liveRevision);
+        this.reconcileSteering(liveRevision === this.liveRevision && chat.session.idle);
         this.cacheChat(chat.session);
       }
       return true;
@@ -2037,7 +2121,10 @@ struct Index {
     } finally {
       if (navigation) {
         this.openingSession = false;
-        if (epoch === this.epoch) this.schedule(this.reachable && !this.idle ? 650 : 1500);
+        if (epoch === this.epoch) {
+          this.syncCommandPalette();
+          this.schedule(this.reachable && !this.idle ? 650 : 1500);
+        }
       } else this.busy = false;
     }
   }
@@ -2221,27 +2308,104 @@ struct Index {
     }.constraintSize({ maxHeight: 240 }).width('100%')
   }
 
+  private commandPaletteActive(): boolean {
+    if (this.voiceMode || !this.draft) return false;
+    const text = this.draft.trimStart();
+    return text.startsWith('/') && !/\s/.test(text);
+  }
+
+  private commandMatches(): CommandRow[] {
+    const text = this.draft.trimStart();
+    const token = text.length > 1 ? text.slice(1) : '';
+    const needle = token.toLowerCase();
+    return this.commandRows.filter((row: CommandRow): boolean =>
+      !needle || row.name.toLowerCase().includes(needle)).slice(0, 12);
+  }
+
+  private syncCommandPalette(): void {
+    if (!this.commandPaletteActive()) { this.commandPalette = false; return; }
+    this.commandPalette = true;
+    if (!this.commandsLoadedAt || Date.now() - this.commandsLoadedAt >= 60000) void this.loadCommands();
+  }
+
+  private resetCommands(): void {
+    this.commandRequest += 1;
+    this.commandsLoading = false;
+    this.commandError = '';
+    this.commandPalette = false;
+    this.commandRows = [];
+    this.commandsLoadedAt = 0;
+  }
+
+  private async loadCommands(): Promise<void> {
+    if (this.commandsLoading || !this.reachable || !this.currentId || this.openingSession) return;
+    const request = ++this.commandRequest;
+    const id = this.currentId;
+    this.commandError = '';
+    this.commandsLoading = true;
+    try {
+      const reply = await this.request('/commands');
+      if (request !== this.commandRequest) return;
+      if (reply.session?.id !== id || !reply.commands) {
+        this.commandError = '加载命令失败，点此重试';
+        return;
+      }
+      this.commandRows = reply.commands.slice(0, 200);
+      this.commandsLoadedAt = Date.now();
+    } catch (error) {
+      if (request !== this.commandRequest) return;
+      this.commandError = error instanceof BridgeFailure && error.message === 'not_found' ?
+        '请更新电脑端 Pi Go，并重启桥接和当前会话后重试' : '加载命令失败，点此重试';
+    } finally {
+      if (request === this.commandRequest) this.commandsLoading = false;
+    }
+  }
+
+  private pickCommand(row: CommandRow): void {
+    this.draft = `${row.invoke ?? `/${row.name}`} `;
+    this.commandPalette = false;
+  }
+
+  private commandSourceLabel(source: string): string {
+    if (source === 'skill') return '技能';
+    if (source === 'prompt') return '模板';
+    if (source === 'extension') return '扩展';
+    return source;
+  }
+
+  private hasDraft(): boolean {
+    return this.draft.trim().length > 0 || this.attachments.length > 0;
+  }
+
   private canSend(): boolean {
-    return this.reachable && !this.busy && !this.openingSession && !this.pendingSend &&
+    return !!this.currentId && (this.idle || !!this.runId) &&
+      this.reachable && !this.busy && !this.openingSession && !this.pendingSend &&
       !this.recording && !this.voicePreparing && !this.voiceFinishing &&
-      (this.draft.trim().length > 0 || this.attachments.length > 0) &&
+      this.hasDraft() &&
       (this.acceptsImage || !this.attachments.some((item: DraftAttachment): boolean => item.kind === 'image'));
   }
 
-  private async send(mode: string = 'send'): Promise<void> {
+  private async send(): Promise<void> {
     const text = this.draft.trim();
     const id = this.currentId;
+    const mode = this.idle ? 'send' : 'steer';
+    const runId = this.idle ? undefined : this.runId;
     const attachments = this.attachments ?? [];
-    if (!id || (!text && !attachments.length) || this.busy || this.openingSession || !this.reachable || (mode === 'send') !== this.idle || this.pendingSend) return;
+    if (!id || (!text && !attachments.length) || this.busy || this.openingSession || !this.reachable || this.pendingSend) return;
     if (attachments.some((item: DraftAttachment): boolean => item.kind === 'image') && !this.acceptsImage) {
       this.status = '此模型不支持图片，请先移除图片附件或换模型。';
       return;
     }
-    if (mode !== 'send' && (!this.runId || this.queued)) return;
+    if (text.startsWith('/') && attachments.length) {
+      this.status = '命令发送不支持附件，请先移除附件。';
+      return;
+    }
+    if (mode === 'steer' && !runId) return;
     if (this.unconfirmed.size >= 128) { this.status = '请先核对未确认的发送。'; return; }
     const epoch = this.epoch;
     const key = this.draftKey(id);
-    const pending: PendingSend = { requestId: util.generateRandomUUID(), text: text, attachments: attachments };
+    const pending: PendingSend = { requestId: util.generateRandomUUID(), text: text, attachments: attachments,
+      steeringAfter: mode === 'steer' && !text.startsWith('/') ? (this.messages[this.messages.length - 1]?.id ?? '') : undefined };
     this.unconfirmed.set(key, pending);
     this.pendingSend = pending;
     this.busy = true;
@@ -2260,25 +2424,28 @@ struct Index {
       }
       if (refs.length) this.status = '附件已上传，正在发送…';
       const result = await this.request('/prompt', { id: id, text: text, requestId: pending.requestId, mode: mode,
-        runId: mode === 'send' ? undefined : this.runId, attachments: refs.length ? refs : undefined });
+        runId: runId, attachments: refs.length ? refs : undefined });
       if (epoch !== this.epoch) return;
       if (result.dispatched !== true) throw new Error('dispatch_unconfirmed');
       this.finishSend(key, pending);
       if (mode === 'send') this.idle = false;
-      else this.status = mode === 'steer' ? '引导请求已交给 Pi。' : '后续请求已交给 Pi。';
+      else this.status = '引导请求已交给 Pi。';
     } catch (error) {
       if (epoch !== this.epoch) return;
       if (error instanceof BridgeFailure && error.status === 401) this.leaveComputer(true);
       else if (error instanceof BridgeFailure && ['session_busy', 'session_not_streaming', 'session_changed',
         'invalid_prompt', 'invalid_request_id', 'probe_request_limit', 'invalid_image', 'image_not_supported', 'payload_too_large',
-        'invalid_attachment', 'unknown_attachment', 'invalid_content_type', 'not_found'].includes(error.message)) {
+        'invalid_attachment', 'unknown_attachment', 'invalid_content_type', 'not_found',
+        'unknown_command', 'command_attachments'].includes(error.message)) {
         this.unconfirmed.delete(key);
         this.pendingSend = undefined;
         this.status = error.message === 'image_not_supported' ? '此模型不支持图片；草稿已保留。' :
           ['invalid_image', 'payload_too_large'].includes(error.message) ? '发送内容过大（单文件 8MB 内）或图片格式无效；草稿已保留。' :
             ['invalid_attachment', 'unknown_attachment', 'invalid_content_type'].includes(error.message) ? '附件无效或已过期；草稿已保留。' :
               error.message === 'not_found' ? '电脑端扩展版本过旧，不支持附件上传；草稿已保留。' :
-                '电脑未接收此次发送。请检查会话是否仍在运行；草稿已保留。';
+                error.message === 'unknown_command' ? '电脑未找到该命令；输入 / 可查看可用命令，草稿已保留。' :
+                  error.message === 'command_attachments' ? '命令发送不支持附件；草稿已保留。' :
+                    '电脑未接收此次发送。请检查会话是否仍在运行；草稿已保留。';
       } else this.status = '发送结果未知。草稿已保留，不会自动重发。';
     } finally {
       this.busy = false;
@@ -2324,12 +2491,55 @@ struct Index {
       if (item.image) item.image.preview.release().catch((): void => {});
     }
     if (key !== this.draftKey(this.currentId)) return;
+    if (pending.steeringAfter !== undefined) {
+      const message: QueuedSteering = { id: pending.requestId, sessionKey: key, afterId: pending.steeringAfter, text: pending.text,
+        imageCount: pending.attachments.filter((item: DraftAttachment): boolean => item.kind === 'image').length,
+        files: pending.attachments.filter((item: DraftAttachment): boolean => item.kind === 'file')
+          .map((item: DraftAttachment): string => item.name) };
+      this.liveRevision += 1;
+      this.queuedSteering = this.queuedSteering.concat([message]).slice(-128);
+      this.reconcileSteering(this.idle);
+    }
     this.pendingSend = undefined;
     // 自己刚发出的消息必须立刻滚到可见位置，即使之前在翻历史。
     this.transcriptFollow = true;
     this.pendingBottom = true;
     if (this.draft.trim() === pending.text) this.draft = '';
     this.attachments = [];
+    this.syncCommandPalette();
+  }
+
+  private reconcileSteering(settled: boolean): void {
+    if (!this.queuedSteering.length) return;
+    const key = this.draftKey(this.currentId);
+    const tail = this.messages[this.messages.length - 1]?.id;
+    const used = new Set<string>();
+    const remaining: QueuedSteering[] = [];
+    for (const pending of this.queuedSteering) {
+      if (pending.sessionKey !== key) { remaining.push(pending); continue; }
+      if (settled) continue;
+      const after = pending.afterId ? this.messages.findIndex((message: ChatMessage): boolean => message.id === pending.afterId) : -1;
+      if (pending.afterId && after < 0) { remaining.push(pending); continue; }
+      const text = pending.files.length
+        ? `${pending.text}\n\n[Pi Go 附件] 手机上传了 ${pending.files.length} 个文件：`.slice(0, 8000)
+        : pending.text.slice(0, 8000);
+      const match = this.messages.findIndex((message: ChatMessage, index: number): boolean =>
+        index > after && message.role === 'user' && !used.has(message.id) && (message.imageCount ?? 0) === pending.imageCount &&
+        (pending.files.length ? message.text.startsWith(text) : message.text === text));
+      if (match < 0) {
+        pending.afterId = tail ?? pending.afterId;
+        remaining.push(pending);
+        continue;
+      }
+      const id = this.messages[match].id;
+      used.add(id);
+      const sending = this.pendingSend;
+      if (sending && sending.requestId !== pending.id && sending.steeringAfter !== undefined &&
+        match > this.messages.findIndex((message: ChatMessage): boolean => message.id === sending.steeringAfter)) {
+        sending.steeringAfter = id;
+      }
+    }
+    if (remaining.length !== this.queuedSteering.length) this.queuedSteering = remaining;
   }
 
   private storedDraftAttachments(): number[] {
@@ -2586,12 +2796,14 @@ struct Index {
         return;
       }
       this.draft = this.draft.trim() ? `${this.draft.trim()}\n${text.trim()}` : text.trim();
-      if (this.idle && this.reachable && !this.busy && !this.openingSession && !this.pendingSend) {
+      this.syncCommandPalette();
+      if (session.hasFinalTranscript && this.idle && this.reachable && !this.busy && !this.openingSession &&
+        !this.pendingSend) {
         await this.send();
         if (attempt === this.voiceAttempt && this.draft.trim()) this.voiceMode = false;
       } else {
         this.voiceMode = false;
-        this.showVoiceHint(this.idle ? '已转为文字，可编辑后发送' : '已转为文字，请选择发送方式');
+        this.showVoiceHint(session.hasFinalTranscript ? '已转为文字，可编辑后发送' : '识别未完成，请检查文字后发送');
       }
     } catch {
       if (attempt === this.voiceAttempt) this.showVoiceHint('语音识别失败，请重试');
@@ -3263,9 +3475,46 @@ struct Index {
   }
 
   @Builder
+  workspaceTreeRow(row: FileTreeRow) {
+    if (row.kind === 'empty') {
+      Text(row.name).fontSize(13).fontColor($r('app.color.pigo_muted'))
+        .width('100%').height(42).padding({ left: 36 + Math.min(row.depth, 10) * 14 })
+    } else {
+      Button({ type: ButtonType.Normal }) {
+        Row({ space: 8 }) {
+          Image($r('app.media.ic_chevron')).width(14).height(14)
+            .rotate({ angle: row.expanded ? 0 : -90 }).fillColor($r('app.color.pigo_muted'))
+            .opacity(row.kind === 'directory' ? 1 : 0)
+          if (row.kind === 'directory') {
+            Image($r('app.media.ic_folder')).width(19).height(19).fillColor(this.accent())
+          } else if (row.kind !== 'more') {
+            SymbolGlyph($r('sys.symbol.doc')).fontSize(18).fontColor([$r('app.color.pigo_muted')]).width(19)
+          }
+          Text(row.name).fontSize(14).fontWeight(row.kind === 'directory' ? FontWeight.Medium : FontWeight.Regular)
+            .fontColor(row.kind === 'more' ? this.accent() : $r('app.color.pigo_text'))
+            .layoutWeight(1).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+          if (row.kind === 'blocked') {
+            Text('不可访问').fontSize(11).fontColor($r('app.color.pigo_muted'))
+          }
+        }.width('100%').padding({ left: 12 + Math.min(row.depth, 10) * 14, right: 12 })
+      }.id(row.kind === 'more' ? `workspace-more-${row.path}` : `file-${row.path}`)
+        .width('100%').height(44).padding(0).borderRadius(8).backgroundColor(Color.Transparent)
+        .enabled(!this.busy && !this.openingSession && row.kind !== 'blocked')
+        .accessibilityText(row.kind === 'directory' ? `${row.name}，${row.expanded ? '已展开' : '已收起'}` :
+          row.kind === 'more' && row.path ? `加载更多，${row.path}` :
+          row.kind === 'blocked' ? `${row.name}，不可访问` : row.name)
+        .onClick(() => {
+          if (row.kind === 'directory') void this.toggleFileDirectory(row.path);
+          else if (row.kind === 'more') void this.loadFileDirectory(row.path, true);
+          else void this.openFile(row.path);
+        })
+    }
+  }
+
+  @Builder
   workspaceFiles() {
-    Text(this.fileRoot).fontSize(12).width('100%').copyOption(CopyOptions.LocalDevice)
     if (this.editingPath) {
+      Text(this.fileRoot).fontSize(12).width('100%').copyOption(CopyOptions.LocalDevice)
       Text(this.editingPath).fontSize(15).width('100%')
       TextArea({ text: this.fileText }).id('file-editor').layoutWeight(1).width('100%').maxLength(65536)
         .enabled(!this.busy).onChange((value: string) => { this.fileText = value; })
@@ -3283,29 +3532,37 @@ struct Index {
           .onClick(() => { this.fileText = this.fileOriginal; this.closeFileEditor(); })
       }.width('100%')
     } else {
-      Row({ space: 8 }) {
-        Button('返回').chatAction().id('file-back-dir').enabled(!this.busy).onClick(() => { this.fileBack(); })
-        Button('上一级').chatAction().id('file-parent').enabled(!this.busy && !!this.directoryPath)
-          .onClick(() => { void this.browseFiles(this.parentOf(this.directoryPath)); })
-        Button('刷新').chatAction().enabled(!this.busy).onClick(() => { void this.browseFiles(this.directoryPath); })
-        Text(this.directoryPath || '项目根目录').fontSize(13).layoutWeight(1).maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-      }.width('100%')
-      Scroll() {
-        Column({ space: 8 }) {
-          ForEach(this.fileEntries, (entry: FileEntry) => {
-            Button(`${entry.kind === 'directory' ? '目录 · ' : entry.kind === 'blocked' ? '不可访问 · ' : ''}${entry.name}`).chatAction()
-              .id(`file-${entry.path}`).width('100%').enabled(!this.busy && entry.kind !== 'blocked')
-              .onClick(() => {
-                if (entry.kind === 'directory') void this.browseFiles(entry.path);
-                else void this.openFile(entry.path);
-              })
-          }, (entry: FileEntry) => entry.path)
-          if (!this.fileEntries.length) Text('空目录')
-          if (this.fileCursor !== undefined) Button('加载更多文件').chatAction().enabled(!this.busy)
-            .onClick(() => { void this.browseFiles(this.directoryPath, true); })
-        }.width('100%')
-      }.layoutWeight(1).width('100%')
+      Column() {
+        Row({ space: 10 }) {
+          Image($r('app.media.ic_folder')).width(23).height(23).fillColor(this.accent())
+          Column({ space: 2 }) {
+            Text(this.project || '项目根目录').fontSize(15).fontWeight(FontWeight.Medium)
+              .fontColor($r('app.color.pigo_text')).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+            Text(this.fileRoot).fontSize(11).fontColor($r('app.color.pigo_muted')).maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis }).copyOption(CopyOptions.LocalDevice)
+          }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+          Button({ type: ButtonType.Normal }) {
+            SymbolGlyph($r('sys.symbol.arrow_clockwise')).fontSize(19).fontColor([this.accent()])
+          }.id('file-refresh').width(44).height(44).padding(0).borderRadius(10)
+            .backgroundColor(Color.Transparent).accessibilityText('刷新工作区')
+            .enabled(!this.busy && !this.openingSession && this.reachable)
+            .onClick(() => { void this.loadFileDirectory(''); })
+        }.width('100%').padding({ left: 14, right: 6, top: 4, bottom: 4 })
+        Divider().color($r('app.color.pigo_line'))
+        if (this.fileTreeRows.length) {
+          List({ initialIndex: this.fileTreeIndex }) {
+            ForEach(this.fileTreeRows, (row: FileTreeRow) => {
+              ListItem() { this.workspaceTreeRow(row) }
+            }, (row: FileTreeRow): string => `${row.kind}:${row.expanded ?? false}:${row.path}`)
+          }.width('100%').layoutWeight(1).padding({ top: 4, bottom: 4, left: 4, right: 4 })
+            .onScrollIndex((start: number) => { this.fileTreeIndex = Math.max(0, start); })
+        } else {
+          Text(this.busy ? '正在读取目录…' : '未能读取目录')
+            .fontSize(13).fontColor($r('app.color.pigo_muted')).width('100%').padding(16)
+        }
+      }.width('100%').layoutWeight(1).alignItems(HorizontalAlign.Start).borderRadius(18)
+        .backgroundColor($r('app.color.pigo_panel')).border({ width: 1, color: $r('app.color.pigo_line') })
+        .clip(true)
     }
   }
 
@@ -3482,6 +3739,22 @@ struct Index {
                 }, (path: string) => path)
               }.alignItems(HorizontalAlign.Start).width('100%').padding({ top: 10, bottom: 18 })
             }
+            ForEach(this.queuedSteering.filter((message: QueuedSteering): boolean => message.sessionKey === this.draftKey(this.currentId)),
+              (message: QueuedSteering) => {
+                Row() {
+                  Column({ space: 6 }) {
+                    if (message.text) Text(message.text).fontSize(16).lineHeight(26)
+                      .copyOption(CopyOptions.LocalDevice).fontColor($r('app.color.pigo_text'))
+                    if (message.imageCount) Text(`图片 × ${message.imageCount}`).fontSize(13).fontColor($r('app.color.pigo_muted'))
+                    ForEach(message.files, (name: string) => {
+                      Text(name).fontSize(13).fontColor($r('app.color.pigo_muted'))
+                        .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+                    })
+                    Text('排队中').fontSize(12).fontColor($r('app.color.pigo_muted'))
+                  }.alignItems(HorizontalAlign.Start).padding(13).constraintSize({ maxWidth: '88%' })
+                    .backgroundColor(this.accentTint()).borderRadius({ topLeft: 17, topRight: 6, bottomLeft: 17, bottomRight: 17 })
+                }.width('100%').justifyContent(FlexAlign.End).padding({ top: 10, bottom: 4 })
+              }, (message: QueuedSteering) => message.id)
           }.width('100%').padding({ top: 6, bottom: 6 })
             .onAreaChange((_oldArea: Area, newArea: Area) => {
               this.positionTranscript(transcriptId, Number(newArea.height));
@@ -3547,6 +3820,43 @@ struct Index {
           .accessibilityText('滚动到最新消息').onClick(() => { this.transcriptFollow = true; this.transcript.scrollEdge(Edge.Bottom); })
       }.width('100%').height(38)
       if (!this.reachable && !this.offlineDismissed) this.offlineNotice(false)
+      if (this.commandPalette && this.commandPaletteActive()) {
+        Column({ space: 2 }) {
+          if (!this.commandMatches().length) {
+            Text(this.commandsLoading ? '正在加载命令…' : !this.reachable ? '电脑离线，等待重连' :
+              this.commandError || (this.commandRows.length ? '没有匹配的命令' : '暂无可用命令'))
+              .fontSize(13).fontColor($r('app.color.pigo_muted')).padding({ left: 10, right: 10, top: 10, bottom: 10 }).maxLines(2)
+              .onClick(() => { if (this.commandError) void this.loadCommands(); })
+          } else {
+            Scroll() {
+              Column({ space: 2 }) {
+                ForEach(this.commandMatches(), (row: CommandRow) => {
+                  Column({ space: 2 }) {
+                    Row({ space: 8 }) {
+                      Text(row.invoke ?? `/${row.name}`).fontSize(14).fontWeight(FontWeight.Medium)
+                        .fontColor($r('app.color.pigo_text')).maxLines(1).layoutWeight(1)
+                        .textOverflow({ overflow: TextOverflow.Ellipsis })
+                      if (row.source) {
+                        Text(this.commandSourceLabel(row.source)).fontSize(10).fontColor($r('app.color.pigo_muted'))
+                          .padding({ left: 6, right: 6, top: 2, bottom: 2 }).borderRadius(8)
+                          .backgroundColor($r('app.color.pigo_control')).maxLines(1)
+                      }
+                    }.width('100%')
+                    if (row.description) {
+                      Text(row.description).fontSize(12).fontColor($r('app.color.pigo_muted')).maxLines(1)
+                        .textOverflow({ overflow: TextOverflow.Ellipsis }).width('100%')
+                    }
+                  }.alignItems(HorizontalAlign.Start).width('100%').padding({ left: 10, right: 10, top: 7, bottom: 7 })
+                  .borderRadius(10).id(`command-row-${row.name}`)
+                  .onClick(() => { this.pickCommand(row); })
+                }, (row: CommandRow) => row.name)
+              }.width('100%')
+            }.constraintSize({ maxHeight: 216 }).width('100%').edgeEffect(EdgeEffect.Spring)
+          }
+        }.width('100%').padding(4)
+        .backgroundColor($r('app.color.pigo_panel')).border({ width: 1, color: $r('app.color.pigo_line') }).borderRadius(14)
+        .id('command-palette')
+      }
       Row({ space: 6 }) {
         Button({ type: ButtonType.Normal }) {
           Image(this.voiceMode ? $r('app.media.ic_keyboard') : $r('app.media.ic_mic')).width(22).height(22)
@@ -3566,11 +3876,11 @@ struct Index {
             .enabled(!!this.currentId && this.reachable && !this.pendingSend && !this.busy && !this.openingSession)
             .onTouch((event: TouchEvent) => { this.holdTouch(event); })
         } else {
-          TextArea({ placeholder: this.reachable ? '输入消息' : '设备离线', text: this.draft })
+          TextArea({ placeholder: this.reachable ? '输入消息，/ 唤起命令' : '设备离线', text: this.draft })
             .id('draft').layoutWeight(1).constraintSize({ minHeight: 46, maxHeight: 118 }).onFocus(() => { this.armTranscriptFollow(); })
             .fontSize(16).fontColor($r('app.color.pigo_text')).placeholderColor($r('app.color.pigo_muted')).backgroundColor(Color.Transparent)
             .padding({ left: 0, right: 2, top: 13, bottom: 11 })
-            .enabled(!this.pendingSend).onChange((value: string) => { this.draft = value; })
+            .enabled(!this.pendingSend).onChange((value: string) => { this.draft = value; this.syncCommandPalette(); })
         }
         Button({ type: ButtonType.Normal }) {
           Image($r('app.media.ic_plus')).width(25).height(25).fillColor($r('app.color.pigo_text'))
@@ -3583,13 +3893,13 @@ struct Index {
           ] : [
             { value: '选择文件', action: (): void => { void this.attachFile(); } }
           ])
-        if (this.idle) {
+        if (this.idle || this.hasDraft()) {
           Button({ type: ButtonType.Normal }) {
             Image($r('app.media.ic_send')).width(22).height(22)
               .fillColor(this.canSend() ? this.accentForeground() : $r('app.color.pigo_text'))
           }.id('send').width(42).height(42).padding(0).borderRadius(13)
             .backgroundColor(this.canSend() ? this.accent() : $r('app.color.pigo_control'))
-            .accessibilityText('发送消息').enabled(this.canSend())
+            .accessibilityText(this.idle ? '发送消息' : '发送消息以引导当前任务').enabled(this.canSend())
             .onClick(() => { void this.send(); })
         } else {
           Button({ type: ButtonType.Normal }) {
@@ -3600,15 +3910,6 @@ struct Index {
         }
       }.width('100%').padding({ left: 6, right: 7, top: 5, bottom: 5 }).backgroundColor($r('app.color.pigo_panel'))
         .border({ width: 1, color: $r('app.color.pigo_line') }).borderRadius(22)
-      if (!this.idle && (this.draft.trim() || this.attachments.length) &&
-        (!this.attachments.some((item: DraftAttachment): boolean => item.kind === 'image') || this.acceptsImage)) {
-        Row({ space: 8 }) {
-          Button('引导当前任务').chatAction().id('steer').layoutWeight(1).enabled(this.reachable && !this.busy && !this.openingSession && !this.pendingSend && !!this.runId && !this.queued)
-            .onClick(() => { void this.send('steer'); })
-          Button('完成后再处理').chatAction().id('follow-up').layoutWeight(1).enabled(this.reachable && !this.busy && !this.openingSession && !this.pendingSend && !!this.runId && !this.queued)
-            .onClick(() => { void this.send('followUp'); })
-        }.width('100%')
-      }
     }
   }
 
@@ -3830,9 +4131,13 @@ struct Index {
             if (tab === 'files') {
               if (!this.reachable || !this.workspaceCwd) { this.status = '请先连接电脑并打开一个任务。'; return; }
               if (this.activeTab === 'files' && this.showFiles) return;
-              if (this.fileRoot === this.workspaceCwd && this.fileLoaded) {
-                this.showFiles = true; this.status = '';
-              } else { this.fileRoot = this.workspaceCwd; void this.browseFiles(''); }
+              if (this.fileRoot !== this.workspaceCwd) {
+                this.resetFileTree();
+                this.fileRoot = this.workspaceCwd;
+              }
+              this.showFiles = true;
+              this.status = '';
+              if (!this.fileDirectories.has('')) void this.loadFileDirectory('');
             } else { this.showFiles = false; this.showSettings = false; }
             if (tab === 'mine' && this.minePage) {
               this.mineBack();

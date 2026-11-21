@@ -187,7 +187,7 @@ function createProbe() {
       }
       const path = (request.url ?? "").split("?")[0];
       const route = `${request.method} ${path}`;
-      if (privateSocket && !["GET /session", "GET /chat", "GET /history", "GET /tool-detail", "GET /sessions", "GET /models", "GET /events", "POST /prompt", "POST /upload", "POST /abort", "POST /receipt", "POST /model", "POST /rename"].includes(route)) {
+      if (privateSocket && !["GET /session", "GET /chat", "GET /history", "GET /tool-detail", "GET /sessions", "GET /models", "GET /commands", "GET /events", "POST /prompt", "POST /upload", "POST /abort", "POST /receipt", "POST /model", "POST /rename"].includes(route)) {
         return fail(404, "not_found");
       }
       if (route === "POST /pair") {
@@ -245,6 +245,15 @@ function createProbe() {
           models,
           current: current && { ...modelRow(current), thinkingLevel: active.ctx.thinkingLevel, levels: levelsOf(current) },
         });
+      }
+      if (route === "GET /commands") {
+        const commands = active.pi.getCommands().map((command) => ({
+          name: command.name,
+          description: typeof command.description === "string" ? command.description.slice(0, 300) : undefined,
+          source: command.source,
+          invoke: `/${command.name}`,
+        }));
+        return reply(response, 200, { session: status(), commands });
       }
       if (route === "GET /chat" || route === "GET /history" || route === "GET /tool-detail") {
         const parameters = new URL(request.url ?? "/", "http://pi-go").searchParams;
@@ -417,13 +426,22 @@ function createProbe() {
         const imageCount = attachments.filter((item) => item.kind === "image").length + (hasImage ? 1 : 0);
         const fileCount = attachments.filter((item) => item.kind === "file").length;
         if (typeof input.text !== "string" || (!input.text.trim() && imageCount === 0 && fileCount === 0) ||
-          Buffer.byteLength(input.text) > 12000 || input.text.trimStart().startsWith("/") ||
+          Buffer.byteLength(input.text) > 12000 ||
           (mode !== "send" && mode !== "steer" && mode !== "followUp")) return fail(400, "invalid_prompt");
+        const commandText = input.text.trimStart().startsWith("/") ? input.text.trimStart() : undefined;
+        const commandName = commandText !== undefined ? (commandText.slice(1).split(/\s/, 1)[0] ?? "") : undefined;
+        const command = commandName !== undefined && commandName !== "" && /^[\w:.-]{1,80}$/.test(commandName)
+          ? active.pi.getCommands().find((row) => row.name === commandName) : undefined;
+        if (commandName !== undefined && commandName !== "" && !command) return fail(400, "unknown_command");
+        if (command && (imageCount > 0 || fileCount > 0)) return fail(400, "command_attachments");
+        if (commandName !== undefined && commandName === "") return fail(400, "invalid_prompt");
         if (hasImage && (typeof input.image !== "string" || !validPromptImage(input.image))) return fail(400, "invalid_image");
         if (imageCount > 0 && active.ctx.model?.input.includes("image") !== true) return fail(409, "image_not_supported");
         if (requests.has(input.requestId)) return fail(409, "duplicate_request");
         const idle = active.ctx.isIdle();
-        if (dispatchTimer || active.ctx.hasPendingMessages() || (mode === "send" && !idle)) return fail(409, "session_busy");
+        // steer/followUp 允许在已有排队消息时继续追加（Pi 原生支持多条排队，逐轮送达）；
+        // 只有 send（新开一轮）才要求队列清空且空闲。
+        if (dispatchTimer || (mode === "send" && (active.ctx.hasPendingMessages() || !idle))) return fail(409, "session_busy");
         if (mode !== "send" && (idle || !runId || input.runId !== runId)) return fail(409, "session_not_streaming");
         if (requests.size >= 1024) return fail(429, "probe_request_limit");
         const deliverAs = mode === "send" ? undefined : mode;
@@ -441,7 +459,7 @@ function createProbe() {
           if (!validPromptImageBuffer(bytes)) return fail(400, "invalid_image");
           imageData.push(bytes);
         }
-        let text = input.text;
+        let text = command !== undefined ? (commandText ?? input.text) : input.text;
         if (stagedFiles.length) {
           const lines = stagedFiles.map((file) => `- ${file.name}：${file.path}`);
           text = `${text}\n\n[Pi Go 附件] 手机上传了 ${stagedFiles.length} 个文件：\n${lines.join("\n")}`;
@@ -449,9 +467,31 @@ function createProbe() {
         const parts: PromptContentPart[] = [{ type: "text", text }];
         for (const bytes of imageData) parts.push({ type: "image", mimeType: "image/jpeg", data: bytes.toString("base64") });
         const content: string | PromptContentPart[] = parts.length > 1 ? parts : text;
-        active.pi.sendUserMessage(content, { expandPromptTemplates: false, deliverAs });
         requests.set(input.requestId, input.id);
-        if (deliverAs) return reply(response, 202, { dispatched: true, requestId: input.requestId });
+        if (command?.source === "extension") {
+          // 扩展命令可能立即关闭 probe（如 /pi-go-stop）：先回包并等响应 flush，再派发，避免连接被一起销毁。
+          let sent = false;
+          const dispatch = () => {
+            if (sent) return;
+            sent = true;
+            active.pi.sendUserMessage(text, { expandPromptTemplates: true, deliverAs });
+          };
+          response.once("finish", dispatch);
+          setTimeout(dispatch, 250).unref();
+          return reply(response, 202, { dispatched: true, requestId: input.requestId, handled: true });
+        }
+        active.pi.sendUserMessage(content, { expandPromptTemplates: command !== undefined, deliverAs });
+        if (deliverAs) {
+          // 排队状态即时广播（旧版手机端会忽略这个新帧类型）：先乐观上报 queued，
+          // 再短暂延迟后用真实状态校准；权威状态仍由 /chat 轮询兜底。
+          const liveRunId = status()?.runId ?? runId;
+          emit("queue/status", { runId: liveRunId, queued: true });
+          setTimeout(() => {
+            const current = status();
+            if (current) emit("queue/status", { runId: current.runId, queued: current.queued });
+          }, 250).unref();
+          return reply(response, 202, { dispatched: true, requestId: input.requestId });
+        }
         activePrompt = input.requestId;
         promptError = undefined;
         dispatchTimer = setTimeout(() => {
@@ -511,7 +551,8 @@ function createProbe() {
       liveThinking = "";
       liveThinkSeq = 0;
       toolLog.clear();
-      emit("session/status", { idle: false });
+      // 运行一开始就把 runId/queued 推给手机，引导按钮无需等 /chat 轮询。
+      emit("session/status", { idle: false, runId, queued: status()?.queued ?? false });
     },
     delta(text: string) {
       liveText = (liveText + text).slice(-16000);
@@ -543,7 +584,7 @@ function createProbe() {
       liveThinkSeq = 0;
       toolLog.clear();
       activePrompt = undefined;
-      emit("session/status", { idle: true, aborted });
+      emit("session/status", { idle: true, aborted, queued: status()?.queued ?? false });
     },
     final(reason: string) {
       if (activePrompt && reason === "error") promptError = "model_error";

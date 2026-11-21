@@ -1,6 +1,6 @@
 # Pi Go 鸿蒙客户端与 Pi Desktop 扩展实施计划
 
-> 状态：已验证 Pi CLI RPC、鸿蒙 USB 真机聊天与停止、多标签切换、适配版 Desktop 的原生历史打开和新建、项目恢复及双端交互。阶段 1 已实现 HTTPS LAN 配对、撤销、UDP 发现及 HUKS 多电脑列表；阶段 2 已接入 broker /events SSE 流式透传与手机实时渲染（文本增量/思考/工具活动），发送后可实时看到 Agent 运作；附件能力已升级为多图（≤4）+ 任意文件（≤3，8MB）经 `POST /upload` 暂存后随 prompt 发送；反向已支持电脑→手机发送：任意工作区文件（≤64 MiB）经 `GET /files/download` 原样下发，工作区浏览、聊天路径卡片与工具活动条均可点击接收并用系统预览打开；手机侧边栏已支持长按空间弹出菜单远程关闭工作区（双端同步移除、不删文件、下次刷新不再显示，需重打包 Desktop 后生效）。真机相机扫码配对全流程、流式与附件真机验收待完成。见 [阶段 0 验证记录](docs/phase-0.md)、[USB 真机联调](docs/usb.md) 与 [LAN 配对](docs/lan.md)。  
+> 状态：已验证 Pi CLI RPC、鸿蒙 USB 真机聊天与停止、多标签切换、适配版 Desktop 的原生历史打开和新建、项目恢复及双端交互。阶段 1 已实现 HTTPS LAN 配对、撤销、UDP 发现及 HUKS 多电脑列表；阶段 2 已接入 broker /events SSE 流式透传与手机实时渲染（文本增量/思考/工具活动），发送后可实时看到 Agent 运作；附件能力已升级为多图（≤4）+ 任意文件（≤3，8MB）经 `POST /upload` 暂存后随 prompt 发送；反向已支持电脑→手机发送：任意工作区文件（≤64 MiB）经 `GET /files/download` 原样下发，工作区浏览、聊天路径卡片与工具活动条均可点击接收并用系统预览打开；手机侧边栏已支持长按空间弹出菜单远程关闭工作区（双端同步移除、不删文件、下次刷新不再显示，需重打包 Desktop 后生效）；聊天输入已支持 `/` 唤起命令面板并列出/调用当前会话的技能、提示词模板与扩展命令（`/skill:名字 参数`）。真机相机扫码配对全流程、流式与附件真机验收待完成。见 [阶段 0 验证记录](docs/phase-0.md)、[USB 真机联调](docs/usb.md) 与 [LAN 配对](docs/lan.md)。  
 > 更新日期：2026-11-21  
 > 项目目标：通过鸿蒙手机安全地连接 Pi Desktop，查看、恢复和控制电脑上的 Pi coding agent 会话。  
 > 异地访问：已加入独立的 VPS 公网 IPv4 与 SSH 反向隧道入口，待实际 VPS 和鸿蒙蜂窝网络联调。见 [公网配对](docs/remote.md)。
@@ -68,7 +68,7 @@ Pi Go 扩展桥部署在电脑上，由 Pi Desktop 加载。它通过 Pi 的扩�
 | 凭证安全、自动重连 | 复用 HUKS AES-GCM 本地加密、设备凭证和重连状态机 | 不将配对票据、Cookie 或密钥写入日志 |
 | Pi 会话浏览 | 扩展读取 Pi 原生会话目录，提供跨项目索引、搜索和分页 | 需验证会话索引与 Pi Desktop 当前会话的路径/名称一致 |
 | 新建、恢复、历史、重命名、分叉、归档、置顶 | 优先走 Pi 官方扩展/RPC 会话操作；Pi 未提供的手机侧状态放 Bridge 元数据 | 恢复同一文件的并发写入必须有占用状态和控制权规则 |
-| 聊天、模型选择、thinking level、停止和实时流 | Pi Extension API / RPC；WebSocket 转发文本、工具、运行、错误和结束事件 | Pi Desktop 版本变化要回归事件顺序和重复/丢失恢复 |
+| 聊天、模型选择、thinking level、停止和实时流 | Pi Extension API / RPC；WebSocket 转发文本、工具、运行、错误和结束事件；手机输入 `/` 唤起命令面板，经 `GET /commands` 列出当前会话可用命令（扩展命令、提示词模板与 `skill:` 技能），发送 `/skill:名字 参数` 等命令时由扩展开启输入展开（未知命令拒收、命令不允许附件） | Pi Desktop 版本变化要回归事件顺序和重复/丢失恢复 |
 | 图片、附件、草稿、引用、Markdown | 图片（最多 4 张，单张 ≤512KB JPEG）经 `POST /upload` 暂存后随 prompt 以 token 引用，走 Pi 图像输入；普通文件（最多 3 个，单个 ≤8MB）同样暂存到会话工作区 `.pi-go/attachments/`，prompt 自动附上路径引用，交由 Pi 工作流读取 | 暂存内容寻址幂等，14 天自动清理；上传限流、内容类型检查（图片仍验证 JPEG 尺寸/大小）；文本上限 12000 字节 |
 | 审批、选择题、自定义回答、多端竞争 | 扩展 UI 请求经 Bridge 转成手机卡片，再回传响应；必要时扩展拦截工具调用 | 普通 Pi 工具是否全部要求人工确认，不能从 DSH 行为推定，需分清交互问答与工具审批 |
 | 插件管理 | 管理 Pi 扩展、包、技能、提示词和模型支持的资源 | 不等同于 DSH `pluginManager`；安装包来源、启停、重载和升级结果需适配 Pi 包机制 |
@@ -92,7 +92,8 @@ HTTP 适合请求/响应操作，WebSocket 适合持续事件。所有操作携�
 | `POST /api/v1/sessions` | 在指定项目新建会话 |
 | `POST /api/v1/sessions/:id/open` | 打开或恢复已有会话 |
 | `GET /api/v1/sessions/:id/history` | 读取历史和分页游标 |
-| `POST /api/v1/sessions/:id/prompt` | 文字/图片输入，明确队列行为 |
+| `POST /api/v1/sessions/:id/prompt` | 文字/图片输入，明确队列行为；`/命令` 文本经白名单校验后展开（技能/模板/扩展命令） |
+| `GET /api/v1/commands` | 当前会话可用的扩展命令、提示词模板与技能命令列表 |
 | `POST /api/v1/sessions/:id/upload` | 手机附件原始字节上传，返回内容寻址 token |
 | `POST /api/v1/sessions/:id/abort` | 中断运行 |
 | `POST /api/v1/sessions/:id/model` | 选择模型及 thinking level |
@@ -102,9 +103,9 @@ HTTP 适合请求/响应操作，WebSocket 适合持续事件。所有操作携�
 
 WebSocket 事件至少包括 `ready`、`session/status`、`message/delta`、`message/final`、`tool/start`、`tool/update`、`tool/end`、`interaction/requested`、`session/changed`、`error` 和带游标的 `snapshot`。重连后先取状态/历史基线，再处理新的增量；不要将实时流当作唯一历史来源。
 
-Pi 在运行中收到新消息时，需要手机明确选择“引导当前任务（steer）”或“当前完成后再处理（follow-up）”。不自动重发超时消息；超时状态保留草稿，并通过请求编号核对桥接转发记录。
+Pi 在运行中时，手机在草稿为空时显示停止键，有文字或附件时显示发送键，发送默认使用 `steer`。`/events` 的 `session/status` 帧在运行开始就携带 `runId/queued`，排队成功后 `queue/status` 帧即时回传排队状态（旧版手机端忽略新帧），排队消耗与会话状态仍由 `/chat` 轮询兜底。发送超时会保留草稿，可通过请求编号核对桥接转发记录。
 
-当前 USB/LAN 桥已接入这两种原生投递模式，并提供运行时请求编号核对；回执只表示桥已转发，不代表模型已处理。
+当前 USB/LAN 桥支持 `steer` 和 `followUp`，并提供运行时请求编号核对。回执确认桥接转发，模型处理进度由会话状态和事件提供。
 
 手机已支持相册多选（最多 4 张）、拍照、缩放和发送多张 JPEG（草稿栏缩略图/文件芯片预览、可逐个移除），任意文件（最多 3 个，单个 8MB 内）经系统文件选择器发送；附件先上传到桥的 `POST /upload`（原始字节、内容寻址幂等、暂存在会话工作区 `.pi-go/attachments/`、14 天自动清理），再随 prompt 以 token 引用，文件路径自动附在消息里交给 Pi 读取；单张 JPEG 直发曾在真机验证，多图/文件已在离线 Pi RPC 集成测试中覆盖图片、文件、去重、越权名清洗、超限拒绝与错误分支，多图与文件真机验收待完成。发送框已按微信式交互加入「按住说话」：Core Speech Kit 离线中文语音转文字，松开即转文字发送、上滑取消、60 秒上限，忙时可转文字后选引导/补发。语音输入与拍照入口待真机验收。聊天中已显示附件数量，图片回看及导出仍待实现。
 
