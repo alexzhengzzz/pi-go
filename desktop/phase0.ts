@@ -10,7 +10,8 @@ import { ipcDirectory, localRequest, workerSocket } from "./local-ipc.mjs";
 import { pairingRuntime } from "./pairing-runtime.mjs";
 import { localLanAddress } from "./lan-tls.mjs";
 import { maxPromptBody, validPromptImage, validPromptImageBuffer, stageAttachment, stagedAttachment, safeAttachmentName,
-  maxHistoryImageBase64, maxImageBytes, maxFileBytes, maxImagesPerPrompt, maxFilesPerPrompt } from "./attachments.mjs";
+  promptAttachments, maxImageBytes, maxFileBytes } from "./attachments.mjs";
+import { imageParts, messageText, messageTextSlice, reply, replyImage, toolDetail, toolDetails, toolResultText } from "./message-view.mjs";
 
 const host = "127.0.0.1";
 const maxBody = 16 * 1024;
@@ -33,74 +34,6 @@ const modelRow = (model: ModelLike) =>
 
 type LiveToolStatus = { id: string; name: string; detail: string; state: "unknown" | "run" | "ok" | "fail"; ms?: number };
 type ToolActivity = { summary: LiveToolStatus; args: unknown; result?: unknown };
-type ImagePart = { type: "image"; mimeType: string; data: string };
-
-function imageParts(content: unknown): ImagePart[] {
-  return Array.isArray(content) ? content.filter((part): part is ImagePart => part?.type === "image") : [];
-}
-
-function replyImage(response: ServerResponse, content: unknown, index: number) {
-  const part = imageParts(content)[index];
-  if (!part) return reply(response, 404, { error: "image_not_found" });
-  const { mimeType, data } = part;
-  if (typeof mimeType !== "string" || !/^image\/(?:jpeg|png|gif|webp|bmp|heic|heif|avif|tiff)$/i.test(mimeType) ||
-    typeof data !== "string" || !data.length) return reply(response, 415, { error: "unsupported_image" });
-  if (data.length > maxHistoryImageBase64) return reply(response, 413, { error: "image_too_large" });
-  return reply(response, 200, { image: { mimeType: mimeType.toLowerCase(), data } });
-}
-
-function messageText(content: unknown): string {
-  if (typeof content === "string") return content;
-  return Array.isArray(content) ? content.flatMap((part) =>
-    part?.type === "text" && typeof part.text === "string" ? [part.text] : []).join("\n") : "";
-}
-
-function messageTextSlice(text: string, offset: number, length: number): string {
-  const end = offset + length;
-  const chunk = text.slice(offset, end);
-  // Keep UTF-16 surrogate pairs together across response boundaries.
-  return end < text.length ? chunk.replace(/[\uD800-\uDBFF]$/, "") : chunk;
-}
-
-function toolResultText(result: unknown, separateImages: boolean): string {
-  const content = (result as { content?: unknown })?.content;
-  if (!Array.isArray(content)) return "";
-  return content.map((part) => {
-    if (part?.type === "text" && typeof part.text === "string") return part.text;
-    if (part?.type === "image" && !separateImages) return "［图片输出］";
-    return undefined;
-  }).filter((text) => text !== undefined).join("\n");
-}
-
-function toolDetails(activity: ToolActivity, separateImages: boolean) {
-  const args = activity.args as { command?: unknown; path?: unknown } | undefined;
-  const command = activity.summary.name === "bash" && typeof args?.command === "string" ? args.command : undefined;
-  const input = command ?? (args === undefined ? "" : JSON.stringify(args, null, 2) ?? "");
-  const output = toolResultText(activity.result, separateImages);
-  const limit = 64 * 1024;
-  return {
-    input: input.slice(0, limit), output: output.slice(0, limit),
-    command: command !== undefined, truncated: input.length > limit || output.length > limit,
-    state: activity.summary.state,
-    imageCount: imageParts((activity.result as { content?: unknown })?.content).length,
-    path: typeof args?.path === "string" && args.path.length <= 2048 ? args.path : undefined,
-  };
-}
-
-const toolDetail = (args: unknown): string => {
-  if (!args || typeof args !== "object") return "";
-  const record = args as Record<string, unknown>;
-  for (const key of ["command", "path", "file", "pattern", "query", "url", "prompt", "description", "name"]) {
-    const value = record[key];
-    if (typeof value === "string" && value.trim()) return value.replace(/\s+/g, " ").trim().slice(0, 120);
-  }
-  try { return JSON.stringify(record).slice(0, 120); } catch { return ""; }
-};
-
-function reply(response: ServerResponse, status: number, value: object) {
-  response.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store" });
-  response.end(JSON.stringify(value));
-}
 
 async function body(request: IncomingMessage, limit = maxBody) {
   if (request.headers["content-type"] !== "application/json") throw new Error();
@@ -132,22 +65,6 @@ async function rawBody(request: IncomingMessage, limit: number): Promise<Buffer>
 }
 
 type PromptContentPart = { type: "text"; text: string } | { type: "image"; mimeType: string; data: string };
-type PromptAttachment = { token: string; kind: "image" | "file" };
-
-function promptAttachments(value: unknown): PromptAttachment[] | undefined {
-  if (value === undefined) return [];
-  if (!Array.isArray(value)) return undefined;
-  const items: PromptAttachment[] = [];
-  for (const entry of value) {
-    if (!entry || typeof entry !== "object" || Array.isArray(entry) || typeof entry.token !== "string" ||
-      !/^[a-f0-9]{16}$/.test(entry.token) || (entry.kind !== "image" && entry.kind !== "file")) return undefined;
-    if (!items.some((item) => item.kind === entry.kind && item.token === entry.token))
-      items.push({ token: entry.token, kind: entry.kind });
-  }
-  if (items.filter((item) => item.kind === "image").length > maxImagesPerPrompt) return undefined;
-  if (items.filter((item) => item.kind === "file").length > maxFilesPerPrompt) return undefined;
-  return items;
-}
 
 function createProbe() {
   let runtime: { pi: ExtensionAPI; ctx: ExtensionContext } | undefined;

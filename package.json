@@ -8,6 +8,7 @@
     "desktop/local-ipc.mjs",
     "desktop/broker.mjs",
     "desktop/attachments.mjs",
+    "desktop/message-view.mjs",
     "desktop/session-metadata.mjs",
     "desktop/workspace-files.mjs",
     "desktop/lan-tls.mjs",

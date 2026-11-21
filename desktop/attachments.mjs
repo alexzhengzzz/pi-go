@@ -120,3 +120,19 @@ export function stagedAttachment(cwd, token) {
   if (info === undefined || !info.isFile() || info.size > maxFileBytes) return undefined;
   return { token, path, name: found, size: info.size };
 }
+
+// 手机 prompt 附件列表校验:去重、限数,返回 { token, kind } 列表或 undefined 表示非法。
+export function promptAttachments(value) {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) return undefined;
+  const items = [];
+  for (const entry of value) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry) || typeof entry.token !== 'string' ||
+      !/^[a-f0-9]{16}$/.test(entry.token) || (entry.kind !== 'image' && entry.kind !== 'file')) return undefined;
+    if (!items.some((item) => item.kind === entry.kind && item.token === entry.token))
+      items.push({ token: entry.token, kind: entry.kind });
+  }
+  if (items.filter((item) => item.kind === 'image').length > maxImagesPerPrompt) return undefined;
+  if (items.filter((item) => item.kind === 'file').length > maxFilesPerPrompt) return undefined;
+  return items;
+}

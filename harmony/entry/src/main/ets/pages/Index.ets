@@ -20,6 +20,9 @@ import { APPEARANCE_MODES, AppearanceMode, THEME_STYLES, ThemeStyle, appearanceM
 import { HuaweiProfile, authorizeHuaweiProfile, isHuaweiProfileCurrent } from '../HuaweiProfile';
 import { AccountSync, CloudComputer, SyncRow, SyncSnapshot, SYNC_MODE, SYNC_THEME, computerSyncRow } from '../AccountSync';
 import { immersiveSurface } from '../Immersive';
+import { HISTORY_IMAGE_EXTENSIONS, isImageFile, markdownWorkspacePath, messageFileChips, normalizeWorkspacePath, safeLocalFileName, textPreviewFormat } from '../ChatPaths';
+import { decodePairingBundle, validSecureAddress, validUsb } from '../PairingCode';
+import { connectionLabel, validCompanion } from '../CompanionCheck';
 
 interface ModelOption {
   provider: string;
@@ -275,14 +278,6 @@ interface QueuedSteering {
   files: string[];
 }
 
-interface SecurePairingBundle {
-  url: string;
-  ticket: string;
-  ca: string;
-  pin: string;
-  transport?: string;
-}
-
 const MAX_COMPUTERS = 12;
 const MAX_IMAGE_ATTACHMENTS = 4;
 const MAX_TOTAL_IMAGE_DRAFTS = 8;
@@ -298,135 +293,8 @@ const MAX_DOWNLOAD_BYTES = 64 * 1024 * 1024;
 const MAX_INLINE_IMAGE_BYTES = 8 * 1024 * 1024;
 const SPLIT_WINDOW_WIDTH = 600;
 const SHORT_WINDOW_HEIGHT = 480;
-const HISTORY_IMAGE_EXTENSIONS = ['.jpeg', '.png', '.gif', '.webp', '.bmp', '.heic', '.heif', '.avif', '.tiff'];
 const MAX_DOWNLOAD_ERROR_BYTES = 4096;
 const MAX_TEXT_PREVIEW_BYTES = 128 * 1024;
-
-function textPreviewFormat(name: string): string {
-  if (/\.(?:md|markdown|mdown)$/i.test(name)) return 'markdown';
-  if (/\.(?:txt|text|log|csv|tsv|json|jsonl|yaml|yml|toml|ini|conf|cfg|xml|sql|sh|py|js|mjs|ts|ets|css|swift|java|go|rs|c|h|cpp|hpp)$/i.test(name) ||
-    /^(?:readme|license|notice|changelog|dockerfile|makefile|\.gitignore|\.editorconfig)$/i.test(name)) return 'text';
-  return '';
-}
-
-function isImageFile(name: string): boolean {
-  return /\.(?:jpe?g|png|gif|webp|bmp|heic|heif|avif|tiff?|svg|ico)$/i.test(name);
-}
-
-function markdownWorkspacePath(target: string, cwd: string, documentPath: string): string {
-  const path = target.split(/[?#]/)[0];
-  try {
-    const decoded = decodeURIComponent(path);
-    if (!decoded || /^[a-z][a-z0-9+.-]*:/i.test(decoded)) return '';
-    if (decoded.startsWith('/')) return normalizeWorkspacePath(cwd, decoded);
-    if (decoded.startsWith('~') || /[\\\u0000-\u001f]/.test(decoded)) return '';
-    const parts = documentPath ? documentPath.split('/').slice(0, -1) : [];
-    for (const part of decoded.split('/')) {
-      if (!part || part === '.') continue;
-      if (part === '..') {
-        if (!parts.length) return '';
-        parts.pop();
-      } else parts.push(part);
-    }
-    return normalizeWorkspacePath(cwd, parts.join('/'));
-  } catch { return ''; }
-}
-
-function validUsb(address: string): boolean {
-  const match = /^http:\/\/127\.0\.0\.1:(\d{1,5})$/.exec(address);
-  return match !== null && Number(match[1]) >= 1 && Number(match[1]) <= 65535 && String(Number(match[1])) === match[1];
-}
-
-// 沙箱文件名只保留安全字符，并压制长度，避免电脑端文件名带进手机存储异常字符。
-function safeLocalFileName(name: string): string {
-  const cleaned = name.replace(/[^A-Za-z0-9._-]/g, '_').slice(-80).replace(/^[._-]+/, '_').trim();
-  return cleaned || 'file';
-}
-
-function normalizeWorkspacePath(cwd: string, path: string): string {
-  if (!cwd || !path || path.length > 2048 || /[\\\u0000-\u001f]/.test(path) ||
-    /^[a-z][a-z0-9+.-]*:/i.test(path) || path.startsWith('//') || path.startsWith('~')) return '';
-  let candidate = path;
-  if (candidate.startsWith('/')) {
-    const root = cwd.endsWith('/') ? cwd : `${cwd}/`;
-    if (!root.startsWith('/') || !candidate.startsWith(root)) return '';
-    candidate = candidate.slice(root.length);
-  }
-  const parts: string[] = [];
-  for (const part of candidate.split('/')) {
-    if (!part || part === '.') continue;
-    if (part === '..') return '';
-    parts.push(part);
-  }
-  return parts.join('/');
-}
-
-function messageFileChips(text: string, cwd: string): string[] {
-  if (!text || !cwd) return [];
-  const chips: string[] = [];
-  // 保留 Markdown 目标及引号内的空格，仅剥离普通文本中的句末标点。
-  const references = /\[[^\]\n]*\]\(\s*(?:<([^>\n]+)>|([^\s)]+))(?:\s+["'][^\n]*?["'])?\s*\)|`+([^`\n]+)`+|"([^"\n]+)"|'([^'\n]+)'|([^\s`'"()<>\[\]{}|，。；、！？（）〔〕「」『』]+)/g;
-  let match = references.exec(text);
-  while (match && chips.length < 4) {
-    const destination = match[1] ?? match[2];
-    const inlineImage = destination !== undefined && text[match.index - 1] === '!';
-    let token = destination ?? match[3] ?? match[4] ?? match[5] ?? match[6].replace(/[.,;:!?]+$/, '');
-    match = references.exec(text);
-    if (inlineImage) continue;
-    if (destination !== undefined) {
-      try { token = decodeURIComponent(destination); } catch { continue; }
-    }
-    if (!/\.[A-Za-z0-9]{1,10}$/.test(token)) continue;
-    const path = normalizeWorkspacePath(cwd, token);
-    if (path && !chips.includes(path)) chips.push(path);
-  }
-  return chips;
-}
-
-function validCompanion(record: Companion): boolean {
-  return !!record && typeof record.address === 'string' && typeof record.token === 'string' && /^[a-f0-9]{64}$/.test(record.token) &&
-    (validUsb(record.address) || (typeof record.ca === 'string' && typeof record.pin === 'string' &&
-      (validSecureAddress(record.address, record.ca, record.pin, false) ||
-        validSecureAddress(record.address, record.ca, record.pin, true))));
-}
-
-function decodePairingBundle(value: string, remote: boolean): SecurePairingBundle {
-  const encoded = value.trim().replace(/\s/g, '');
-  if (!/^[a-zA-Z0-9_-]{100,4096}$/.test(encoded)) throw new Error('invalid_bundle');
-  const raw = encoded.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(encoded.length / 4) * 4, '=');
-  const bytes = new util.Base64Helper().decodeSync(raw);
-  const bundle = JSON.parse(new util.TextDecoder('utf-8').decodeWithStream(bytes)) as SecurePairingBundle;
-  if (typeof bundle.url !== 'string' || typeof bundle.ca !== 'string' || typeof bundle.pin !== 'string' ||
-    (remote ? bundle.transport !== 'remote' : bundle.transport !== undefined) ||
-    typeof bundle.ticket !== 'string' || !validSecureAddress(bundle.url, bundle.ca, bundle.pin, remote) ||
-    !/^[a-f0-9]{64}$/.test(bundle.ticket)) throw new Error('invalid_bundle');
-  return bundle;
-}
-
-function validSecureAddress(url: string, ca: string, pin: string, remote: boolean): boolean {
-  const match = /^https:\/\/(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(?::(\d{1,5}))?$/.exec(url);
-  if (!match || (!remote && !match[5]) ||
-    (match[5] && (Number(match[5]) < 1024 || Number(match[5]) > 65535 || String(Number(match[5])) !== match[5])) ||
-    ca.length > 2000 || !/^-----BEGIN CERTIFICATE-----\n[A-Za-z0-9+/=\n]+-----END CERTIFICATE-----\n?$/.test(ca) ||
-    !/^[A-Za-z0-9+/]{43}=$/.test(pin)) return false;
-  if (!match.slice(1, 5).every((part: string): boolean => Number(part) <= 255 && String(Number(part)) === part)) return false;
-  const first = Number(match[1]);
-  const second = Number(match[2]);
-  const third = Number(match[3]);
-  const lan = first === 10 || (first === 172 && second >= 16 && second <= 31) || (first === 192 && second === 168);
-  if (!remote) return lan;
-  return !lan && first > 0 && first < 224 && first !== 127 &&
-    !(first === 100 && second >= 64 && second <= 127) &&
-    !(first === 169 && second === 254) &&
-    !(first === 192 && ((second === 0 && (third === 0 || third === 2)) || (second === 88 && third === 99))) &&
-    !(first === 198 && (second === 18 || second === 19 || (second === 51 && third === 100))) &&
-    !(first === 203 && second === 0 && third === 113);
-}
-
-function connectionLabel(record: Companion): string {
-  if (validUsb(record.address)) return 'USB';
-  return record.ca && record.pin && validSecureAddress(record.address, record.ca, record.pin, true) ? '公网' : 'Wi-Fi';
-}
 
 class CachePaintFrame extends FrameCallback {
   private started: number;

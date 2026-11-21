@@ -4,10 +4,11 @@ import { stripTypeScriptTypes } from 'node:module';
 import { test } from 'node:test';
 
 const page = readFileSync(new URL('../harmony/entry/src/main/ets/pages/Index.ets', import.meta.url), 'utf8');
+const paths = readFileSync(new URL('../harmony/entry/src/main/ets/ChatPaths.ets', import.meta.url), 'utf8');
 function declaration(name) {
-  const start = page.indexOf(`function ${name}(`);
+  const start = paths.indexOf(`function ${name}(`);
   assert.ok(start >= 0);
-  return page.slice(start, page.indexOf('\n}', start) + 2);
+  return paths.slice(start, paths.indexOf('\n}', start) + 2);
 }
 const { messageFileChips, normalizeWorkspacePath, markdownWorkspacePath } = new Function(stripTypeScriptTypes(
   ['normalizeWorkspacePath', 'messageFileChips', 'markdownWorkspacePath'].map(declaration).join('\n')

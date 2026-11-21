@@ -19,8 +19,13 @@ const project = fileURLToPath(new URL('../', import.meta.url));
 const helper = fileURLToPath(new URL('../desktop/pairing-control.mjs', import.meta.url));
 
 test('phone accepts pairing bundles only in the matching network mode', async () => {
-  const page = await readFile(new URL('../harmony/entry/src/main/ets/pages/Index.ets', import.meta.url), 'utf8');
-  const source = page.slice(page.indexOf('function decodePairingBundle('), page.indexOf('function connectionLabel('));
+  const pairingSource = await readFile(new URL('../harmony/entry/src/main/ets/PairingCode.ets', import.meta.url), 'utf8');
+  const declaration = (name) => {
+    const start = pairingSource.indexOf(`function ${name}(`);
+    assert.ok(start >= 0, `function ${name} not found in PairingCode.ets`);
+    return pairingSource.slice(start, pairingSource.indexOf('\n}', start) + 2);
+  };
+  const source = ['validSecureAddress', 'decodePairingBundle'].map(declaration).join('\n');
   const decode = new Function('util', stripTypeScriptTypes(source) + '\nreturn decodePairingBundle;')({
     Base64Helper: class { decodeSync(value) { return Buffer.from(value, 'base64'); } },
     TextDecoder: class { decodeWithStream(bytes) { return bytes.toString('utf8'); } },
