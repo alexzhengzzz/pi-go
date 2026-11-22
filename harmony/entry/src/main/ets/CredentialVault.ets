@@ -1,14 +1,11 @@
-import { common } from '@kit.AbilityKit';
+import type { common } from '@kit.AbilityKit';
 import { preferences } from '@kit.ArkData';
 import { util } from '@kit.ArkTS';
-import { BusinessError } from '@kit.BasicServicesKit';
+import type { BusinessError } from '@kit.BasicServicesKit';
 import { cryptoFramework } from '@kit.CryptoArchitectureKit';
 import { huks } from '@kit.UniversalKeystoreKit';
-
-// Sidebar UI choices worth remembering between launches; plain state, no secrets.
-export const SIDEBAR_VIEWS: string[] = ['all', 'pinned', 'recent', 'archived'];
-export const SIDEBAR_MAX_EXPANDED = 100;
-export const SIDEBAR_MAX_ENTRIES = 24;
+import { SIDEBAR_MAX_ENTRIES, SIDEBAR_MAX_EXPANDED, SIDEBAR_VIEWS } from './model/SessionStore';
+import type { SidebarBook, SidebarEntry, SidebarState } from './model/SessionStore';
 
 export interface Companion {
   address: string;
@@ -23,21 +20,6 @@ export interface ComputerBook {
   version: number;
   active: string;
   computers: Companion[];
-}
-
-export interface SidebarState {
-  expandedSpaces: string[];
-  sessionView: string;
-}
-
-export interface SidebarEntry {
-  address: string;
-  state: SidebarState;
-}
-
-export interface SidebarBook {
-  version: number;
-  entries: SidebarEntry[];
 }
 
 interface StoredCompanions {

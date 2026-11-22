@@ -2,8 +2,9 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { stripTypeScriptTypes } from 'node:module';
 import { test } from 'node:test';
+import { pageSource } from './harmony-source.mjs';
 
-const page = readFileSync(new URL('../harmony/entry/src/main/ets/pages/Index.ets', import.meta.url), 'utf8');
+const page = pageSource();
 function method(name) {
   const start = page.search(new RegExp(`  private (?:async )?${name}\\(`));
   assert.ok(start >= 0);

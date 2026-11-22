@@ -1,3 +1,16 @@
+import { CommandList, CommandState, commandDraft, skillDraft } from '../model/CommandState';
+import { ConnectionManager, PairingRequest } from '../model/ConnectionManager';
+import { ChatState } from '../model/ChatState';
+import { SessionCatalog, SessionStore, SIDEBAR_VIEWS, SidebarBook, workspaceName } from '../model/SessionStore';
+import { headerSymbol } from '../components/HeaderSymbol';
+import { PiGoClient } from '../model/PiGoClient';
+import { ScheduleOverlay } from '../components/ScheduleOverlay';
+import { TaskPanel } from '../components/TaskPanel';
+import { SettingsView } from '../components/SettingsView';
+import { WorkspaceFiles } from '../components/WorkspaceFiles';
+import { SessionSidebar } from '../components/SessionSidebar';
+import { ChatComposer } from '../components/ChatComposer';
+import { ChatTranscript } from '../components/ChatTranscript';
 import { KeyboardAvoidMode, window } from '@kit.ArkUI';
 import { inputMethod } from '@kit.IMEKit';
 import { ChatContent } from '../ChatContent';
@@ -11,368 +24,30 @@ import { fileIo, fileUri, picker } from '@kit.CoreFileKit';
 import { cryptoFramework } from '@kit.CryptoArchitectureKit';
 import { filePreview } from '@kit.PreviewKit';
 import { BusinessError, pasteboard } from '@kit.BasicServicesKit';
-import { Companion, CredentialVault, SIDEBAR_MAX_EXPANDED, SIDEBAR_MAX_ENTRIES, SIDEBAR_VIEWS, SidebarBook, SidebarEntry, SidebarState } from '../CredentialVault';
-import { discoverLan } from '../LanDiscovery';
+import { Companion, CredentialVault } from '../CredentialVault';
 import { choosePromptImage, capturePromptImage, PromptImage } from '../PromptImage';
-import { choosePromptFiles, PromptFile, MAX_FILES } from '../PromptFile';
+import { choosePromptFiles, MAX_FILES } from '../PromptFile';
 import { ensureMicrophone, VoiceInputSession, voiceInputSupported } from '../VoiceInput';
-import { APPEARANCE_MODES, AppearanceMode, THEME_STYLES, ThemeStyle, appearanceMode, openSettings, themeStyle } from '../Appearance';
+import { AppearanceMode, ThemeStyle, appearanceMode, openSettings, themeStyle } from '../Appearance';
 import { HuaweiProfile, authorizeHuaweiProfile, isHuaweiProfileCurrent } from '../HuaweiProfile';
 import { AccountSync, CloudComputer, SyncRow, SyncSnapshot, SYNC_MODE, SYNC_THEME, computerSyncRow } from '../AccountSync';
-import { immersiveSurface } from '../Immersive';
-import { HISTORY_IMAGE_EXTENSIONS, isImageFile, markdownWorkspacePath, messageFileChips, normalizeWorkspacePath, safeLocalFileName, textPreviewFormat } from '../ChatPaths';
-import { decodePairingBundle, validSecureAddress, validUsb } from '../PairingCode';
-import { SequencedFrame, SessionSync, SyncCursor } from '../SessionSync';
+import { immersiveSurface, glassButtonSurface, immersiveFloatingTabs } from '../Immersive';
+import { HISTORY_IMAGE_EXTENSIONS, isImageFile, markdownWorkspacePath, normalizeWorkspacePath, safeLocalFileName,
+  textPreviewFormat } from '../ChatPaths';
+import { decodePairingBundle, validUsb } from '../PairingCode';
 import { connectionLabel, validCompanion } from '../CompanionCheck';
-import { ComputerGroup, computerGroupId, computerGroups, computerGroupTitle, moveComputerConnection, renameComputerGroup, withComputerAssignment } from '../ComputerGroups';
+import { ComputerGroup, computerGroupId, computerGroups, computerGroupTitle, moveComputerConnection, renameComputerGroup } from '../ComputerGroups';
 import { liveActivity } from '../LiveActivity';
-import { ScheduleJob, ScheduleRun, ScheduleWatch, RunMessage, scheduleTime, parseScheduleTime,
-  scheduleRunStatus, scheduleRunReason } from '../ScheduledRuns';
+import { ScheduleJob, ScheduleRun, ScheduleWatch, RunMessage, scheduleTime, parseScheduleTime, scheduleRunStatus, isCurrentScheduleComputer } from '../ScheduledRuns';
 
-interface ModelOption {
-  provider: string;
-  id: string;
-  name: string;
-  image: boolean;
-  levels: string[];
-  thinkingLevel?: string;
-}
-
-interface BridgeEndpoint {
-  address: string;
-  token: string;
-  ca?: string;
-  pin?: string;
-}
-
-interface SessionState {
-  id: string;
-  cwd: string;
-  name?: string;
-  idle: boolean;
-  runId?: string | null;
-  queued?: boolean;
-  acceptsImage?: boolean;
-  model?: ModelOption;
-  thinkingLevel?: string;
-}
-
-interface SessionRow {
-  revision: number;
-  pinned?: boolean;
-  archived?: boolean;
-  lastVisited?: string;
-  id: string;
-  name?: string;
-  cwd?: string;
-  active?: boolean;
-  occupied?: boolean;
-  modified: string;
-  messageCount: number;
-}
-
-interface SidebarRow {
-  key: string;
-  path?: string;
-  session?: SessionRow;
-  nested: boolean;
-}
-
-class SidebarRows implements IDataSource {
-  private rows: SidebarRow[] = [];
-  private listeners: DataChangeListener[] = [];
-
-  totalCount(): number { return this.rows.length; }
-  getData(index: number): SidebarRow { return this.rows[index]; }
-  registerDataChangeListener(listener: DataChangeListener): void { this.listeners.push(listener); }
-  unregisterDataChangeListener(listener: DataChangeListener): void {
-    this.listeners = this.listeners.filter((item: DataChangeListener): boolean => item !== listener);
-  }
-  replace(rows: SidebarRow[]): void {
-    if (this.rows.length === rows.length && this.rows.every((row: SidebarRow, index: number): boolean => row.key === rows[index].key)) return;
-    this.rows = rows;
-    for (const listener of this.listeners) listener.onDataReloaded();
-  }
-  anchor(sessionId: string, workspace: string): number {
-    const session = this.rows.findIndex((row: SidebarRow): boolean => row.session?.id === sessionId);
-    return session >= 0 ? session : this.rows.findIndex((row: SidebarRow): boolean => row.path === workspace);
-  }
-}
-
-interface ChatMessage {
-  id: string;
-  role: string;
-  text: string;
-  textTruncated?: boolean;
-  imageCount?: number;
-  thinking?: string;
-  thinkingMs?: number;
-  tools?: LiveTool[];
-}
-
-interface DraftAttachment {
-  kind: string;
-  name: string;
-  size: number;
-  image?: PromptImage;
-  file?: PromptFile;
-}
-
-interface AttachmentRef {
-  token: string;
-  kind: string;
-}
-
-interface UploadedAttachment {
-  token: string;
-  kind?: string;
-  name?: string;
-  size?: number;
-  path?: string;
-}
-
-interface LiveTool {
-  id: string;
-  name: string;
-  detail: string;
-  state: string;
-  ms?: number;
-}
-
-interface ToolDetails {
-  input: string;
-  output: string;
-  command: boolean;
-  imageCount?: number;
-  truncated: boolean;
-  state: string;
-  path?: string;
-}
-
-interface CommandRow {
-  name: string;
-  description?: string;
-  source?: string;
-  invoke?: string;
-}
-
-interface ReceivedFilePreview {
-  name: string;
-  text?: string;
-  markdown?: boolean;
-  localPath?: string;
-  systemUri?: string;
-  imageUri?: string;
-  workspaceRoot?: string;
-  workspacePath?: string;
-  version?: string;
-  offset?: number;
-  nextOffset?: number;
-}
-
-interface MarkdownTableReader {
-  source: string;
-  cwd: string;
-  documentPath: string;
-}
-
-interface StreamFrame extends SequencedFrame {
-  type: string;
-  sessionId?: string;
-  session?: SessionState;
-  idle?: boolean;
-  aborted?: boolean;
-  runId?: string;
-  queued?: boolean;
-  text?: string;
-  seq?: number;
-  thinkingSeq?: number;
-  reason?: string;
-  requestId?: string;
-  tool?: LiveTool;
-  state?: string;
-}
-
-interface PendingInteraction {
-  id: string;
-  method: string;
-  title?: string;
-  message?: string;
-  options?: string[];
-  placeholder?: string;
-  prefill?: string;
-}
-
-interface FileEntry {
-  name: string;
-  path: string;
-  kind: string;
-}
-
-interface FileDirectory {
-  entries: FileEntry[];
-  nextCursor?: number;
-  expanded: boolean;
-}
-
-interface FileTreeRow {
-  path: string;
-  name: string;
-  kind: string;
-  depth: number;
-  expanded?: boolean;
-}
-
-interface RunningRow {
-  id: string;
-  name?: string;
-  cwd?: string;
-  state?: string;
-  started?: boolean;
-}
-
-interface RunNotice {
-  title: string;
-  stopped: boolean;
-}
-
-interface WorkspaceRow {
-  cwd: string;
-  name: string;
-}
-
-interface BridgeReply {
-  source?: string;
-  watching?: boolean;
-  jobs?: ScheduleJob[];
-  runs?: ScheduleRun[];
-  activeRuns?: ScheduleRun[];
-  timezone?: string;
-  cursor?: SyncCursor;
-  historyLeaf?: string | null;
-  attachment?: UploadedAttachment;
-  commands?: CommandRow[];
-  runningSessionIds?: string[];
-  runningSessions?: RunningRow[];
-  idleSessionIds?: string[];
-  path?: string;
-  entries?: FileEntry[];
-  text?: string;
-  version?: string;
-  models?: ModelOption[];
-  current?: ModelOption;
-  dispatched?: boolean;
-  interaction?: PendingInteraction;
-  state?: string;
-  deletedSessionId?: string;
-  desktopHandoff?: boolean; // Bridge field for daemon availability.
-  canCreateWorkspace?: boolean;
-  cwd?: string;
-  projects?: string[];
-  workspaces?: WorkspaceRow[];
-  token?: string;
-  error?: string;
-  session?: SessionState;
-  sessions?: SessionRow[];
-  total?: number;
-  nextCursor?: number;
-  messages?: ChatMessage[];
-  historyCursor?: string;
-  nextTextOffset?: number;
-  liveText?: string;
-  liveSeq?: number;
-  liveThinking?: string;
-  liveThinkSeq?: number;
-  tools?: LiveTool[];
-  toolDetail?: ToolDetails;
-  image?: HistoryImage;
-  promptError?: string;
-}
-
-interface HistoryImage {
-  mimeType: string;
-  data: string;
-}
-
-interface Payload {
-  includeJobs?: boolean;
-  knownRuns?: string[];
-  operation?: string;
-  scheduleVersion?: number;
-  prompt?: string;
-  kind?: string;
-  time?: string;
-  at?: number;
-  interval?: number;
-  catchUp?: number;
-  history?: boolean;
-  path?: string;
-  lookup?: string;
-  cursor?: number;
-  version?: string;
-  revision?: number;
-  pinned?: boolean;
-  archived?: boolean;
-  name?: string;
-  provider?: string;
-  modelId?: string;
-  thinkingLevel?: string;
-  image?: string;
-  attachments?: AttachmentRef[];
-  runId?: string;
-  mode?: string;
-  pendingId?: string;
-  answer?: boolean | string;
-  ticket?: string;
-  cwd?: string;
-  id?: string;
-  requestId?: string;
-  text?: string;
-}
-
-interface PendingSend {
-  requestId: string;
-  text: string;
-  attachments: DraftAttachment[];
-  steeringAfter?: string;
-}
-
-interface QueuedSteering {
-  id: string;
-  sessionKey: string;
-  afterId: string;
-  text: string;
-  imageCount: number;
-  files: string[];
-}
-
-const MAX_COMPUTERS = 12;
-const MAX_IMAGE_ATTACHMENTS = 4;
-const MAX_TOTAL_IMAGE_DRAFTS = 8;
-const MAX_TOTAL_FILE_DRAFTS = 3;
-const USB_ADDRESS = 'http://127.0.0.1:18977';
-const MAX_VOICE_MS = 60000;
-const MIN_HOLD_MS = 400;
-const RECEIVED_FILE_DIR = 'pigo-files';
-const RECEIVED_FILE_TTL_S = 7 * 24 * 3600;
-const STREAM_PAINT_INTERVAL_MS = 32;
-const MAX_LIVE_TEXT_LENGTH = 16000;
-const MAX_DOWNLOAD_BYTES = 64 * 1024 * 1024;
-const MAX_INLINE_IMAGE_BYTES = 8 * 1024 * 1024;
-const SPLIT_WINDOW_WIDTH = 600;
-const SHORT_WINDOW_HEIGHT = 480;
-const MAX_DOWNLOAD_ERROR_BYTES = 4096;
-const MAX_TEXT_PREVIEW_BYTES = 128 * 1024;
-const RUN_NOTICE_SETTING = 'run_completion_notices';
-const LIVE_VIEW_SETTING = 'agent_live_view';
-
-class BridgeFailure extends Error {
-  status: number;
-  constructor(status: number, message: string) {
-    super(message);
-    this.status = status;
-  }
-}
+import { ModelOption, BridgeEndpoint, SessionState, SessionRow, ChatMessage, DraftAttachment, AttachmentRef,
+  UploadedAttachment, LiveTool, ToolDetails, CommandRow, ReceivedFilePreview, MarkdownTableReader, StreamFrame,
+  PendingInteraction, FileEntry, FileDirectory, FileTreeRow, RunningRow, RunNotice, WorkspaceRow, BridgeReply,
+  Payload, PendingSend, QueuedSteering, BridgeFailure } from '../model/PiGoTypes';
+import { MAX_IMAGE_ATTACHMENTS, MAX_TOTAL_IMAGE_DRAFTS, MAX_TOTAL_FILE_DRAFTS, USB_ADDRESS, MAX_VOICE_MS, MIN_HOLD_MS,
+  RECEIVED_FILE_DIR, RECEIVED_FILE_TTL_S, MAX_DOWNLOAD_BYTES, MAX_INLINE_IMAGE_BYTES, SPLIT_WINDOW_WIDTH,
+  SHORT_WINDOW_HEIGHT, MAX_TEXT_PREVIEW_BYTES, RUN_NOTICE_SETTING, LIVE_VIEW_SETTING } from '../model/PiGoConstants';
+import { SidebarRows } from '../model/SidebarRows';
 
 @Extend(Button)
 function chatAction() {
@@ -406,7 +81,7 @@ struct Index {
   @StorageLink('pigoKeyboard') @Watch('onKeyboardChange') keyboardHeight: number = 0;
   @State private showModelMenu: boolean = false;
   @State private currentModel?: ModelOption = undefined;
-  private currentLevel: string = 'off';
+  @State private currentLevel: string = 'off';
   private pendingBottom: boolean = false;
   @State private openingSession: boolean = false;
   @State private openingSessionId: string = '';
@@ -464,7 +139,7 @@ struct Index {
   @State private showComposerMenu: boolean = false;
   @State private showSkillPicker: boolean = false;
   @State private project: string = '';
-  private workspaceCwd: string = '';
+  @State private workspaceCwd: string = '';
   private imageQueue: Promise<void> = Promise.resolve();
   private lastImageCachePrune: number = 0;
   @State private showFiles: boolean = false;
@@ -515,18 +190,15 @@ struct Index {
   private liveSeq: number = 0;
   private liveThinkSeq: number = 0;
   private liveRevision: number = 0;
+  private readonly chatState: ChatState = new ChatState();
   private syncMode: string = 'probe';
-  private readonly sessionSync: SessionSync<StreamFrame> = new SessionSync<StreamFrame>();
   private historyStream: string = '';
   private historyLeaf?: string | null;
   private historyLoadingEpoch?: number;
   private historyRequest: number = 0;
-  private deltaPaintTimer: number = -1;
-  private pendingLiveText: string = '';
-  private pendingLiveThinking: string = '';
   @State private streamAlive: boolean = false;
+  private readonly client: PiGoClient = new PiGoClient();
   private streamReq?: http.HttpRequest = undefined;
-  private streamTimer: number = -1;
   private streamGen: number = 0;
   @State private historyCursor?: string = undefined;
   @State @Watch('updateSidebarRows') private sessions: SessionRow[] = [];
@@ -604,12 +276,9 @@ struct Index {
   @State @Watch('updateSidebarRows') private projects: string[] = [];
   @State @Watch('updateSidebarRows') private workspaces: WorkspaceRow[] = [];
   @State @Watch('updateSidebarRows') private hasWorkspaceDetails: boolean = false;
-  private base: string = '';
-  private token: string = '';
-  private ca?: string;
-  private pin?: string;
+  @State private base: string = '';
+  private readonly connection: ConnectionManager = new ConnectionManager();
   private epoch: number = 0;
-  private timer: number = -1;
   private visible: boolean = false;
   private polling: boolean = false;
   @State private sessionLoading: boolean = false;
@@ -620,15 +289,10 @@ struct Index {
   @State private commandPalette: boolean = false;
   @State private commandsLoading: boolean = false;
   @State private commandError: string = '';
-  private commandRequest: number = 0;
-  private commandsLoadedAt: number = 0;
+  private readonly commandState: CommandState = new CommandState();
   private sessionCatalogVersion: number = 0;
-  private sidebarBook: SidebarBook = { version: 1, entries: [] };
-  private sidebarSaveTimer: number = -1;
+  private readonly sessionStore: SessionStore = new SessionStore();
   private vault?: CredentialVault;
-  private readonly drafts: Map<string, string> = new Map<string, string>();
-  private readonly unconfirmed: Map<string, PendingSend> = new Map<string, PendingSend>();
-  private readonly draftAttachments: Map<string, DraftAttachment[]> = new Map<string, DraftAttachment[]>();
   private readonly transcript: Scroller = new Scroller();
   private transcriptContentHeight: number = 0;
   private transcriptViewport: number = 0;
@@ -636,7 +300,6 @@ struct Index {
   private readonly library: Scroller = new Scroller();
   private readonly sidebarRows: SidebarRows = new SidebarRows();
   private pendingLibraryReveal: boolean = false;
-  private readonly chatCache: Map<string, BridgeReply> = new Map<string, BridgeReply>();
 
   onBackPress(): boolean {
     if (this.markdownTableReader) { this.closeMarkdownTableReader(); return true; }
@@ -721,16 +384,10 @@ struct Index {
     const epoch = this.epoch;
     try {
       this.vault = await CredentialVault.open(context);
-      this.sidebarBook = await this.vault.loadSidebar();
+      this.sessionStore.restoreSidebar(await this.vault.loadSidebar());
       const saved = await this.vault.load();
       if (!saved || epoch !== this.epoch) return;
-      const seen = new Set<string>();
-      this.computers = saved.computers.filter((record: Companion): boolean => {
-        if (!validCompanion(record) || seen.has(record.address)) return false;
-        seen.add(record.address);
-        return true;
-      }).slice(0, MAX_COMPUTERS).map((record: Companion): Companion => record.computerId ? record :
-        withComputerAssignment(record, util.generateRandomUUID(), record.computerName));
+      this.computers = this.connection.restoreComputers(saved.computers, (): string => util.generateRandomUUID());
       const active = this.computers.find((record: Companion): boolean => record.address === saved.active);
       if (active) this.activateComputer(active);
     } catch { this.status = '无法读取已有配对，请重新连接。'; }
@@ -818,11 +475,9 @@ struct Index {
     this.historyStream = '';
     this.historyLeaf = undefined;
     this.base = record.address;
-    this.token = record.token;
+    this.connection.activate(record);
     this.pairingMode = usb ? 'usb' : connectionLabel(record) === '公网' ? 'remote' : 'lan';
     if (usb) this.address = record.address;
-    this.ca = usb ? undefined : record.ca;
-    this.pin = usb ? undefined : record.pin;
     this.ticket = '';
     this.pairingBundle = '';
     this.removeTarget = '';
@@ -855,8 +510,7 @@ struct Index {
   }
 
   private cancelSchedule(): void {
-    if (this.timer !== -1) clearTimeout(this.timer);
-    this.timer = -1;
+    this.connection.cancelPoll();
   }
 
   private stopScheduleSync(): void {
@@ -1210,54 +864,20 @@ struct Index {
   private schedule(delay: number): void {
     this.cancelSchedule();
     if (!this.isPaired || (!this.visible && !this.backgroundLiveActivity())) return;
-    this.timer = setTimeout(() => { void this.poll(); }, delay);
+    this.connection.schedulePoll(delay, (): void => { void this.poll(); });
   }
 
   private async request(path: string, input?: Payload, endpoint?: BridgeEndpoint): Promise<BridgeReply> {
-    const req = http.createHttp();
-    const address = endpoint ? endpoint.address : this.base;
-    const token = endpoint ? endpoint.token : this.token;
-    const ca = endpoint ? endpoint.ca : this.ca;
-    const pin = endpoint ? endpoint.pin : this.pin;
-    const imageRequest = path.startsWith('/message-image?');
-    const remoteCatalog = path.startsWith('/sessions?') && ca !== undefined && pin !== undefined &&
-      validSecureAddress(address, ca, pin, true);
-    const slowRequest = path === '/open' || path === '/new' || path === '/create-workspace' || path === '/close-workspace';
-    const headers: Record<string, string> = {};
-    if (token) headers['Authorization'] = `Bearer ${token}`;
-    if (input) headers['Content-Type'] = 'application/json';
-    try {
-      const opts: http.HttpRequestOptions = {
-        method: input ? http.RequestMethod.POST : http.RequestMethod.GET,
-        header: headers,
-        expectDataType: http.HttpDataType.STRING,
-        usingCache: false,
-        usingProxy: false,
-        maxRedirects: 0,
-        connectTimeout: remoteCatalog ? 6000 : 2500,
-        readTimeout: remoteCatalog ? 20000 : (slowRequest ? 16000 : 6500)
-      };
-      if (ca && pin) {
-        opts.caData = ca;
-        opts.certificatePinning = { hashAlgorithm: 'SHA-256', publicKeyHash: pin };
-      }
-      if (input) opts.extraData = JSON.stringify(input);
-      const response = await req.request(`${address}${path}`, opts);
-      const reply = JSON.parse(response.result as string) as BridgeReply;
-      if (response.responseCode < 200 || response.responseCode >= 300) {
-        throw new BridgeFailure(response.responseCode, reply.error ?? 'request_failed');
-      }
-      return reply;
-    } finally { req.destroy(); }
+    return this.client.request(endpoint ?? this.connection.endpoint(), path, input);
   }
 
   private stopStream(): void {
-    this.sessionSync.disconnect();
+    this.chatState.sync.disconnect();
     this.historyRequest += 1;
     this.historyLoadingEpoch = undefined;
     this.streamGen += 1;
     this.flushStreamDeltas();
-    if (this.streamTimer !== -1) { clearTimeout(this.streamTimer); this.streamTimer = -1; }
+    this.connection.cancelRetry();
     const req = this.streamReq;
     this.streamReq = undefined;
     this.streamAlive = false;
@@ -1265,15 +885,14 @@ struct Index {
   }
 
   private scheduleStream(delay: number): void {
-    if (this.streamTimer !== -1) clearTimeout(this.streamTimer);
-    this.streamTimer = -1;
-    if (!this.isPaired || (!this.visible && !this.backgroundLiveActivity()) || !this.base || !this.token) return;
-    this.streamTimer = setTimeout(() => { this.startStream(); }, delay);
+    this.connection.cancelRetry();
+    if (!this.isPaired || (!this.visible && !this.backgroundLiveActivity()) || !this.base || !this.connection.endpoint().token) return;
+    this.connection.scheduleRetry(delay, (): void => { this.startStream(); });
   }
 
   private streamDown(gen: number, delay: number): void {
     if (gen !== this.streamGen) return;
-    this.sessionSync.disconnect();
+    this.chatState.sync.disconnect();
     this.historyRequest += 1;
     this.historyLoadingEpoch = undefined;
     if (this.syncMode === 'sequenced') this.schedule(0);
@@ -1287,96 +906,35 @@ struct Index {
   }
 
   private startStream(): void {
-    if (!this.isPaired || (!this.visible && !this.backgroundLiveActivity()) || !this.base || !this.token || this.streamReq ||
+    if (!this.isPaired || (!this.visible && !this.backgroundLiveActivity()) || !this.base || !this.connection.endpoint().token || this.streamReq ||
         this.syncMode === 'probe' || (this.syncMode === 'sequenced' && this.openingSession)) return;
     const gen = ++this.streamGen;
-    const req = http.createHttp();
-    this.streamReq = req;
-    const headers: Record<string, string> = { 'Authorization': `Bearer ${this.token}`, 'Accept': 'text/event-stream' };
-    const opts: http.HttpRequestOptions = {
-      method: http.RequestMethod.GET,
-      header: headers,
-      usingCache: false,
-      usingProxy: false,
-      maxRedirects: 0,
-      connectTimeout: 4000,
-      readTimeout: 30000
-    };
-    if (this.ca && this.pin) {
-      opts.caData = this.ca;
-      opts.certificatePinning = { hashAlgorithm: 'SHA-256', publicKeyHash: this.pin };
-    }
-    let buffer = '';
-    const decoder = new util.TextDecoder('utf-8');
-    req.on('headersReceive', (_header: Object) => {
-      if (gen !== this.streamGen) return;
-      this.streamAlive = true;
-    });
-    req.on('dataReceive', (data: ArrayBuffer) => {
-      if (gen !== this.streamGen) return;
-      buffer += decoder.decodeWithStream(new Uint8Array(data), { stream: true });
-      if (buffer.length > 262144) {
-        this.streamDown(gen, 500);
-        return;
-      }
-      let boundary = buffer.indexOf('\n\n');
-      while (boundary >= 0) {
-        const raw = buffer.substring(0, boundary);
-        buffer = buffer.substring(boundary + 2);
-        let payload = '';
-        for (const line of raw.split('\n')) {
-          if (line.startsWith('data: ')) payload += line.substring(6);
-        }
-        if (payload) this.handleFrame(payload);
-        if (gen !== this.streamGen) return;
-        boundary = buffer.indexOf('\n\n');
-      }
-    });
-    req.on('dataEnd', () => { this.streamDown(gen, 2000); });
     const path = this.syncMode === 'sequenced' ? '/events?sync=2' : '/events';
-    req.requestInStream(`${this.base}${path}`, opts).then((code: number) => {
-      if (gen !== this.streamGen) return;
-      if (code === 401) { this.leaveComputer(true); return; }
-      if (code >= 400) this.streamDown(gen, code === 429 ? 8000 : 3000);
-    }).catch(() => { this.streamDown(gen, 2000); });
+    this.streamReq = this.client.openEvents(this.connection.endpoint(), path, {
+      current: (): boolean => gen === this.streamGen,
+      ready: (): void => { this.streamAlive = true; },
+      frame: (payload: string): void => { this.handleFrame(payload); },
+      closed: (delay: number): void => { this.streamDown(gen, delay); },
+      revoked: (): void => { this.leaveComputer(true); }
+    });
   }
 
   private queueStreamPaint(): void {
-    if (this.deltaPaintTimer !== -1) return;
-    this.deltaPaintTimer = setTimeout(() => { this.flushStreamDeltas(); }, STREAM_PAINT_INTERVAL_MS);
+    this.chatState.queueStreamPaint((): void => { this.flushStreamDeltas(); });
   }
 
   private flushStreamDeltas(paint: boolean = true): void {
-    if (this.deltaPaintTimer !== -1) clearTimeout(this.deltaPaintTimer);
-    this.deltaPaintTimer = -1;
-    if (paint && (this.pendingLiveText || this.pendingLiveThinking)) {
-      this.pendingBottom = true;
-      if (this.pendingLiveText) this.liveText = (this.liveText + this.pendingLiveText).slice(-MAX_LIVE_TEXT_LENGTH);
-      if (this.pendingLiveThinking) {
-        this.liveThinking = (this.liveThinking + this.pendingLiveThinking).slice(-MAX_LIVE_TEXT_LENGTH);
-      }
-    }
-    this.pendingLiveText = '';
-    this.pendingLiveThinking = '';
+    const delta = this.chatState.flushStreamDeltas(this.liveText, this.liveThinking, paint);
+    if (!delta) return;
+    this.pendingBottom = true;
+    this.liveText = delta.text;
+    this.liveThinking = delta.thinking;
   }
 
   private handleFrame(raw: string): void {
-    let frame: StreamFrame;
-    try { frame = JSON.parse(raw) as StreamFrame; } catch { return; }
-    if (this.syncMode === 'sequenced') {
-      if (!frame.cursor) {
-        if (frame.type === 'bridge/status') this.schedule(0);
-        return;
-      }
-      if (frame.type === 'ready') {
-        this.sessionSync.ready(frame.cursor);
-        this.schedule(0);
-      } else if (this.sessionSync.receive(frame, (event: StreamFrame): void => this.applyStreamFrame(event))) {
-        this.schedule(0);
-      }
-      return;
+    if (this.chatState.receiveFrame(raw, this.syncMode === 'sequenced', (event: StreamFrame): void => this.applyStreamFrame(event))) {
+      this.schedule(0);
     }
-    this.applyStreamFrame(frame);
   }
 
   private applyStreamFrame(frame: StreamFrame): void {
@@ -1386,7 +944,7 @@ struct Index {
     }
     if (frame.type === 'message/delta') {
       if (typeof frame.text === 'string' && frame.text && (frame.cursor !== undefined || frame.seq === undefined || frame.seq > this.liveSeq)) {
-        this.pendingLiveText = (this.pendingLiveText + frame.text).slice(-MAX_LIVE_TEXT_LENGTH);
+        this.chatState.appendDelta(frame.text, false);
         if (frame.seq !== undefined) this.liveSeq = frame.seq;
         this.queueStreamPaint();
       }
@@ -1394,7 +952,7 @@ struct Index {
     }
     if (frame.type === 'message/thinking') {
       if (typeof frame.text === 'string' && frame.text && (frame.cursor !== undefined || frame.seq === undefined || frame.seq > this.liveThinkSeq)) {
-        this.pendingLiveThinking = (this.pendingLiveThinking + frame.text).slice(-MAX_LIVE_TEXT_LENGTH);
+        this.chatState.appendDelta(frame.text, true);
         if (frame.seq !== undefined) this.liveThinkSeq = frame.seq;
         this.queueStreamPaint();
       }
@@ -1462,12 +1020,12 @@ struct Index {
     if (frame.type === 'message/final') {
       this.liveRevision += 1;
       if (frame.cursor || (frame.seq !== undefined && frame.seq >= this.liveSeq)) {
-        this.pendingLiveText = '';
+        this.chatState.clearDelta(false);
         this.liveText = '';
         this.liveSeq = frame.seq ?? 0;
       }
       if (frame.cursor || (frame.thinkingSeq !== undefined && frame.thinkingSeq >= this.liveThinkSeq)) {
-        this.pendingLiveThinking = '';
+        this.chatState.clearDelta(true);
         this.liveThinking = '';
         this.liveThinkSeq = frame.thinkingSeq ?? 0;
         this.liveThinkingOpen = false;
@@ -1489,39 +1047,21 @@ struct Index {
   private async pair(): Promise<void> {
     if (this.busy || this.openingSession) return;
     const profile = this.huaweiProfile;
-    let base = this.address.trim();
-    let ticket = this.ticket.trim().toLowerCase();
-    let ca: string | undefined = undefined;
-    let pin: string | undefined = undefined;
-    if (this.pairingMode !== 'usb') {
-      try {
-        const bundle = decodePairingBundle(this.pairingBundle, this.pairingMode === 'remote');
-        base = bundle.url;
-        ticket = bundle.ticket;
-        ca = bundle.ca;
-        pin = bundle.pin;
-      } catch {
-        this.status = this.pairingMode === 'remote' ? '请导入 Pi Go.app 生成的公网配对包。' : '请导入 Pi Go.app 生成的局域网配对包。';
-        return;
-      }
-    } else if (!validUsb(base) || !/^(\d{8}|[a-f0-9]{64})$/.test(ticket)) {
-      this.status = '请输入本机 USB 地址和有效的一次性票据。';
+    let pairing: PairingRequest;
+    try {
+      pairing = this.connection.pairingRequest(this.pairingMode, this.address, this.ticket, this.pairingBundle, this.computers);
+    } catch (error) {
+      this.status = (error as Error).message;
       return;
     }
-    if (this.computers.length >= MAX_COMPUTERS && !this.computers.some((record: Companion): boolean => record.address === base)) {
-      this.status = '已保存 12 条连接。请先移除不再使用的连接。';
-      return;
-    }
+    const base = pairing.endpoint.address;
     this.busy = true;
     this.status = '';
     try {
-      const result = await this.request('/pair', { ticket: ticket }, { address: base, token: '', ca: ca, pin: pin });
-      if (!result.token || !/^[a-f0-9]{64}$/.test(result.token)) throw new Error('invalid_token');
-      const previous = this.computers.find((item: Companion): boolean => item.address === base);
-      const target = this.computers.find((item: Companion): boolean => item.computerId === this.pairingComputerId);
-      const computer = previous ?? target;
-      const record: Companion = { address: base, token: result.token, ca: ca, pin: pin,
-        computerId: computer?.computerId ?? util.generateRandomUUID(), computerName: computer?.computerName };
+      const token = await this.connection.pair(pairing,
+        (path: string, input: Payload, endpoint: BridgeEndpoint): Promise<BridgeReply> => this.request(path, input, endpoint));
+      const record = this.connection.pairedComputer(pairing.endpoint, token, this.computers, this.pairingComputerId,
+        (): string => util.generateRandomUUID());
       if (!this.isPaired || this.base !== base) this.forgetDrafts(base);
       this.computers = [record, ...this.computers.filter((item: Companion): boolean => item.address !== base)];
       if (this.isPaired) this.leaveComputer(false, record);
@@ -1574,7 +1114,7 @@ struct Index {
     this.lanCandidates = [];
     this.status = '';
     try {
-      this.lanCandidates = await discoverLan();
+      this.lanCandidates = await this.connection.discover();
       if (!this.lanCandidates.length) this.status = '未发现 Pi Go。可直接扫码或粘贴配对包。';
     } catch { this.status = '发现不可用，可直接导入配对包。'; }
     finally { this.busy = false; }
@@ -1591,9 +1131,7 @@ struct Index {
     this.cancelSchedule();
     this.stopStream();
     this.base = '';
-    this.token = '';
-    this.ca = undefined;
-    this.pin = undefined;
+    this.connection.disconnect();
     this.pairingBundle = '';
     this.currentId = '';
     this.resetCommands();
@@ -1621,7 +1159,7 @@ struct Index {
     this.liveSeq = 0;
     this.messages = [];
     this.sessions = [];
-    this.chatCache.clear();
+    this.chatState.chatCache.clear();
     this.runningSessionIds = [];
     this.runningSessions = [];
     this.observedRuns.clear();
@@ -1659,7 +1197,7 @@ struct Index {
     if (revoked) {
       this.computers = this.computers.filter((record: Companion): boolean => record.address !== address);
       this.forgetDrafts(address);
-      this.sidebarBook = { version: 1, entries: this.sidebarBook.entries.filter((kept: SidebarEntry): boolean => kept.address !== address) };
+      this.sessionStore.removeSidebar(address);
     }
     this.status = revoked ? '该电脑的配对已撤销，请重新连接。' : '';
     this.flushSidebarSave();
@@ -1687,27 +1225,12 @@ struct Index {
   }
 
   private rememberDraft(id: string): void {
-    const key = this.draftKey(id);
-    this.drafts.delete(key);
-    if (this.draft) this.drafts.set(key, this.draft);
-    if (this.drafts.size > 128) {
-      let oldest: string = '';
-      this.drafts.forEach((_text: string, item: string) => { if (!oldest) oldest = item; });
-      if (oldest) this.drafts.delete(oldest);
-    }
+    this.chatState.rememberDraft(this.draftKey(id), this.draft);
   }
 
   private forgetDrafts(address: string): void {
     this.queuedSteering = this.queuedSteering.filter((item: QueuedSteering): boolean => !item.sessionKey.startsWith(`${address}|`));
-    for (const key of this.drafts.keys()) {
-      if (key.startsWith(`${address}|`)) this.drafts.delete(key);
-    }
-    for (const key of this.unconfirmed.keys()) {
-      if (key.startsWith(`${address}|`)) this.unconfirmed.delete(key);
-    }
-    for (const key of this.draftAttachments.keys()) {
-      if (key.startsWith(`${address}|`)) this.draftAttachments.delete(key);
-    }
+    this.chatState.forgetDrafts(address);
   }
 
   private applySession(session: SessionState): void {
@@ -1716,9 +1239,9 @@ struct Index {
       this.closeToolDetails();
       this.resetVoice();
       if (this.currentId) this.rememberDraft(this.currentId);
-      this.draft = this.drafts.get(this.draftKey(session.id)) ?? '';
-      this.pendingSend = this.unconfirmed.get(this.draftKey(session.id));
-      this.attachments = this.draftAttachments.get(this.draftKey(session.id)) ?? [];
+      this.draft = this.chatState.drafts.get(this.draftKey(session.id)) ?? '';
+      this.pendingSend = this.chatState.unconfirmed.get(this.draftKey(session.id));
+      this.attachments = this.chatState.draftAttachments.get(this.draftKey(session.id)) ?? [];
       this.showSettings = false;
       this.models = [];
       this.currentId = session.id;
@@ -1785,7 +1308,7 @@ struct Index {
       }
       if (!result.session) {
         if (this.syncMode === 'sequenced') {
-          this.sessionSync.disconnect();
+          this.chatState.sync.disconnect();
           this.historyStream = '';
           this.historyLeaf = undefined;
         }
@@ -1793,7 +1316,7 @@ struct Index {
         this.closeToolDetails();
         if (result.state === 'session_deleted' && result.deletedSessionId) {
           this.sessions = this.sessions.filter((row: SessionRow): boolean => row.id !== result.deletedSessionId);
-          this.chatCache.delete(this.draftKey(result.deletedSessionId));
+          this.chatState.chatCache.delete(this.draftKey(result.deletedSessionId));
           if (this.currentId === result.deletedSessionId) {
             this.showSessions = !this.dockedSessions();
             void this.loadSessions();
@@ -1830,7 +1353,7 @@ struct Index {
       const moved = result.session.id !== this.currentId;
       if (result.cursor) {
         const applied = this.applySessionSnapshot(result);
-        if (applied || this.sessionSync.matches(result.cursor)) {
+        if (applied || this.chatState.sync.matches(result.cursor)) {
           this.setInteraction(result.interaction);
           if (connected && !moved) this.syncCommandPalette();
           if (this.historyStream === result.cursor.streamId && this.historyLeaf === result.historyLeaf) {
@@ -1886,7 +1409,7 @@ struct Index {
       if (epoch === this.epoch) {
         this.syncLiveActivity();
         const delay = !this.reachable ? 1500 :
-          this.syncMode === 'sequenced' && this.sessionSync.needsSnapshot() ? 150 :
+          this.syncMode === 'sequenced' && this.chatState.sync.needsSnapshot() ? 150 :
           this.streamAlive ? (this.idle ? 3000 : 1200) :
           this.idle ? 1500 : 650;
         this.schedule(delay);
@@ -1916,7 +1439,7 @@ struct Index {
     const cursor = snapshot.cursor;
     const session = snapshot.session;
     if (!cursor || !session || cursor.sessionId !== session.id) return false;
-    const applied = this.sessionSync.snapshot(cursor, (): void => {
+    const applied = this.chatState.sync.snapshot(cursor, (): void => {
       this.observeSessionRun(session);
       this.applySession(session);
       this.runId = cursor.runId ?? '';
@@ -1950,7 +1473,7 @@ struct Index {
           page.session?.id !== session.id || page.session?.cwd !== session.cwd ||
           page.cursor?.streamId !== cursor.streamId) return undefined;
       if (initial) return page;
-      if (this.currentId !== session.id || !this.sessionSync.matches(cursor)) return undefined;
+      if (this.currentId !== session.id || !this.chatState.sync.matches(cursor)) return undefined;
       this.applySessionHistory(page);
       return page;
     } catch (error) {
@@ -1987,7 +1510,7 @@ struct Index {
   private applyLiveSnapshot(snapshot: BridgeReply, replaceTools: boolean): void {
     const textSeq = snapshot.liveSeq ?? 0;
     if (this.idle || textSeq >= this.liveSeq) {
-      this.pendingLiveText = '';
+      this.chatState.clearDelta(false);
       const text = snapshot.liveText ?? '';
       if (text !== this.liveText) this.pendingBottom = true;
       this.liveText = text;
@@ -1995,7 +1518,7 @@ struct Index {
     }
     const thinkingSeq = snapshot.liveThinkSeq ?? 0;
     if (this.idle || thinkingSeq >= this.liveThinkSeq) {
-      this.pendingLiveThinking = '';
+      this.chatState.clearDelta(true);
       const thinking = snapshot.liveThinking ?? '';
       if (thinking !== this.liveThinking) this.pendingBottom = true;
       this.liveThinking = thinking;
@@ -2009,29 +1532,9 @@ struct Index {
   }
 
   private mergeTranscript(incoming: ChatMessage[], cursor?: string): void {
-    const overlap = incoming.length ? this.messages.findIndex((message: ChatMessage): boolean => message.id === incoming[0].id) : -1;
-    if (overlap < 0) {
-      if (incoming.length || this.messages.length) this.messages = incoming;
-      this.historyCursor = cursor;
-      return;
-    }
-    if (this.messages.length - overlap !== incoming.length ||
-      incoming.some((message: ChatMessage, index: number): boolean => !this.sameMessage(this.messages[overlap + index], message))) {
-      this.messages = this.messages.slice(0, overlap).concat(incoming);
-    }
-    if (overlap === 0) this.historyCursor = cursor;
-  }
-
-  private sameMessage(saved: ChatMessage, incoming: ChatMessage): boolean {
-    if (saved.id !== incoming.id || saved.role !== incoming.role || saved.text !== incoming.text ||
-      saved.textTruncated !== incoming.textTruncated || saved.thinking !== incoming.thinking || saved.thinkingMs !== incoming.thinkingMs || saved.imageCount !== incoming.imageCount) return false;
-    const left = saved.tools ?? [];
-    const right = incoming.tools ?? [];
-    return left.length === right.length && left.every((tool: LiveTool, index: number): boolean => {
-      const candidate = right[index];
-      return tool.id === candidate.id && tool.state === candidate.state && tool.ms === candidate.ms &&
-        tool.name === candidate.name && tool.detail === candidate.detail;
-    });
+    const transcript = this.chatState.mergeTranscript(this.messages, this.historyCursor, incoming, cursor);
+    if (this.messages !== transcript.messages) this.messages = transcript.messages;
+    this.historyCursor = transcript.cursor;
   }
 
   private async loadHistory(): Promise<void> {
@@ -2044,7 +1547,7 @@ struct Index {
       const sync = this.syncMode === 'sequenced' ? '&sync=2' : '';
       const result = await this.request(`/history?id=${encodeURIComponent(id)}&before=${encodeURIComponent(before)}${sync}`);
       if (epoch !== this.epoch || this.currentId !== id || result.session?.id !== id || this.historyCursor !== before) return;
-      if (this.syncMode === 'sequenced' && (!result.cursor || !this.sessionSync.matches(result.cursor))) return;
+      if (this.syncMode === 'sequenced' && (!result.cursor || !this.chatState.sync.matches(result.cursor))) return;
       const known = new Set<string>(this.messages.map((message: ChatMessage): string => message.id));
       this.messages = (result.messages ?? []).filter((message: ChatMessage): boolean => !known.has(message.id)).concat(this.messages);
       this.historyCursor = result.historyCursor;
@@ -2188,10 +1691,16 @@ struct Index {
     return current.concat(this.backgroundRunning());
   }
 
+  private taskPanelRows(): RunningRow[] {
+    const rows = this.allRunningRows();
+    for (const row of rows) row.state = this.sessionState(row.id);
+    return rows;
+  }
+
   private standaloneScheduleRuns(): RunMessage[] {
     if (!this.reachable) return [];
     const sessions = this.allRunningRows();
-    return this.scheduleActive.filter((row: RunMessage): boolean => this.isCurrentScheduleComputer(row) &&
+    return this.scheduleActive.filter((row: RunMessage): boolean => isCurrentScheduleComputer(this.computers, this.base, row) &&
       !sessions.some((session: RunningRow): boolean => session.id === row.run.sessionId));
   }
 
@@ -2229,50 +1738,35 @@ struct Index {
     const epoch = this.epoch;
     const version = this.sessionCatalogVersion;
     const view = this.sessionView;
+    const current = (): boolean => epoch === this.epoch && version === this.sessionCatalogVersion;
     this.sessionLoading = true;
     this.sessionCatalogFailed = false;
     try {
-      const sessions: SessionRow[] = [];
-      const ids = new Set<string>();
-      let cursor: number | undefined = 0;
-      let result: BridgeReply;
       const showFirstPage = !this.sessions.length || this.loadedView !== view;
-      do {
-        result = await this.request(`/sessions?limit=100&cursor=${cursor}&view=${view}`);
-        if (epoch !== this.epoch || version !== this.sessionCatalogVersion) return;
-        // The live catalog can move between pages; keep one row per session.
-        for (const row of result.sessions ?? []) {
-          if (ids.has(row.id)) continue;
-          ids.add(row.id);
-          sessions.push(row);
-        }
-        const next = result.nextCursor;
-        if (cursor === 0 && next !== undefined && showFirstPage) {
-          this.sessions = sessions.slice();
-          this.loadedView = view;
-          this.projects = result.projects ?? [];
-          this.workspaces = result.workspaces ?? [];
-          this.hasWorkspaceDetails = result.workspaces !== undefined;
-          this.hostAvailable = result.desktopHandoff ?? false;
-          this.canCreateWorkspace = result.canCreateWorkspace ?? false;
-          this.sessionCatalogLoaded = true;
-        }
-        cursor = next !== undefined && next > cursor ? next : undefined;
-      } while (cursor !== undefined);
-      this.sessionCatalogLoaded = true;
+      const catalog = await this.sessionStore.loadCatalog(view, (path: string): Promise<BridgeReply> => this.request(path),
+        current, (page: SessionCatalog): void => {
+          if (showFirstPage) this.applyCatalog(page, view);
+        });
+      if (!catalog || !current()) return;
       this.sessionCatalogUpdatedAt = Date.now();
-      this.sessions = sessions;
-      this.loadedView = view;
-      this.hostAvailable = result.desktopHandoff ?? false;
-      this.canCreateWorkspace = result.canCreateWorkspace ?? false;
-      this.projects = result.projects ?? [];
-      this.workspaces = result.workspaces ?? [];
-      this.hasWorkspaceDetails = result.workspaces !== undefined;
+      this.applyCatalog(catalog, view);
     } catch (error) {
-      if (epoch !== this.epoch || version !== this.sessionCatalogVersion) return;
+      if (!current()) return;
       if (error instanceof BridgeFailure && error.status === 401) this.leaveComputer(true);
       else this.sessionCatalogFailed = true;
     } finally { this.sessionLoading = false; }
+  }
+
+  private applyCatalog(catalog: SessionCatalog, view: string): void {
+    const result = catalog.reply;
+    this.sessions = catalog.sessions;
+    this.loadedView = view;
+    this.projects = result.projects ?? [];
+    this.workspaces = result.workspaces ?? [];
+    this.hasWorkspaceDetails = result.workspaces !== undefined;
+    this.hostAvailable = result.desktopHandoff ?? false;
+    this.canCreateWorkspace = result.canCreateWorkspace ?? false;
+    this.sessionCatalogLoaded = true;
   }
 
   private closeFileEditor(): void {
@@ -2467,83 +1961,13 @@ struct Index {
 
   private localFilePrefix(cwd: string, path: string): string {
     const hash = cryptoFramework.createMd('SHA256');
-    const key = JSON.stringify([this.base, this.token, cwd, path]);
+    const key = JSON.stringify([this.base, this.connection.endpoint().token, cwd, path]);
     hash.updateSync({ data: new util.TextEncoder().encodeInto(key) });
     return Array.from(hash.digestSync().data, (byte: number): string => byte.toString(16).padStart(2, '0')).join('');
   }
 
   private async downloadFile(cwd: string, path: string, temporary: string, lookupName: boolean, limit: number = MAX_DOWNLOAD_BYTES): Promise<void> {
-    const req = http.createHttp();
-    let file: fileIo.File | undefined;
-    try {
-      const output = fileIo.openSync(temporary, fileIo.OpenMode.WRITE_ONLY | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
-      file = output;
-      const headers: Record<string, string> = { 'Authorization': `Bearer ${this.token}` };
-      const opts: http.HttpRequestOptions = {
-        method: http.RequestMethod.GET,
-        header: headers,
-        usingCache: false,
-        usingProxy: false,
-        maxRedirects: 0,
-        connectTimeout: 4000,
-        readTimeout: 60000,
-        maxLimit: limit
-      };
-      if (this.ca && this.pin) {
-        opts.caData = this.ca;
-        opts.certificatePinning = { hashAlgorithm: 'SHA-256', publicKeyHash: this.pin };
-      }
-      let expected = -1;
-      let received = 0;
-      let writeError = '';
-      const prefix = new Uint8Array(MAX_DOWNLOAD_ERROR_BYTES);
-      req.on('headersReceive', (header: Object) => {
-        const fields = header as Record<string, string>;
-        const key = Object.keys(fields).find((field: string): boolean => field.toLowerCase() === 'content-length');
-        expected = key === undefined ? -1 : Number(fields[key]);
-      });
-      req.on('dataReceive', (chunk: ArrayBuffer) => {
-        if (writeError) return;
-        if (received + chunk.byteLength > limit) {
-          writeError = 'file_too_large';
-          return;
-        }
-        if (received < prefix.length) {
-          prefix.set(new Uint8Array(chunk, 0, Math.min(chunk.byteLength, prefix.length - received)), received);
-        }
-        try {
-          let offset = 0;
-          while (offset < chunk.byteLength) {
-            const written = fileIo.writeSync(output.fd, offset === 0 ? chunk : chunk.slice(offset));
-            if (written <= 0) throw new Error('write_failed');
-            offset += written;
-          }
-          received += chunk.byteLength;
-        } catch {
-          writeError = 'write_failed';
-        }
-      });
-      const lookup = lookupName && !path.includes('/') ? '&lookup=name' : '';
-      const status = await req.requestInStream(`${this.base}/files/download?cwd=${encodeURIComponent(cwd)}&path=${encodeURIComponent(path)}${lookup}`, opts);
-      if (status !== 200) {
-        let code = 'download_failed';
-        if (!writeError && received <= prefix.length) {
-          try {
-            const reply = JSON.parse(util.TextDecoder.create('utf-8').decodeToString(prefix.subarray(0, received))) as BridgeReply;
-            if (reply.error) code = reply.error;
-          } catch {
-            // 错误体不是 JSON 时保留 download_failed。
-          }
-        }
-        throw new BridgeFailure(status, code);
-      }
-      if (writeError) throw new Error(writeError);
-      if (expected > limit) throw new Error('file_too_large');
-      if (received !== expected) throw new Error('incomplete_download');
-    } finally {
-      req.destroy();
-      if (file) fileIo.closeSync(file);
-    }
+    return this.client.downloadFile(this.connection.endpoint(), cwd, path, temporary, lookupName, limit);
   }
 
   private pruneReceivedFiles(directory: string): void {
@@ -2897,21 +2321,6 @@ struct Index {
     }, (index: number): string => `${sessionId}-${messageId}-${toolId}-${index}`)
   }
 
-  private messageFiles(message: ChatMessage): string[] {
-    if (message.role !== 'user') return messageFileChips(message.text, this.workspaceCwd);
-    const start = message.text.lastIndexOf('\n\n[Pi Go 附件] 手机上传了 ');
-    if (start < 0) return [];
-    const prefix = `：${this.workspaceCwd.replace(/\/$/, '')}/.pi-go/attachments/`;
-    const paths: string[] = [];
-    for (const line of message.text.slice(start).split('\n')) {
-      const index = line.indexOf(prefix);
-      if (index < 0) continue;
-      const path = normalizeWorkspacePath(this.workspaceCwd, line.slice(index + 1));
-      if (/^\.pi-go\/attachments\/[a-f0-9]{16}-[^/]+$/.test(path) && !paths.includes(path)) paths.push(path);
-    }
-    return paths;
-  }
-
   private toolFile(tool: LiveTool): string {
     if (tool.state === 'run' || !['write', 'edit', 'read'].includes(tool.name)) return '';
     return normalizeWorkspacePath(this.workspaceCwd, this.selectedToolDetails?.path ?? tool.detail);
@@ -2936,25 +2345,6 @@ struct Index {
     if (tool.name === 'grep' || tool.name === 'find' || tool.name === 'web_search') return $r('sys.symbol.magnifyingglass');
     if (tool.name === 'write' || tool.name === 'edit') return $r('sys.symbol.square_and_pencil');
     return $r('sys.symbol.folder');
-  }
-
-  private toolKey(tool: LiveTool): string {
-    return `${tool.id}-${tool.state}-${tool.ms ?? 0}`;
-  }
-
-  private transcriptMessageKey(message: ChatMessage): string {
-    const thinking = message.thinking && this.thinkingOpenIds.includes(message.id) ? 'open' : '';
-    const tools = message.tools?.map((tool: LiveTool): string => this.toolKey(tool)).join(',') ?? '';
-    return `${message.id}:${thinking}:${tools}:${message.textTruncated ?? false}`;
-  }
-
-  private unlistedLiveTools(): LiveTool[] {
-    if (!this.liveTools.length) return this.liveTools;
-    const saved = new Set<string>();
-    for (const message of this.messages) {
-      for (const tool of message.tools ?? []) saved.add(tool.id);
-    }
-    return this.liveTools.filter((tool: LiveTool): boolean => !saved.has(tool.id));
   }
 
   private openToolDetails(tool: LiveTool, messageId: string): void {
@@ -3032,24 +2422,14 @@ struct Index {
   }
 
   private workspaceName(path: string): string {
-    return this.workspaces?.find((row: WorkspaceRow): boolean => row.cwd === path)?.name ||
-      path.split('/').pop() || path;
+    return workspaceName(this.workspaces, path);
   }
 
-  private newTaskOptions(): MenuElement[] {
-    const options = this.projects.map((path: string): MenuElement => ({
-      value: this.workspaceName(path),
-      action: () => { this.createSpaceTask(path); }
-    }));
-    if (this.canCreateWorkspace) {
-      options.push({ value: '新空间', action: () => {
-        if (!this.reachable || this.busy || this.openingSession || !this.canCreateWorkspace) return;
-        this.newSpaceName = '';
-        this.newSpaceError = '';
-        this.showNewSpace = true;
-      } });
-    }
-    return options;
+  private openNewSpace(): void {
+    if (!this.reachable || this.busy || this.openingSession || !this.canCreateWorkspace) return;
+    this.newSpaceName = '';
+    this.newSpaceError = '';
+    this.showNewSpace = true;
   }
 
   private closeNewSpace(): void {
@@ -3165,9 +2545,9 @@ struct Index {
   private async requestAction(path: string, input?: Payload): Promise<boolean> {
     if (this.busy || this.openingSession) return false;
     const navigation = path === '/open' || path === '/new';
-    const previous = navigation ? this.chatCache.get(this.draftKey(this.currentId)) : undefined;
+    const previous = navigation ? this.chatState.chatCache.get(this.draftKey(this.currentId)) : undefined;
     if (previous?.session) this.cacheChat(previous.session);
-    const cached = path === '/open' && input?.id ? this.chatCache.get(this.draftKey(input.id)) : undefined;
+    const cached = path === '/open' && input?.id ? this.chatState.chatCache.get(this.draftKey(input.id)) : undefined;
     let navigationConfirmed = false;
     const epoch = navigation ? ++this.epoch : this.epoch;
     if (navigation) {
@@ -3307,31 +2687,6 @@ struct Index {
   }
 
   @Builder
-  thinkingCard(id: string, content: string, ms: number, open: boolean) {
-    Column({ space: 8 }) {
-      Row({ space: 6 }) {
-        Text('✻').fontSize(13).fontColor($r('app.color.pigo_info'))
-        Text(id ? (ms >= 0 ? `思考 · ${(ms / 1000).toFixed(1)}s` : '思考') : '思考中…')
-          .fontSize(13).fontColor($r('app.color.pigo_info')).layoutWeight(1)
-        SymbolGlyph(open ? $r('sys.symbol.chevron_down') : $r('sys.symbol.chevron_right'))
-          .fontSize(14).fontColor([$r('app.color.pigo_muted')])
-      }.width('100%').onClick(() => {
-        if (id) this.toggleThinking(id, !open);
-        else this.liveThinkingOpen = !open;
-      })
-      if (open) {
-        Scroll() {
-          Text(content).fontSize(13).fontStyle(FontStyle.Italic).fontColor($r('app.color.pigo_muted')).lineHeight(21)
-            .copyOption(CopyOptions.LocalDevice).width('100%')
-        }.constraintSize({ maxHeight: 320 }).width('100%').scrollBar(BarState.Off)
-      } else if (!id) {
-        Text(content.split('\n').pop() ?? '').fontSize(12).fontColor($r('app.color.pigo_muted')).maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis }).width('100%')
-      }
-    }.width('100%').padding(12).backgroundColor($r('app.color.pigo_control')).borderRadius(12)
-  }
-
-  @Builder
   fileChip(path: string, lookupName: boolean) {
     Button({ type: ButtonType.Normal }) {
       Row({ space: 6 }) {
@@ -3347,40 +2702,6 @@ struct Index {
       .border({ width: 1, radius: 10, color: $r('app.color.pigo_line') })
       .padding({ left: 10, right: 10, top: 7, bottom: 7 }).enabled(!this.openingFile)
       .onClick(() => { void this.openReferencedFile(this.workspaceCwd, path, lookupName); })
-  }
-
-  @Builder
-  toolRow(tool: LiveTool, messageId: string) {
-    Button({ type: ButtonType.Normal }) {
-      Row({ space: 9 }) {
-        SymbolGlyph(this.toolIcon(tool)).fontSize(17).fontColor([this.accent()])
-        Text(this.toolTitle(tool)).fontSize(13).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
-          .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).constraintSize({ maxWidth: '38%' })
-        Text(tool.detail).fontSize(12).fontColor($r('app.color.pigo_muted')).maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis }).layoutWeight(1)
-        if (tool.state === 'run' && !this.idle) {
-          LoadingProgress().width(13).height(13).color(this.accent())
-        } else if (tool.state === 'fail') {
-          Text('失败').fontSize(12).fontColor($r('app.color.pigo_error'))
-        }
-        SymbolGlyph($r('sys.symbol.chevron_right')).fontSize(13).fontColor([$r('app.color.pigo_muted')])
-      }.width('100%')
-    }.width('100%').height(44).padding({ left: 10, right: 8 }).borderRadius(8).backgroundColor(Color.Transparent)
-      .onClick(() => { this.openToolDetails(tool, messageId); })
-  }
-
-  @Builder
-  toolGroup(tools: LiveTool[], messageId: string) {
-    if (tools.length) {
-      Column() {
-        ForEach(tools, (tool: LiveTool, index: number) => {
-          if (index > 0) Divider().color($r('app.color.pigo_line')).margin({ left: 36, right: 8 })
-          this.toolRow(tool, messageId)
-        }, (tool: LiveTool) => this.toolKey(tool))
-      }.width('100%').padding({ left: 2, right: 2 })
-        .backgroundColor($r('app.color.pigo_panel')).borderRadius(12)
-        .border({ width: 1, color: $r('app.color.pigo_line') })
-    }
   }
 
   @Builder
@@ -3508,45 +2829,29 @@ struct Index {
   private syncCommandPalette(): void {
     if (!this.commandPaletteActive()) { this.commandPalette = false; return; }
     this.commandPalette = true;
-    if (!this.commandsLoadedAt || Date.now() - this.commandsLoadedAt >= 60000) void this.loadCommands();
+    if (this.commandState.stale()) void this.loadCommands();
   }
 
   private resetCommands(): void {
-    this.commandRequest += 1;
+    this.commandState.reset();
     this.commandsLoading = false;
     this.commandError = '';
     this.commandPalette = false;
     this.commandRows = [];
-    this.commandsLoadedAt = 0;
     this.showComposerMenu = false;
   }
 
   private async loadCommands(): Promise<void> {
-    if (this.commandsLoading || !this.reachable || !this.currentId || this.openingSession) return;
-    const request = ++this.commandRequest;
-    const id = this.currentId;
-    this.commandError = '';
-    this.commandsLoading = true;
-    try {
-      const reply = await this.request('/commands');
-      if (request !== this.commandRequest) return;
-      if (reply.session?.id !== id || !reply.commands) {
-        this.commandError = '加载命令失败，点此重试';
-        return;
-      }
-      this.commandRows = reply.commands.slice(0, 200);
-      this.commandsLoadedAt = Date.now();
-    } catch (error) {
-      if (request !== this.commandRequest) return;
-      this.commandError = error instanceof BridgeFailure && error.message === 'not_found' ?
-        '请更新电脑端 Pi Go，并重启桥接和当前会话后重试' : '加载命令失败，点此重试';
-    } finally {
-      if (request === this.commandRequest) this.commandsLoading = false;
-    }
+    if (!this.reachable || !this.currentId || this.openingSession) return;
+    await this.commandState.load(this.currentId, (): Promise<BridgeReply> => this.request('/commands'), (list: CommandList): void => {
+      this.commandError = list.error;
+      if (list.rows) this.commandRows = list.rows;
+      this.commandsLoading = list.loading;
+    });
   }
 
   private pickCommand(row: CommandRow, prompt: string = ''): void {
-    this.draft = `${row.invoke ?? `/${row.name}`} ${prompt}`;
+    this.draft = commandDraft(row, prompt);
     this.commandPalette = false;
   }
 
@@ -3558,15 +2863,12 @@ struct Index {
 
   private openSkillPicker(): void {
     this.showSkillPicker = true;
-    if (!this.commandsLoadedAt || Date.now() - this.commandsLoadedAt >= 60000) void this.loadCommands();
-  }
-
-  private availableSkills(): CommandRow[] {
-    return this.commandRows.filter((row: CommandRow): boolean => row.source === 'skill');
+    if (this.commandState.stale()) void this.loadCommands();
   }
 
   private pickSkill(row: CommandRow): void {
-    this.pickCommand(row, this.draft.replace(/^\s*\/skill:\S*\s*/, ''));
+    this.draft = skillDraft(row, this.draft);
+    this.commandPalette = false;
     this.voiceMode = false;
     this.showComposerMenu = false;
   }
@@ -3576,18 +2878,6 @@ struct Index {
     if (source === 'prompt') return '模板';
     if (source === 'extension') return '扩展';
     return source;
-  }
-
-  private hasDraft(): boolean {
-    return this.draft.trim().length > 0 || this.attachments.length > 0;
-  }
-
-  private canSend(): boolean {
-    return !!this.currentId && (this.idle || !!this.runId) &&
-      this.reachable && !this.busy && !this.openingSession && !this.pendingSend &&
-      !this.recording && !this.voicePreparing && !this.voiceFinishing &&
-      this.hasDraft() &&
-      (this.acceptsImage || !this.attachments.some((item: DraftAttachment): boolean => item.kind === 'image'));
   }
 
   private async send(): Promise<void> {
@@ -3606,12 +2896,12 @@ struct Index {
       return;
     }
     if (mode === 'steer' && !runId) return;
-    if (this.unconfirmed.size >= 128) { this.status = '请先核对未确认的发送。'; return; }
+    if (this.chatState.unconfirmed.size >= 128) { this.status = '请先核对未确认的发送。'; return; }
     const epoch = this.epoch;
     const key = this.draftKey(id);
     const pending: PendingSend = { requestId: util.generateRandomUUID(), text: text, attachments: attachments,
       steeringAfter: mode === 'steer' && !text.startsWith('/') ? (this.messages[this.messages.length - 1]?.id ?? '') : undefined };
-    this.unconfirmed.set(key, pending);
+    this.chatState.unconfirmed.set(key, pending);
     this.pendingSend = pending;
     this.busy = true;
     this.status = '';
@@ -3642,7 +2932,7 @@ struct Index {
         'invalid_prompt', 'invalid_request_id', 'probe_request_limit', 'invalid_image', 'image_not_supported', 'payload_too_large',
         'invalid_attachment', 'unknown_attachment', 'invalid_content_type', 'not_found',
         'unknown_command', 'command_attachments'].includes(error.message)) {
-        this.unconfirmed.delete(key);
+        this.chatState.unconfirmed.delete(key);
         this.pendingSend = undefined;
         this.status = error.message === 'image_not_supported' ? '此模型不支持图片；草稿已保留。' :
           ['invalid_image', 'payload_too_large'].includes(error.message) ? '发送内容过大（单文件 8MB 内）或图片格式无效；草稿已保留。' :
@@ -3659,39 +2949,12 @@ struct Index {
   }
 
   private async uploadAttachment(kind: string, name: string, bytes: Uint8Array): Promise<UploadedAttachment> {
-    const req = http.createHttp();
-    const headers: Record<string, string> = { 'Authorization': `Bearer ${this.token}`, 'Content-Type': 'application/octet-stream' };
-    try {
-      const opts: http.HttpRequestOptions = {
-        method: http.RequestMethod.POST,
-        header: headers,
-        expectDataType: http.HttpDataType.STRING,
-        usingCache: false,
-        usingProxy: false,
-        maxRedirects: 0,
-        connectTimeout: 4000,
-        readTimeout: 60000
-      };
-      if (this.ca && this.pin) {
-        opts.caData = this.ca;
-        opts.certificatePinning = { hashAlgorithm: 'SHA-256', publicKeyHash: this.pin };
-      }
-      opts.extraData = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
-      const response = await req.request(`${this.base}/upload?kind=${encodeURIComponent(kind)}&name=${encodeURIComponent(name)}`, opts);
-      const reply = JSON.parse(response.result as string) as BridgeReply;
-      if (response.responseCode < 200 || response.responseCode >= 300) {
-        throw new BridgeFailure(response.responseCode, reply.error ?? 'request_failed');
-      }
-      if (!reply.attachment || typeof reply.attachment.token !== 'string' || reply.attachment.kind !== kind) {
-        throw new BridgeFailure(response.responseCode, 'invalid_attachment');
-      }
-      return reply.attachment;
-    } finally { req.destroy(); }
+    return this.client.uploadAttachment(this.connection.endpoint(), kind, name, bytes);
   }
 
   private finishSend(key: string, pending: PendingSend): void {
-    this.unconfirmed.delete(key);
-    this.draftAttachments.delete(key);
+    this.chatState.unconfirmed.delete(key);
+    this.chatState.draftAttachments.delete(key);
     for (const item of pending.attachments) {
       if (item.image) item.image.preview.release().catch((): void => {});
     }
@@ -3715,42 +2978,15 @@ struct Index {
   }
 
   private reconcileSteering(settled: boolean): void {
-    if (!this.queuedSteering.length) return;
-    const key = this.draftKey(this.currentId);
-    const tail = this.messages[this.messages.length - 1]?.id;
-    const used = new Set<string>();
-    const remaining: QueuedSteering[] = [];
-    for (const pending of this.queuedSteering) {
-      if (pending.sessionKey !== key) { remaining.push(pending); continue; }
-      if (settled) continue;
-      const after = pending.afterId ? this.messages.findIndex((message: ChatMessage): boolean => message.id === pending.afterId) : -1;
-      if (pending.afterId && after < 0) { remaining.push(pending); continue; }
-      const text = pending.files.length
-        ? `${pending.text}\n\n[Pi Go 附件] 手机上传了 ${pending.files.length} 个文件：`.slice(0, 8000)
-        : pending.text.slice(0, 8000);
-      const match = this.messages.findIndex((message: ChatMessage, index: number): boolean =>
-        index > after && message.role === 'user' && !used.has(message.id) && (message.imageCount ?? 0) === pending.imageCount &&
-        (pending.files.length ? message.text.startsWith(text) : message.text === text));
-      if (match < 0) {
-        pending.afterId = tail ?? pending.afterId;
-        remaining.push(pending);
-        continue;
-      }
-      const id = this.messages[match].id;
-      used.add(id);
-      const sending = this.pendingSend;
-      if (sending && sending.requestId !== pending.id && sending.steeringAfter !== undefined &&
-        match > this.messages.findIndex((message: ChatMessage): boolean => message.id === sending.steeringAfter)) {
-        sending.steeringAfter = id;
-      }
-    }
-    if (remaining.length !== this.queuedSteering.length) this.queuedSteering = remaining;
+    const remaining = this.chatState.reconcileSteering(this.queuedSteering, this.messages, this.draftKey(this.currentId),
+      settled, this.pendingSend);
+    if (remaining !== this.queuedSteering) this.queuedSteering = remaining;
   }
 
   private storedDraftAttachments(): number[] {
     let images = 0;
     let files = 0;
-    for (const list of this.draftAttachments.values()) {
+    for (const list of this.chatState.draftAttachments.values()) {
       for (const item of list) {
         if (item.kind === 'image') images += 1;
         else files += 1;
@@ -3760,8 +2996,8 @@ struct Index {
   }
 
   private commitDraftAttachments(key: string, list: DraftAttachment[]): void {
-    if (list.length) this.draftAttachments.set(key, list);
-    else this.draftAttachments.delete(key);
+    if (list.length) this.chatState.draftAttachments.set(key, list);
+    else this.chatState.draftAttachments.delete(key);
     this.attachments = list;
   }
 
@@ -3771,25 +3007,6 @@ struct Index {
     const removed = list.splice(index, 1)[0];
     if (removed && removed.image) removed.image.preview.release().catch((): void => {});
     this.commitDraftAttachments(key, list);
-  }
-
-  private fileIcon(name: string): string {
-    const lower = name.toLowerCase();
-    if (lower.endsWith('.pdf')) return 'PDF';
-    if (lower.endsWith('.zip') || lower.endsWith('.rar') || lower.endsWith('.7z')) return 'ZIP';
-    if (lower.endsWith('.md')) return 'MD';
-    if (lower.endsWith('.txt') || lower.endsWith('.log')) return 'TXT';
-    if (lower.endsWith('.csv') || lower.endsWith('.xlsx') || lower.endsWith('.xls')) return 'CSV';
-    if (lower.endsWith('.json')) return 'JSON';
-    if (lower.endsWith('.png') || lower.endsWith('.jpg') || lower.endsWith('.jpeg') ||
-      lower.endsWith('.gif') || lower.endsWith('.webp') || lower.endsWith('.heic')) return 'IMG';
-    return '文件';
-  }
-
-  private fileSize(size: number): string {
-    if (size >= 1024 * 1024) return `${(size / (1024 * 1024)).toFixed(1)} MB`;
-    if (size >= 1024) return `${Math.round(size / 1024)} KB`;
-    return `${size} B`;
   }
 
   private async attachImage(source: string): Promise<void> {
@@ -4080,10 +3297,6 @@ struct Index {
       modelId: model.id, thinkingLevel: level });
   }
 
-  private currentModelOption(): ModelOption | undefined {
-    return this.models.find((item: ModelOption): boolean => this.isCurrentModel(item)) ?? this.currentModel;
-  }
-
   private thinkingLevelLabel(level: string): string {
     switch (level) {
       case 'off': return '关闭';
@@ -4095,11 +3308,6 @@ struct Index {
       case 'max': return '最高';
       default: return level;
     }
-  }
-
-  private currentModelIndex(): number {
-    const idx = this.models.findIndex((item: ModelOption): boolean => this.isCurrentModel(item));
-    return idx >= 0 ? idx : 0;
   }
 
   private isCurrentModel(model: ModelOption): boolean {
@@ -4386,11 +3594,6 @@ struct Index {
     }
   }
 
-  private cloudOnlyComputers(): CloudComputer[] {
-    return this.cloudComputers.filter((row: CloudComputer): boolean =>
-      !this.computers.some((local: Companion): boolean => local.address === row.address));
-  }
-
   private restoreCloudComputer(computer: CloudComputer): void {
     this.pairingComputerId = '';
     this.selectPairingMode(computer.mode);
@@ -4506,11 +3709,6 @@ struct Index {
     void this.persistComputers().catch(() => { this.status = '未能保存连接归属。'; });
   }
 
-  private pairingComputerTitle(): string {
-    const group = computerGroups(this.computers).find((item: ComputerGroup): boolean => item.id === this.pairingComputerId);
-    return group ? computerGroupTitle(group) : '';
-  }
-
   private computerConnectionMenu(record: Companion): MenuElement[] {
     const items: MenuElement[] = [];
     if (this.computers.length > 1) {
@@ -4532,391 +3730,18 @@ struct Index {
     return items;
   }
 
-  @Builder
-  computerConnection(record: Companion, group: ComputerGroup) {
-    Column({ space: 6 }) {
-      Row({ space: 6 }) {
-        Button({ type: ButtonType.Normal }) {
-          Row({ space: 10 }) {
-            Column({ space: 3 }) {
-              Row({ space: 6 }) {
-                if (this.isPaired && this.base === record.address) {
-                  Blank().width(7).height(7).borderRadius(4)
-                    .backgroundColor(this.reachable ? $r('app.color.pigo_success') : $r('app.color.pigo_warning'))
-                }
-                Text(connectionLabel(record))
-                  .fontSize(14).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
-                if (this.isPaired && this.base === record.address) {
-                  Text(this.reachable ? '当前 · 已连接' : '当前 · 离线')
-                    .fontSize(11).fontWeight(FontWeight.Medium)
-                    .fontColor(this.reachable ? $r('app.color.pigo_success') : $r('app.color.pigo_warning'))
-                }
-              }
-              Text(record.address.split('://')[1]).fontSize(12).fontColor($r('app.color.pigo_muted'))
-                .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
-            }.layoutWeight(1).alignItems(HorizontalAlign.Start)
-            if (this.isPaired && this.base === record.address) {
-              SymbolGlyph($r('sys.symbol.checkmark')).fontSize(16).fontColor([this.accent()])
-            }
-          }.width('100%')
-        }.id(`computer-${record.address}`).accessibilityText(`${connectionLabel(record)} ${record.address.split('://')[1]}`)
-          .layoutWeight(1).padding({ left: 12, right: 12, top: 10, bottom: 10 })
-          .backgroundColor(this.isPaired && this.base === record.address ? this.accentTint() : $r('app.color.pigo_control'))
-          .border({ width: this.isPaired && this.base === record.address ? 1 : 0, radius: 12, color: this.accent() })
-          .enabled(!this.busy && !this.openingSession && !this.removeTarget)
-          .onClick(() => {
-            if (!this.isPaired || this.base !== record.address) this.chooseComputer(record);
-          })
-        if (this.removeTarget === record.address) {
-          Button('确认移除').chatAction().id('confirm-remove').height(40).enabled(!this.busy)
-            .backgroundColor($r('app.color.pigo_error_panel')).fontColor($r('app.color.pigo_error'))
-            .onClick(() => { this.removeComputer(record.address); })
-          Button('取消').chatAction().height(40).enabled(!this.busy).onClick(() => { this.removeTarget = ''; })
-        } else {
-          Button({ type: ButtonType.Normal }) {
-            Image($r('app.media.ic_more')).width(18).height(18).fillColor($r('app.color.pigo_muted'))
-          }.id(`remove-${record.address}`).width(40).height(44).padding(0).borderRadius(12)
-            .backgroundColor(Color.Transparent)
-            .accessibilityText('连接操作')
-            .enabled(!this.busy && !this.openingSession && !this.removeTarget)
-            .bindMenu(this.computerConnectionMenu(record))
-        }
-      }.width('100%')
-      if (this.moveConnectionAddress === record.address) {
-        Column({ space: 6 }) {
-          Text('将此连接归到哪台电脑？').fontSize(13).fontColor($r('app.color.pigo_muted')).width('100%')
-          ForEach(computerGroups(this.computers).filter((other: ComputerGroup): boolean => other.id !== group.id),
-            (other: ComputerGroup) => {
-              Button(computerGroupTitle(other)).chatAction().id(`move-to-${other.id}`).width('100%').height(40)
-                .onClick(() => { this.assignComputerConnection(record.address, other); })
-            }, (other: ComputerGroup) => `${other.id}|${other.name}`)
-          if (group.connections.length > 1) {
-            Button('设为独立电脑').chatAction().id('separate-connection').width('100%').height(40)
-              .onClick(() => { this.assignComputerConnection(record.address); })
-          }
-          Button('取消').chatAction().width('100%').height(38).onClick(() => { this.closeComputerEditors(); })
-        }.width('100%').padding(10).borderRadius(12).backgroundColor($r('app.color.launch_background'))
-      }
-    }.width('100%').alignItems(HorizontalAlign.Start)
+  private topContentClearance(): number {
+    return this.statusBarHeight + this.headerHeight() + 14;
   }
 
-  @Builder
-  computerList() {
-    ForEach(computerGroups(this.computers), (group: ComputerGroup) => {
-      Column({ space: 10 }) {
-        Row({ space: 8 }) {
-          SymbolGlyph($r('sys.symbol.computer')).fontSize(20).fontColor([this.accent()])
-          Text(computerGroupTitle(group)).fontSize(16).fontWeight(FontWeight.Bold).fontColor($r('app.color.pigo_text'))
-            .layoutWeight(1).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
-          Button({ type: ButtonType.Normal }) {
-            SymbolGlyph($r('sys.symbol.plus')).fontSize(18).fontColor([$r('app.color.pigo_text')])
-          }.id(`add-connection-${group.id}`).width(36).height(36).padding(0).borderRadius(10)
-            .backgroundColor($r('app.color.pigo_control'))
-            .accessibilityText(`为${computerGroupTitle(group)}添加连接`)
-            .enabled(!this.busy && !this.openingSession && !this.removeTarget)
-            .onClick(() => { this.addComputerConnection(group.id); })
-          Button({ type: ButtonType.Normal }) {
-            SymbolGlyph($r('sys.symbol.pencil_line')).fontSize(17).fontColor([$r('app.color.pigo_muted')])
-          }.id(`rename-computer-${group.id}`).width(36).height(36).padding(0).borderRadius(10)
-            .backgroundColor(Color.Transparent)
-            .accessibilityText(`修改${computerGroupTitle(group)}备注`)
-            .enabled(!this.busy && !this.removeTarget)
-            .onClick(() => {
-              this.closeComputerEditors();
-              this.computerNameDraft = group.name;
-              this.renameComputerId = group.id;
-            })
-        }.width('100%')
-        if (this.renameComputerId === group.id) {
-          TextInput({ placeholder: '电脑备注名', text: this.computerNameDraft }).id('computer-name-input')
-            .backgroundColor($r('app.color.pigo_control')).fontColor($r('app.color.pigo_text'))
-            .placeholderColor($r('app.color.pigo_muted'))
-            .maxLength(40).onChange((value: string) => { this.computerNameDraft = value; }).width('100%')
-          Row({ space: 8 }) {
-            Button('保存').chatAction().id('save-computer-name').height(38)
-              .backgroundColor(this.accent()).fontColor(this.accentForeground())
-              .onClick(() => { this.saveComputerName(group.id); })
-            Button('取消').chatAction().height(38).onClick(() => { this.closeComputerEditors(); this.dismissKeyboard(); })
-          }.width('100%')
-        }
-        ForEach(group.connections, (record: Companion) => {
-          this.computerConnection(record, group)
-        }, (record: Companion) => record.address)
-      }.width('100%').padding(14).borderRadius(16).backgroundColor($r('app.color.pigo_panel'))
-        .border({ width: 1, color: $r('app.color.pigo_line') })
-    }, (group: ComputerGroup) => `${group.id}|${group.name}|${group.connections.map((record: Companion): string => record.address).join('|')}`)
-    if (this.removeTarget) {
-      Text(this.huaweiProfile ? '移除手机上的配对和账号列表中的连接记录。' : '移除手机上的这条配对记录。')
-        .fontSize(12).fontColor($r('app.color.pigo_muted')).width('100%')
-    }
+  private bottomContentClearance(): number {
+    return (this.showRootBottomTabs() ? this.bottomTabsHeight() + 18 : 0) + this.bottomPad() + 14;
   }
 
-  @Builder
-  cloudComputerList() {
-    if (this.cloudOnlyComputers().length) {
-      Text('从账号恢复的连接').fontSize(16).fontWeight(FontWeight.Bold).fontColor($r('app.color.pigo_text')).width('100%')
-      ForEach(this.cloudOnlyComputers(), (computer: CloudComputer) => {
-        Column({ space: 8 }) {
-          Text(`${computer.mode === 'usb' ? 'USB' : computer.mode === 'lan' ? '局域网' : '公网'} · ${computer.address.split('://')[1]}`)
-            .fontSize(15).fontColor($r('app.color.pigo_text')).width('100%')
-          Row({ space: 8 }) {
-            if (this.removeTarget === computer.address) {
-              Button('从账号移除').chatAction().enabled(!this.busy)
-                .backgroundColor($r('app.color.pigo_error_panel')).fontColor($r('app.color.pigo_error'))
-                .onClick(() => { this.removeCloudComputer(computer); })
-              Button('取消').chatAction().onClick(() => { this.removeTarget = ''; })
-            } else {
-              Button('在本机配对').chatAction().backgroundColor(this.accent()).fontColor(this.accentForeground())
-                .enabled(!this.busy && !this.openingSession && !this.removeTarget)
-                .onClick(() => { this.restoreCloudComputer(computer); })
-              Button('移除').chatAction().enabled(!this.busy && !this.removeTarget)
-                .onClick(() => { this.removeTarget = computer.address; })
-            }
-          }.width('100%')
-        }.width('100%').padding(14).backgroundColor($r('app.color.pigo_panel')).borderRadius(16)
-          .border({ width: 1, color: $r('app.color.pigo_line') })
-      }, (computer: CloudComputer) => computer.address)
-    }
-  }
-
-  @Builder
-  pairingForm() {
-    Column({ space: 14 }) {
-      if (this.pairingComputerId) {
-        Text(this.pairingComputerTitle()).fontSize(16).fontWeight(FontWeight.Medium)
-          .fontColor($r('app.color.pigo_text')).width('100%')
-      }
-      if (this.restoringComputer) {
-        Text('请从这台电脑获取新的配对码或配对包。')
-          .fontSize(14).fontColor($r('app.color.pigo_text')).width('100%')
-      }
-      Row({ space: 4 }) {
-        Button('USB', { type: ButtonType.Normal }).chatAction().id('usb-transport').layoutWeight(1).height(38).borderRadius(10)
-          .accessibilitySelected(this.pairingMode === 'usb')
-          .backgroundColor(this.pairingMode === 'usb' ? this.accent() : Color.Transparent)
-          .fontColor(this.pairingMode === 'usb' ? this.accentForeground() : $r('app.color.pigo_muted'))
-          .onClick(() => { this.selectPairingMode('usb'); })
-        Button('局域网', { type: ButtonType.Normal }).chatAction().id('transport').layoutWeight(1).height(38).borderRadius(10)
-          .accessibilitySelected(this.pairingMode === 'lan')
-          .backgroundColor(this.pairingMode === 'lan' ? this.accent() : Color.Transparent)
-          .fontColor(this.pairingMode === 'lan' ? this.accentForeground() : $r('app.color.pigo_muted'))
-          .onClick(() => { this.selectPairingMode('lan'); })
-        Button('公网', { type: ButtonType.Normal }).chatAction().id('remote-transport').layoutWeight(1).height(38).borderRadius(10)
-          .accessibilitySelected(this.pairingMode === 'remote')
-          .backgroundColor(this.pairingMode === 'remote' ? this.accent() : Color.Transparent)
-          .fontColor(this.pairingMode === 'remote' ? this.accentForeground() : $r('app.color.pigo_muted'))
-          .onClick(() => { this.selectPairingMode('remote'); })
-      }.width('100%').padding(4).borderRadius(14).backgroundColor($r('app.color.pigo_control'))
-        .enabled(!this.busy && !this.removeTarget)
-      if (this.pairingMode !== 'usb') {
-        Text(this.pairingMode === 'remote' ? '扫描或粘贴 Pi Go.app「公网」生成的配对包。' :
-          '扫描或粘贴 Pi Go.app「局域网扫码」生成的配对包。').fontSize(14).fontColor($r('app.color.pigo_muted')).width('100%')
-        Row({ space: 8 }) {
-          if (this.pairingMode === 'lan') {
-            Button('发现电脑').chatAction().id('lan-discover').enabled(!this.busy && !this.removeTarget).onClick(() => { void this.findLanCompanions(); })
-          }
-          Button('扫码导入').chatAction().id(this.pairingMode === 'remote' ? 'remote-scan' : 'lan-scan')
-            .enabled(!this.busy && !this.removeTarget).onClick(() => { void this.scanPairingBundle(); })
-        }.width('100%')
-        if (this.lanCandidates.length) {
-          Text('附近地址（未验证）').fontSize(12).fontColor($r('app.color.pigo_muted')).width('100%')
-          Scroll() {
-            Column({ space: 4 }) {
-              ForEach(this.lanCandidates, (candidate: string) => {
-                Text(candidate).width('100%').fontSize(14).fontColor($r('app.color.pigo_text'))
-              }, (candidate: string) => candidate)
-            }.width('100%')
-          }.constraintSize({ maxHeight: 100 }).width('100%').scrollBar(BarState.Off)
-        }
-        TextInput({ placeholder: this.pairingMode === 'remote' ? '公网配对包' : '局域网配对包', text: this.pairingBundle })
-          .id(this.pairingMode === 'remote' ? 'remote-bundle' : 'lan-bundle').type(InputType.Password).maxLength(4096)
-          .backgroundColor($r('app.color.pigo_control')).fontColor($r('app.color.pigo_text'))
-          .placeholderColor($r('app.color.pigo_muted'))
-          .onChange((value: string) => { this.pairingBundle = value; }).width('100%')
-      } else {
-        Text('用 USB 连接电脑并允许调试，再在 Pi Go.app 选择「USB」并点「连接手机」。').fontSize(14).fontColor($r('app.color.pigo_muted')).width('100%')
-        TextInput({ placeholder: 'USB 地址', text: this.address }).id('address')
-          .backgroundColor($r('app.color.pigo_control')).fontColor($r('app.color.pigo_text'))
-          .placeholderColor($r('app.color.pigo_muted'))
-          .onChange((value: string) => { this.address = value; }).width('100%')
-        TextInput({ placeholder: '8 位配对码或一次性票据', text: this.ticket }).id('ticket').type(InputType.Password)
-          .backgroundColor($r('app.color.pigo_control')).fontColor($r('app.color.pigo_text'))
-          .placeholderColor($r('app.color.pigo_muted'))
-          .onChange((value: string) => { this.ticket = value; }).width('100%')
-      }
-      Button('配对并连接').chatAction().id('pair').enabled(!this.busy && !this.openingSession && !this.removeTarget)
-        .backgroundColor(this.accent()).fontColor(this.accentForeground()).width('100%').height(46)
-        .onClick(() => { void this.pair(); })
-    }.padding(16).backgroundColor($r('app.color.pigo_panel')).borderRadius(16).width('100%')
-      .border({ width: 1, color: $r('app.color.pigo_line') })
-  }
-
-  @Builder
-  profileCard() {
-    Column({ space: 12 }) {
-      Row({ space: 14 }) {
-        Stack() {
-          if (this.huaweiProfile?.avatar && !this.avatarUnavailable) {
-            Image(this.huaweiProfile.avatar).width(50).height(50).objectFit(ImageFit.Cover)
-              .onError(() => { this.avatarUnavailable = true; })
-          } else {
-            SymbolGlyph($r('sys.symbol.person')).fontSize(24).fontColor([this.accent()])
-          }
-        }.width(50).height(50).backgroundColor(this.accentTint()).borderRadius(25).clip(true)
-        Column({ space: 4 }) {
-          Text(this.huaweiProfile?.name || '个人资料').fontSize(19).fontWeight(FontWeight.Bold)
-            .fontColor($r('app.color.pigo_text')).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
-          Text(this.huaweiProfile ? '华为账号已登录' : '华为账号未登录').fontSize(13).fontColor($r('app.color.pigo_muted'))
-        }.layoutWeight(1).alignItems(HorizontalAlign.Start)
-        if (this.huaweiProfile) {
-          Button(this.accountBusy ? '请稍候…' : '退出', { type: ButtonType.Normal })
-            .id('huawei-signout').height(34).padding({ left: 12, right: 12 }).borderRadius(10)
-            .fontSize(13).fontWeight(FontWeight.Medium)
-            .backgroundColor(Color.Transparent).fontColor($r('app.color.pigo_muted'))
-            .enabled(!this.accountBusy)
-            .onClick(() => { void this.signOutHuawei(); })
-        }
-      }.width('100%')
-      if (!this.huaweiProfile) {
-        Button(this.accountBusy ? '请稍候…' : '使用华为账号登录')
-          .chatAction().id('huawei-account').width('100%').height(44).enabled(!this.accountBusy)
-          .backgroundColor(this.accent()).fontColor(this.accentForeground())
-          .onClick(() => { void this.signInHuawei(); })
-      }
-      if (this.accountNotice) {
-        Text(this.accountNotice).fontSize(13).fontColor($r('app.color.pigo_warning')).width('100%')
-      }
-      if (this.huaweiProfile) {
-        Divider().color($r('app.color.pigo_line'))
-        Row({ space: 10 }) {
-          Text(this.cloudSyncStatus || '通过华为云空间同步电脑列表和主题偏好。')
-            .fontSize(13).fontColor($r('app.color.pigo_muted')).layoutWeight(1)
-            .maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis })
-          Button(this.cloudSyncBusy ? '同步中…' : '立即同步').chatAction().id('sync-account-settings')
-            .height(34).fontSize(13).padding({ left: 12, right: 12 })
-            .enabled(!this.cloudSyncBusy && !this.accountBusy)
-            .onClick(() => { this.scheduleCloudSync(0); })
-        }.width('100%')
-      }
-    }.width('100%').padding(16).backgroundColor($r('app.color.pigo_panel')).borderRadius(16)
-      .border({ width: 1, color: $r('app.color.pigo_line') })
-  }
-
-  @Builder
-  mineEntry(page: string, label: string, summary: string) {
-    Button({ type: ButtonType.Normal }) {
-      Row({ space: 12 }) {
-        Stack() {
-          if (page === 'computers') {
-            SymbolGlyph($r('sys.symbol.computer')).fontSize(21).fontColor([this.accent()])
-          } else {
-            Row({ space: 3 }) {
-              Blank().width(6).height(6).borderRadius(3).backgroundColor(this.accentFor(THEME_STYLES[0]))
-              Blank().width(6).height(6).borderRadius(3).backgroundColor(this.accentFor(THEME_STYLES[1]))
-              Blank().width(6).height(6).borderRadius(3).backgroundColor(this.accentFor(THEME_STYLES[2]))
-            }
-          }
-        }.width(40).height(40).backgroundColor(this.accentTint()).borderRadius(12)
-        Column({ space: 4 }) {
-          Text(label).fontSize(16).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
-          Text(summary).fontSize(13).fontColor($r('app.color.pigo_muted')).maxLines(1)
-            .textOverflow({ overflow: TextOverflow.Ellipsis })
-        }.layoutWeight(1).alignItems(HorizontalAlign.Start)
-        SymbolGlyph($r('sys.symbol.chevron_right')).fontSize(15).fontColor([$r('app.color.pigo_muted')])
-      }.width('100%').padding(14)
-    }.id(`mine-${page}`).width('100%').padding(0).backgroundColor($r('app.color.pigo_panel'))
-      .border({ width: 1, radius: 16, color: $r('app.color.pigo_line') })
-      .onClick(() => { this.minePage = page; })
-  }
-
-  @Builder
-  themeSettings() {
-    Column({ space: 10 }) {
-      Text('显示模式').fontSize(16).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text')).width('100%')
-      Row({ space: 4 }) {
-        ForEach(APPEARANCE_MODES, (mode: AppearanceMode) => {
-          Button(mode.label, { type: ButtonType.Normal }).chatAction().layoutWeight(1).height(38).padding(4).borderRadius(10)
-            .id(`appearance-${mode.id}`).accessibilitySelected(this.modeId === mode.id)
-            .backgroundColor(this.modeId === mode.id ? this.accent() : Color.Transparent)
-            .fontColor(this.modeId === mode.id ? this.accentForeground() : $r('app.color.pigo_muted'))
-            .onClick(() => { this.selectAppearanceMode(mode); })
-        }, (mode: AppearanceMode) => mode.id)
-      }.width('100%').padding(4).borderRadius(14).backgroundColor($r('app.color.pigo_control'))
-    }.width('100%').padding(16).backgroundColor($r('app.color.pigo_panel')).borderRadius(16)
-      .border({ width: 1, color: $r('app.color.pigo_line') })
-    Column({ space: 6 }) {
-      Text('主题配色').fontSize(16).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text')).width('100%')
-      ForEach(THEME_STYLES, (style: ThemeStyle) => {
-        Button({ type: ButtonType.Normal }) {
-          Row({ space: 12 }) {
-            Blank().width(22).height(22).borderRadius(11).backgroundColor(this.accentFor(style))
-            Text(style.label).fontSize(15).fontColor($r('app.color.pigo_text')).layoutWeight(1)
-            if (this.themeId === style.id) {
-              SymbolGlyph($r('sys.symbol.checkmark')).fontSize(17).fontColor([this.accent()])
-            }
-          }.width('100%').padding({ left: 12, right: 12 })
-        }.id(`theme-${style.id}`).width('100%').height(44).padding(0).borderRadius(12)
-          .accessibilitySelected(this.themeId === style.id)
-          .backgroundColor(this.themeId === style.id ? this.accentTint() : Color.Transparent)
-          .onClick(() => { this.selectTheme(style.id); })
-      }, (style: ThemeStyle) => style.id)
-    }.width('100%').padding(16).backgroundColor($r('app.color.pigo_panel')).borderRadius(16)
-      .border({ width: 1, color: $r('app.color.pigo_line') })
-    if (this.appearanceNotice) Text(this.appearanceNotice).fontSize(13).fontColor($r('app.color.pigo_warning'))
-  }
-
-  @Builder
-  runNoticeSettings() {
-    Row({ space: 12 }) {
-      Column({ space: 4 }) {
-        Text('运行结束通知').fontSize(16).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
-        Text('任务结束时在应用顶部显示横幅').fontSize(13).fontColor($r('app.color.pigo_muted'))
-      }.layoutWeight(1).alignItems(HorizontalAlign.Start)
-      Toggle({ type: ToggleType.Switch, isOn: this.runNoticesEnabled })
-        .id('run-notice-setting').selectedColor(this.accent()).accessibilityText('运行结束通知')
-        .onChange((enabled: boolean) => { void this.setRunNoticesEnabled(enabled); })
-    }.width('100%').padding(14).backgroundColor($r('app.color.pigo_panel')).borderRadius(16)
-      .border({ width: 1, color: $r('app.color.pigo_line') })
-  }
-
-  private liveViewSummary(): string {
-    if (this.liveViewStatus === 'rights') return '当前版本暂不支持系统实况窗';
-    if (this.liveViewStatus === 'disabled') return '系统实况窗开关未开启，请在系统应用设置中开启';
-    if (this.liveViewStatus === 'error') return '实况窗暂时不可用，将在运行期间自动重试';
-    return '在状态栏、锁屏和通知中心显示当前任务状态';
-  }
-
-  @Builder
-  liveViewSettings() {
-    Row({ space: 12 }) {
-      Column({ space: 4 }) {
-        Text('任务实况窗').fontSize(16).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
-        Text(this.liveViewSummary()).fontSize(13).fontColor($r('app.color.pigo_muted'))
-      }.layoutWeight(1).alignItems(HorizontalAlign.Start)
-      Toggle({ type: ToggleType.Switch, isOn: this.liveViewsEnabled })
-        .id('live-view-setting').selectedColor(this.accent()).accessibilityText('任务实况窗')
-        .enabled(this.liveViewStatus !== 'rights')
-        .onChange((enabled: boolean) => { void this.setLiveViewsEnabled(enabled); })
-    }.width('100%').padding(14).backgroundColor($r('app.color.pigo_panel')).borderRadius(16)
-      .border({ width: 1, color: $r('app.color.pigo_line') })
-  }
-
-  @Builder
-  glassSurface(radius: number) {
-    Stack() {
-      Row().width('100%').height('100%').borderRadius(radius).clip(true)
-        .attributeModifier(immersiveSurface(this.darkMode))
-      Row().width('100%').height('100%').borderRadius(radius)
-        .border({ width: 1, color: this.darkMode ? '#38D5E5F4' : '#D9DDE5ED' })
-    }.width('100%').height('100%').hitTestBehavior(HitTestMode.None).accessibilityLevel('no-hide-descendants')
-  }
-
-  @Builder
-  headerSymbol(symbol: Resource, color: ResourceColor, size: number = 20) {
-    Stack() {
-      this.glassSurface(22)
-      SymbolGlyph(symbol).fontSize(size).fontColor([color])
-    }.width('100%').height('100%').accessibilityLevel('no-hide-descendants')
+  private chatHasTopCards(): boolean {
+    return (this.backgroundRunning().length > 0 && this.activeTab === 'tasks' && !this.showFiles &&
+      !this.showSettings && !this.noSession && !!this.currentId) ||
+      (!this.reachable && !this.offlineDismissed) || !!this.interaction || (!!this.pendingSend && !this.busy);
   }
 
   @Builder
@@ -4924,8 +3749,8 @@ struct Index {
     Row({ space: 12 }) {
       if (this.minePage) {
         Button({ type: ButtonType.Normal }) {
-          this.headerSymbol($r('sys.symbol.chevron_left'), $r('app.color.pigo_text'), 21)
-        }.headerAction()
+          headerSymbol($r('sys.symbol.chevron_left'), $r('app.color.pigo_text'), 21)
+        }.headerAction().attributeModifier(immersiveSurface(this.darkMode))
           .accessibilityText('返回').enabled(!this.busy).onClick(() => { this.mineBack(); })
       }
       Text(this.minePage === 'theme' ? '系统主题' : this.minePage === 'computers' ?
@@ -4933,76 +3758,71 @@ struct Index {
         .fontSize(this.minePage ? 20 : 26).fontWeight(FontWeight.Bold).fontColor($r('app.color.pigo_text')).layoutWeight(1)
       if (!this.minePage && this.computers.length) this.scheduleInboxButton()
     }.width('100%').height(this.headerHeight())
-      .border({ width: { bottom: 1 }, color: $r('app.color.pigo_line') })
   }
 
   @Builder
   mineView() {
-    Scroll() {
-      Column({ space: 12 }) {
-        if (this.minePage === 'computers') {
-          if (!this.addingComputer) {
-            this.computerList()
-            this.cloudComputerList()
-          }
-          if (this.addingComputer || !this.computers.length) {
-            this.pairingForm()
-          } else {
-            Button('添加电脑').chatAction().id('add-computer').width('100%').height(46)
-              .backgroundColor(this.accent()).fontColor(this.accentForeground())
-              .enabled(!this.busy && !this.openingSession && !this.removeTarget)
-              .onClick(() => { this.addComputerConnection(); })
-          }
-        } else if (this.minePage === 'theme') {
-          this.themeSettings()
-        } else {
-          this.profileCard()
-          this.mineEntry('computers', '电脑管理', this.isPaired ?
-            `${this.computerTitle()} · ${this.reachable ? '已连接' : '离线'}` :
-            (this.computers.length ? `${computerGroups(this.computers).length} 台电脑` : '配对并连接电脑'))
-          this.mineEntry('theme', '系统主题', `${themeStyle(this.themeId).label} · ${appearanceMode(this.modeId).label}`)
-          this.runNoticeSettings()
-          this.liveViewSettings()
-        }
-      }.width('100%').alignItems(HorizontalAlign.Start).padding({ top: 4, bottom: 16 })
-    }.layoutWeight(1).width('100%').align(Alignment.TopStart).scrollBar(BarState.Off)
-  }
-
-  @Builder
-  workspaceTreeRow(row: FileTreeRow) {
-    if (row.kind === 'empty') {
-      Text(row.name).fontSize(13).fontColor($r('app.color.pigo_muted'))
-        .width('100%').height(42).padding({ left: 36 + Math.min(row.depth, 10) * 14 })
-    } else {
-      Button({ type: ButtonType.Normal }) {
-        Row({ space: 8 }) {
-          SymbolGlyph(row.expanded ? $r('sys.symbol.chevron_down') : $r('sys.symbol.chevron_right'))
-            .fontSize(13).fontColor([$r('app.color.pigo_muted')])
-            .opacity(row.kind === 'directory' ? 1 : 0)
-          if (row.kind === 'directory') {
-            SymbolGlyph($r('sys.symbol.folder')).fontSize(18).fontColor([this.accent()])
-          } else if (row.kind !== 'more') {
-            SymbolGlyph($r('sys.symbol.doc')).fontSize(18).fontColor([$r('app.color.pigo_muted')]).width(19)
-          }
-          Text(row.name).fontSize(14).fontWeight(row.kind === 'directory' ? FontWeight.Medium : FontWeight.Regular)
-            .fontColor(row.kind === 'more' ? this.accent() : $r('app.color.pigo_text'))
-            .layoutWeight(1).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
-          if (row.kind === 'blocked') {
-            Text('不可访问').fontSize(11).fontColor($r('app.color.pigo_muted'))
-          }
-        }.width('100%').padding({ left: 12 + Math.min(row.depth, 10) * 14, right: 12 })
-      }.id(row.kind === 'more' ? `workspace-more-${row.path}` : `file-${row.path}`)
-        .width('100%').height(44).padding(0).borderRadius(8).backgroundColor(Color.Transparent)
-        .enabled(!this.busy && !this.openingSession && row.kind !== 'blocked')
-        .accessibilityText(row.kind === 'directory' ? `${row.name}，${row.expanded ? '已展开' : '已收起'}` :
-          row.kind === 'more' && row.path ? `加载更多，${row.path}` :
-          row.kind === 'blocked' ? `${row.name}，不可访问` : row.name)
-        .onClick(() => {
-          if (row.kind === 'directory') void this.toggleFileDirectory(row.path);
-          else if (row.kind === 'more') void this.loadFileDirectory(row.path, true);
-          else void this.openFile(this.fileRoot, row.path);
-        })
-    }
+    SettingsView({
+      accountBusy: this.accountBusy,
+      accountNotice: this.accountNotice,
+      addComputerConnection: (id?: string): void => this.addComputerConnection(id),
+      addingComputer: this.addingComputer,
+      address: this.$address,
+      appearanceNotice: this.appearanceNotice,
+      assignComputerConnection: (address: string, group?: ComputerGroup): void => this.assignComputerConnection(address, group),
+      avatarUnavailable: this.$avatarUnavailable,
+      base: this.base,
+      bottomContentClearance: this.bottomContentClearance(),
+      busy: this.busy,
+      chooseComputer: (record: Companion): void => this.chooseComputer(record),
+      closeComputerEditors: (): void => this.closeComputerEditors(),
+      cloudComputers: this.$cloudComputers,
+      cloudSyncBusy: this.cloudSyncBusy,
+      cloudSyncStatus: this.cloudSyncStatus,
+      computerConnectionMenu: (record: Companion): MenuElement[] => this.computerConnectionMenu(record),
+      computerNameDraft: this.$computerNameDraft,
+      computers: this.$computers,
+      darkMode: this.darkMode,
+      dismissKeyboard: (): void => this.dismissKeyboard(),
+      findLanCompanions: (): Promise<void> => this.findLanCompanions(),
+      huaweiProfile: this.huaweiProfile,
+      isPaired: this.isPaired,
+      lanCandidates: this.$lanCandidates,
+      liveViewStatus: this.liveViewStatus,
+      liveViewsEnabled: this.liveViewsEnabled,
+      minePage: this.$minePage,
+      modeId: this.modeId,
+      moveConnectionAddress: this.moveConnectionAddress,
+      openingSession: this.openingSession,
+      pair: (): Promise<void> => this.pair(),
+      pairingBundle: this.$pairingBundle,
+      pairingComputerId: this.pairingComputerId,
+      pairingMode: this.pairingMode,
+      reachable: this.reachable,
+      removeCloudComputer: (computer: CloudComputer): void => this.removeCloudComputer(computer),
+      removeComputer: (address: string): void => this.removeComputer(address),
+      removeTarget: this.$removeTarget,
+      renameComputerId: this.$renameComputerId,
+      restoreCloudComputer: (computer: CloudComputer): void => this.restoreCloudComputer(computer),
+      restoringComputer: this.restoringComputer,
+      runNoticesEnabled: this.runNoticesEnabled,
+      saveComputerName: (id: string): void => this.saveComputerName(id),
+      scanPairingBundle: (): Promise<void> => this.scanPairingBundle(),
+      scheduleCloudSync: (delay?: number): void => this.scheduleCloudSync(delay),
+      selectAppearanceMode: (mode: AppearanceMode): void => this.selectAppearanceMode(mode),
+      selectPairingMode: (mode: string): void => this.selectPairingMode(mode),
+      selectTheme: (id: string): void => this.selectTheme(id),
+      setLiveViewsEnabled: (enabled: boolean): Promise<void> => this.setLiveViewsEnabled(enabled),
+      setRunNoticesEnabled: (enabled: boolean): Promise<void> => this.setRunNoticesEnabled(enabled),
+      signInHuawei: (): Promise<void> => this.signInHuawei(),
+      signOutHuawei: (): Promise<void> => this.signOutHuawei(),
+      themeId: this.themeId,
+      ticket: this.$ticket,
+      topContentClearance: this.topContentClearance(),
+      accent: this.accent(),
+      accentForeground: this.accentForeground(),
+      accentTint: this.accentTint()
+    })
   }
 
   @Builder
@@ -5010,8 +3830,8 @@ struct Index {
     Column({ space: 12 }) {
       Row({ space: 12 }) {
         Button({ type: ButtonType.Normal }) {
-          this.headerSymbol($r('sys.symbol.chevron_left'), $r('app.color.pigo_text'), 21)
-        }.id('file-back').headerAction().accessibilityText(this.fileText !== this.fileOriginal ? '放弃修改' : '返回')
+          headerSymbol($r('sys.symbol.chevron_left'), $r('app.color.pigo_text'), 21)
+        }.id('file-back').headerAction().attributeModifier(glassButtonSurface(this.darkMode)).accessibilityText(this.fileText !== this.fileOriginal ? '放弃修改' : '返回')
           .enabled(!this.busy).onClick(() => { this.returnToFilePreview(true); })
         Text(this.editingPath.split('/').pop() || this.editingPath)
           .fontSize(19).fontWeight(FontWeight.Bold).fontColor($r('app.color.pigo_text'))
@@ -5041,31 +3861,21 @@ struct Index {
 
   @Builder
   workspaceFiles() {
-    Column() {
-      Row({ space: 10 }) {
-        SymbolGlyph($r('sys.symbol.folder')).fontSize(21).fontColor([this.accent()])
-        Column({ space: 2 }) {
-          Text(this.project || '项目根目录').fontSize(15).fontWeight(FontWeight.Medium)
-            .fontColor($r('app.color.pigo_text')).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
-          Text(this.fileRoot).fontSize(11).fontColor($r('app.color.pigo_muted')).maxLines(1)
-            .textOverflow({ overflow: TextOverflow.Ellipsis }).copyOption(CopyOptions.LocalDevice)
-        }.layoutWeight(1).alignItems(HorizontalAlign.Start)
-      }.width('100%').padding({ left: 14, right: 14, top: 10, bottom: 10 })
-      Divider().color($r('app.color.pigo_line'))
-      if (this.fileTreeRows.length) {
-        List({ initialIndex: this.fileTreeIndex }) {
-          ForEach(this.fileTreeRows, (row: FileTreeRow) => {
-            ListItem() { this.workspaceTreeRow(row) }
-          }, (row: FileTreeRow): string => `${row.kind}:${row.expanded ?? false}:${row.path}`)
-        }.width('100%').layoutWeight(1).padding({ top: 4, bottom: 4, left: 4, right: 4 }).scrollBar(BarState.Off)
-          .onScrollIndex((start: number) => { this.fileTreeIndex = Math.max(0, start); })
-      } else {
-        Text(this.busy ? '正在读取目录…' : '未能读取目录')
-          .fontSize(13).fontColor($r('app.color.pigo_muted')).width('100%').padding(16)
-      }
-    }.width('100%').layoutWeight(1).alignItems(HorizontalAlign.Start).borderRadius(16)
-      .backgroundColor($r('app.color.pigo_panel')).border({ width: 1, color: $r('app.color.pigo_line') })
-      .clip(true)
+    WorkspaceFiles({
+      bottomContentClearance: this.bottomContentClearance(),
+      busy: this.busy,
+      fileRoot: this.fileRoot,
+      fileTreeIndex: this.fileTreeIndex,
+      fileTreeRows: this.$fileTreeRows,
+      loadFileDirectory: (path: string, more?: boolean): Promise<void> => this.loadFileDirectory(path, more),
+      openFile: (cwd: string, path: string, lookupName?: boolean): Promise<void> => this.openFile(cwd, path, lookupName),
+      openingSession: this.openingSession,
+      project: this.project,
+      toggleFileDirectory: (path: string): Promise<void> => this.toggleFileDirectory(path),
+      topContentClearance: this.topContentClearance(),
+      accent: this.accent(),
+      setFileTreeIndex: (index: number): void => { this.fileTreeIndex = index; }
+    })
   }
 
   @Builder
@@ -5138,7 +3948,7 @@ struct Index {
           }
         }.width('100%').padding(14).borderRadius(16).backgroundColor($r('app.color.pigo_panel'))
           .border({ width: 1, color: $r('app.color.pigo_line') })
-      }.width('100%').padding({ top: 4, bottom: 16 })
+      }.width('100%').padding({ left: 16, right: 16, top: this.topContentClearance(), bottom: this.bottomPad() + 16 })
     }.layoutWeight(1).width('100%').align(Alignment.TopStart).scrollBar(BarState.Off)
   }
 
@@ -5147,12 +3957,12 @@ struct Index {
     Row({ space: 10 }) {
       if (this.showSettings) {
         Button({ type: ButtonType.Normal }) {
-          this.headerSymbol($r('sys.symbol.chevron_left'), $r('app.color.pigo_text'), 21)
-        }.headerAction().accessibilityText('返回会话').onClick(() => { this.showSettings = false; })
+          headerSymbol($r('sys.symbol.chevron_left'), $r('app.color.pigo_text'), 21)
+        }.headerAction().attributeModifier(immersiveSurface(this.darkMode)).accessibilityText('返回会话').onClick(() => { this.showSettings = false; })
       } else if (!this.dockedSessions() && !this.showFiles) {
         Button({ type: ButtonType.Normal }) {
-          this.headerSymbol($r('sys.symbol.line_2_horizontal'), $r('app.color.pigo_text'), 20)
-        }.id('history').headerAction()
+          headerSymbol($r('sys.symbol.line_2_horizontal'), $r('app.color.pigo_text'), 20)
+        }.id('history').headerAction().attributeModifier(immersiveSurface(this.darkMode))
           .accessibilityText('打开会话抽屉').enabled(!this.busy)
           .onClick(() => { this.setDrawer(true); })
       }
@@ -5173,25 +3983,24 @@ struct Index {
       }.layoutWeight(1).alignItems(HorizontalAlign.Start)
       if (this.showFiles) {
         Button({ type: ButtonType.Normal }) {
-          this.headerSymbol($r('sys.symbol.arrow_clockwise'), $r('app.color.pigo_text'), 19)
-        }.id('file-refresh').headerAction().accessibilityText('刷新工作区')
+          headerSymbol($r('sys.symbol.arrow_clockwise'), $r('app.color.pigo_text'), 19)
+        }.id('file-refresh').headerAction().attributeModifier(immersiveSurface(this.darkMode)).accessibilityText('刷新工作区')
           .enabled(!this.busy && !this.openingSession && this.reachable)
           .onClick(() => { void this.loadFileDirectory(''); })
       } else if (!this.showSettings) {
         Row({ space: 6 }) {
           this.scheduleInboxButton()
           Button({ type: ButtonType.Normal }) {
-            this.headerSymbol($r('sys.symbol.square_and_pencil'), this.accent(), 19)
-          }.id('new-task').headerAction().accessibilityText('在当前工作区新建会话')
+            headerSymbol($r('sys.symbol.square_and_pencil'), this.accent(), 19)
+          }.id('new-task').headerAction().attributeModifier(immersiveSurface(this.darkMode)).accessibilityText('在当前工作区新建会话')
             .enabled(this.reachable && !this.busy && !this.openingSession && this.hostAvailable &&
               !!this.workspaceCwd && this.projects.includes(this.workspaceCwd))
             .onClick(() => { this.activeTab = 'tasks'; void this.requestAction('/new', { cwd: this.workspaceCwd }); })
           Button({ type: ButtonType.Normal }) {
             Stack() {
-              this.glassSurface(22)
               Image($r('app.media.ic_more')).width(20).height(20).fillColor($r('app.color.pigo_text'))
             }.width('100%').height('100%').accessibilityLevel('no-hide-descendants')
-          }.id('session-settings').headerAction().accessibilityText('更多操作')
+          }.id('session-settings').headerAction().attributeModifier(immersiveSurface(this.darkMode)).accessibilityText('更多操作')
             .bindMenu([
               { value: '模型与会话设置', action: () => {
                 if (this.reachable && this.currentId) void this.requestAction('/models');
@@ -5201,21 +4010,78 @@ struct Index {
         }
       }
     }.width('100%').height(this.headerHeight())
-      .border({ width: { bottom: 1 }, color: $r('app.color.pigo_line') })
   }
 
   @Builder
   pageHeader() {
-    if (this.activeTab === 'mine') {
-      this.mineHeader()
-    } else {
-      this.chatHeader()
-    }
+    Column() {
+      if (this.activeTab === 'mine') {
+        this.mineHeader()
+      } else {
+        this.chatHeader()
+      }
+    }.width('100%').padding({ left: 16, right: 16, top: this.statusBarHeight + 8, bottom: 12 })
+      .linearGradient({
+        direction: GradientDirection.Bottom,
+        colors: this.darkMode
+          ? [['#FA121519', 0], ['#D9121519', 0.55], ['#44121519', 0.85], ['#00121519', 1]]
+          : [['#FAF8F9FB', 0], ['#D9F8F9FB', 0.55], ['#44F8F9FB', 0.85], ['#00F8F9FB', 1]]
+      })
+  }
+
+  @Builder
+  chatTranscript() {
+    ChatTranscript({
+      base: this.base,
+      busy: this.busy,
+      closeMarkdownTableReader: (): void => this.closeMarkdownTableReader(),
+      copyText: (value: string): Promise<void> => this.copyText(value),
+      currentId: this.currentId,
+      darkMode: this.darkMode,
+      dismissKeyboard: (): void => this.dismissKeyboard(),
+      historyCursor: this.historyCursor,
+      idle: this.idle,
+      keyboardHeight: this.keyboardHeight,
+      liveText: this.liveText,
+      liveThinking: this.liveThinking,
+      liveThinkingOpen: this.$liveThinkingOpen,
+      liveTools: this.$liveTools,
+      loadHistory: (): Promise<void> => this.loadHistory(),
+      loadHistoryImage: (sessionId: string, messageId: string, index: number, toolId: string): Promise<string> => this.loadHistoryImage(sessionId, messageId, index, toolId),
+      loadMarkdownImage: (target: string, cwd: string, documentPath: string): Promise<string> => this.loadMarkdownImage(target, cwd, documentPath),
+      loadingMessageText: this.loadingMessageText,
+      messages: this.$messages,
+      openMarkdownLink: (target: string, cwd: string, documentPath: string): Promise<void> => this.openMarkdownLink(target, cwd, documentPath),
+      openMarkdownTableReader: (source: string, cwd: string, documentPath: string): void => this.openMarkdownTableReader(source, cwd, documentPath),
+      openReferencedFile: (cwd: string, path: string, lookupName: boolean): Promise<void> => this.openReferencedFile(cwd, path, lookupName),
+      openToolDetails: (tool: LiveTool, messageId: string): void => this.openToolDetails(tool, messageId),
+      openingFile: this.openingFile,
+      positionTranscript: (id: string, contentHeight: number): void => this.positionTranscript(id, contentHeight),
+      queuedSteering: this.$queuedSteering,
+      reachable: this.reachable,
+      showChatImage: (source: string, label: string): void => this.showChatImage(source, label),
+      showFullReply: (messageId: string): Promise<void> => this.showFullReply(messageId),
+      thinkingOpenIds: this.$thinkingOpenIds,
+      toggleThinking: (id: string, open: boolean): void => this.toggleThinking(id, open),
+      transcript: this.transcript,
+      transcriptFollow: this.$transcriptFollow,
+      workspaceCwd: this.workspaceCwd,
+      emptyTranscript: this.emptyTranscript.bind(this),
+      accent: this.accent(),
+      accentTint: this.accentTint(),
+      topPadding: this.chatHasTopCards() ? 10 : this.topContentClearance(),
+      readTranscriptHeight: () => this.transcriptContentHeight,
+      setTranscriptViewport: (height: number): void => { this.transcriptViewport = height; }
+    })
+  }
+
+  @Builder
+  emptyTranscript() {
+    this.welcome(true)
   }
 
   @Builder
   chat() {
-    this.runningStrip()
     if (this.showFiles) {
       this.workspaceFiles()
     } else if (this.showSettings) {
@@ -5225,383 +4091,127 @@ struct Index {
     } else if (this.noSession) {
       this.welcome()
     } else {
-      if (!this.reachable && !this.offlineDismissed) this.offlineNotice(false)
-      if (this.interaction) this.pendingCard(this.interaction)
-      if (this.pendingSend && !this.busy) {
-        Row({ space: 8 }) {
-          Button('核对发送').chatAction().id('check-send').enabled(this.reachable).onClick(() => { void this.checkSend(); })
-          Button('保留草稿').chatAction().id('keep-draft').onClick(() => {
-            this.unconfirmed.delete(this.draftKey(this.currentId));
-            this.pendingSend = undefined;
-            this.status = '已保留草稿，未重发。';
-          })
-        }.width('100%')
-      }
-      Stack({ alignContent: Alignment.BottomEnd }) {
-        ForEach([this.currentId], (transcriptId: string) => {
-          Scroll(this.transcript) {
-            Column({ space: 10 }) {
-              if (this.historyCursor) {
-                Button('更早的消息').chatAction().id('history-more').enabled(this.reachable && !this.busy)
-                  .onClick(() => { void this.loadHistory(); })
-              }
-              if (!this.messages.length && !this.liveText && !this.liveTools.length && !this.liveThinking && this.idle) {
-                this.welcome(true)
-              }
-              ForEach(this.messages, (message: ChatMessage) => {
-                if (message.text || message.thinking || message.imageCount) {
-                  Row() {
-                    Column({ space: 8 }) {
-                      if (message.thinking) this.thinkingCard(message.id, message.thinking, message.thinkingMs ?? -1,
-                        this.thinkingOpenIds.includes(message.id))
-                      if (message.text) {
-                        if (message.role === 'user') {
-                          Text(message.text).fontSize(16).lineHeight(26)
-                            .copyOption(CopyOptions.LocalDevice).fontColor($r('app.color.pigo_text'))
-                        } else {
-                          this.richChatText(message.text, this.workspaceCwd)
-                        }
-                        if (this.messageFiles(message).length) {
-                          Flex({ wrap: FlexWrap.Wrap }) {
-                            ForEach(this.messageFiles(message), (path: string) => {
-                              Column() {
-                                this.fileChip(path, message.role !== 'user')
-                              }.margin({ right: 8, bottom: 8 })
-                            }, (path: string) => path)
-                          }.width('100%')
-                        }
-                        if (message.textTruncated) {
-                          Button(this.loadingMessageText === message.id ? '正在加载全文…' : '查看完整回复').chatAction()
-                            .enabled(this.reachable && !this.loadingMessageText)
-                            .onClick(() => { void this.showFullReply(message.id); })
-                        } else if (message.role !== 'user') {
-                          this.copyButton('复制回复', message.text)
-                        }
-                      }
-                      if (message.imageCount) {
-                        Column({ space: 6 }) {
-                          this.historyImages(message.imageCount, this.currentId, message.id)
-                        }.id(`image-message-${message.id}`).alignItems(HorizontalAlign.Start)
-                      }
-                    }.alignItems(HorizontalAlign.Start).padding(message.role === 'user' ?
-                      { left: 14, right: 14, top: 10, bottom: 10 } : 0)
-                      .width(message.role === 'user' ? undefined : '100%')
-                      .constraintSize({ maxWidth: message.role === 'user' ? '88%' : '100%' })
-                      .backgroundColor(message.role === 'user' ? this.accentTint() : Color.Transparent)
-                      .borderRadius({ topLeft: 17, topRight: 6, bottomLeft: 17, bottomRight: 17 })
-                  }.width('100%').justifyContent(message.role === 'user' ? FlexAlign.End : FlexAlign.Start)
-                    .padding({ top: message.role === 'user' ? 14 : 8, bottom: 4 })
-                }
-                this.toolGroup(message.tools ?? [], message.id)
-              }, (message: ChatMessage) => this.transcriptMessageKey(message))
-              this.toolGroup(this.unlistedLiveTools(), '')
-              if (this.liveThinking) this.thinkingCard('', this.liveThinking, -1, this.liveThinkingOpen)
-              if (this.liveText) {
-                Column({ space: 8 }) {
-                  this.richChatText(this.liveText, this.workspaceCwd)
-                  if (messageFileChips(this.liveText, this.workspaceCwd).length) {
-                    Flex({ wrap: FlexWrap.Wrap }) {
-                      ForEach(messageFileChips(this.liveText, this.workspaceCwd), (path: string) => {
-                        Column() {
-                          this.fileChip(path, true)
-                        }.margin({ right: 8, bottom: 8 })
-                      }, (path: string) => path)
-                    }.width('100%')
-                  }
-                }.alignItems(HorizontalAlign.Start).width('100%').padding({ top: 10, bottom: 18 })
-              }
-              ForEach(this.queuedSteering.filter((message: QueuedSteering): boolean => message.sessionKey === this.draftKey(this.currentId)),
-                (message: QueuedSteering) => {
-                  Row() {
-                    Column({ space: 6 }) {
-                      if (message.text) Text(message.text).fontSize(16).lineHeight(26)
-                        .copyOption(CopyOptions.LocalDevice).fontColor($r('app.color.pigo_text'))
-                      if (message.imageCount) Text(`图片 × ${message.imageCount}`).fontSize(13).fontColor($r('app.color.pigo_muted'))
-                      ForEach(message.files, (name: string) => {
-                        Text(name).fontSize(13).fontColor($r('app.color.pigo_muted'))
-                          .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
-                      })
-                      Text('排队中').fontSize(12).fontColor($r('app.color.pigo_muted'))
-                    }.alignItems(HorizontalAlign.Start).padding(13).constraintSize({ maxWidth: '88%' })
-                      .backgroundColor(this.accentTint()).borderRadius({ topLeft: 17, topRight: 6, bottomLeft: 17, bottomRight: 17 })
-                  }.width('100%').justifyContent(FlexAlign.End).padding({ top: 10, bottom: 4 })
-                }, (message: QueuedSteering) => message.id)
-            }.width('100%').padding({ top: 10, right: 6, bottom: 8 })
-              .onAreaChange((_oldArea: Area, newArea: Area) => {
-                this.positionTranscript(transcriptId, Number(newArea.height));
+      if (this.chatHasTopCards()) {
+        Column({ space: 8 }) {
+          this.runningStrip()
+          if (!this.reachable && !this.offlineDismissed) this.offlineNotice(false)
+          if (this.interaction) this.pendingCard(this.interaction)
+          if (this.pendingSend && !this.busy) {
+            Row({ space: 8 }) {
+              Button('核对发送').chatAction().id('check-send').enabled(this.reachable).onClick(() => { void this.checkSend(); })
+              Button('保留草稿').chatAction().id('keep-draft').onClick(() => {
+                this.chatState.unconfirmed.delete(this.draftKey(this.currentId));
+                this.pendingSend = undefined;
+                this.status = '已保留草稿，未重发。';
               })
-          }.width('100%').height('100%').align(Alignment.TopStart)
-            .scrollBar(BarState.Off)
-            .onTouch((event: TouchEvent) => {
-              // 点击手势会被带 copyOption 的消息文本夺走，改用触摸广播：手指一按下就收键盘。
-              if (event.type === TouchType.Down && this.keyboardHeight > 0) this.dismissKeyboard();
-            })
-            .onWillScroll((_xOffset: number, yOffset: number, _state: ScrollState, source: ScrollSource) => {
-              if (yOffset < -2 && source !== ScrollSource.SCROLLER && source !== ScrollSource.SCROLLER_ANIMATION) {
-                this.transcriptFollow = false;
-              }
-            })
-            .onScrollEdge((side: Edge) => {
-              if (side === Edge.Bottom) this.transcriptFollow = true;
-            })
-            .onAreaChange((oldArea: Area, newArea: Area) => {
-              this.transcriptViewport = Number(newArea.height);
-              if (this.transcriptFollow && (oldArea.width !== newArea.width || oldArea.height !== newArea.height)) {
-                // Wait for the transcript to finish wrapping at the new width before scrolling.
-                setTimeout(() => {
-                  if (this.currentId === transcriptId && this.transcriptFollow) {
-                    this.transcript.scrollTo({ xOffset: 0, yOffset: this.transcriptContentHeight, animation: false });
-                  }
-                }, 0);
-              }
-            })
-        }, (transcriptId: string) => transcriptId)
-        if (!this.transcriptFollow) {
-          Button({ type: ButtonType.Normal }) {
-            this.headerSymbol($r('sys.symbol.chevron_down'), $r('app.color.pigo_text'), 19)
-          }.id('scroll-bottom').headerAction().margin({ right: 6, bottom: 10 })
-            .shadow({ radius: 10, offsetY: 2, color: this.darkMode ? '#60000000' : '#1F637587' })
-            .accessibilityText('滚动到最新消息')
-            .onClick(() => { this.transcriptFollow = true; this.transcript.scrollEdge(Edge.Bottom); })
-        }
-      }.layoutWeight(1).width('100%')
-      if (this.commandPalette && this.commandPaletteActive()) {
-        Column({ space: 2 }) {
-          if (!this.commandMatches().length) {
-            Text(this.commandsLoading ? '正在加载命令…' : !this.reachable ? '电脑离线，等待重连' :
-              this.commandError || (this.commandRows.length ? '没有匹配的命令' : '暂无可用命令'))
-              .fontSize(13).fontColor($r('app.color.pigo_muted')).padding({ left: 10, right: 10, top: 10, bottom: 10 }).maxLines(2)
-              .onClick(() => { if (this.commandError) void this.loadCommands(); })
-          } else {
-            Scroll() {
-              Column({ space: 2 }) {
-                ForEach(this.commandMatches(), (row: CommandRow) => {
-                  Column({ space: 2 }) {
-                    Row({ space: 8 }) {
-                      Text(row.invoke ?? `/${row.name}`).fontSize(14).fontWeight(FontWeight.Medium)
-                        .fontColor($r('app.color.pigo_text')).maxLines(1).layoutWeight(1)
-                        .textOverflow({ overflow: TextOverflow.Ellipsis })
-                      if (row.source) {
-                        Text(this.commandSourceLabel(row.source)).fontSize(10).fontColor($r('app.color.pigo_muted'))
-                          .padding({ left: 6, right: 6, top: 2, bottom: 2 }).borderRadius(8)
-                          .backgroundColor($r('app.color.pigo_control')).maxLines(1)
-                      }
-                    }.width('100%')
-                    if (row.description) {
-                      Text(row.description).fontSize(12).fontColor($r('app.color.pigo_muted')).maxLines(1)
-                        .textOverflow({ overflow: TextOverflow.Ellipsis }).width('100%')
-                    }
-                  }.alignItems(HorizontalAlign.Start).width('100%').padding({ left: 10, right: 10, top: 7, bottom: 7 })
-                  .borderRadius(10).id(`command-row-${row.name}`)
-                  .onClick(() => { this.pickCommand(row); })
-                }, (row: CommandRow) => row.name)
-              }.width('100%')
-            }.constraintSize({ maxHeight: this.keyboardHeight || this.windowHeight < SHORT_WINDOW_HEIGHT ? 132 : 216 })
-              .width('100%').edgeEffect(EdgeEffect.Spring)
+            }.width('100%')
           }
-        }.width('100%').padding(4)
-        .backgroundColor($r('app.color.pigo_panel')).border({ width: 1, color: $r('app.color.pigo_line') }).borderRadius(14)
-        .id('command-palette')
+        }.width('100%').padding({ left: 16, right: 16, top: this.topContentClearance() })
       }
-      this.composer()
-    }
-  }
-
-  @Builder
-  composerMenuAction(label: string, symbol: Resource, id: string, enabled: boolean, action: () => void) {
-    Button({ type: ButtonType.Normal }) {
-      Column({ space: 8 }) {
-        SymbolGlyph(symbol).fontSize(26).fontColor([$r('app.color.pigo_text')])
-        Text(label).fontSize(14).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
-      }.width('100%').justifyContent(FlexAlign.Center)
-    }.id(id).layoutWeight(1).height(86).padding(0).borderRadius(14)
-      .backgroundColor($r('app.color.pigo_control')).enabled(enabled).onClick(action)
-  }
-
-  @Builder
-  skillPicker() {
-    Row({ space: 8 }) {
-      Button({ type: ButtonType.Normal }) {
-        SymbolGlyph($r('sys.symbol.chevron_left')).fontSize(20).fontColor([$r('app.color.pigo_text')])
-      }.width(44).height(44).borderRadius(12).padding(0).backgroundColor(Color.Transparent)
-        .accessibilityText('返回添加菜单').onClick(() => { this.showSkillPicker = false; })
-      Text('技能').fontSize(20).fontWeight(FontWeight.Bold).fontColor($r('app.color.pigo_text'))
-    }.width('100%')
-    if (this.attachments.length) {
-      Text('使用技能前请先移除附件。').fontSize(13).fontColor($r('app.color.pigo_muted')).width('100%')
-    }
-    if (this.commandsLoading) {
-      Text('正在加载技能…').fontSize(14).fontColor($r('app.color.pigo_muted')).width('100%')
-    } else if (this.commandError) {
-      Button(this.commandError).chatAction().width('100%')
-        .onClick(() => { void this.loadCommands(); })
-    } else if (!this.availableSkills().length) {
-      Text('当前会话没有可用技能。').fontSize(14).fontColor($r('app.color.pigo_muted')).width('100%')
-    } else {
-      Scroll() {
-        Column({ space: 6 }) {
-          ForEach(this.availableSkills(), (row: CommandRow) => {
-            Button({ type: ButtonType.Normal }) {
-              Column({ space: 4 }) {
-                Text(row.name.replace(/^skill:/, '')).fontSize(15).fontWeight(FontWeight.Medium)
-                  .fontColor($r('app.color.pigo_text')).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
-                if (row.description) {
-                  Text(row.description).fontSize(13).fontColor($r('app.color.pigo_muted'))
-                    .maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis })
-                }
-              }.width('100%').alignItems(HorizontalAlign.Start)
-            }.id(`composer-skill-${row.name}`).width('100%').constraintSize({ minHeight: 48 })
-              .padding({ left: 12, right: 12, top: 10, bottom: 10 }).borderRadius(12)
-              .backgroundColor($r('app.color.pigo_control'))
-              .enabled(this.reachable && !this.openingSession && !this.pendingSend)
-              .onClick(() => { this.pickSkill(row); })
-          }, (row: CommandRow) => row.name)
-        }.width('100%')
-      }.width('100%').align(Alignment.TopStart).scrollBar(BarState.Off)
-        .constraintSize({ maxHeight: Math.min(320, Math.max(72, this.windowHeight - 180)) })
-    }
-  }
-
-  @Builder
-  composerMenu() {
-    Column({ space: 12 }) {
-      if (this.showSkillPicker) {
-        this.skillPicker()
-      } else {
-        Row({ space: 8 }) {
-          this.composerMenuAction('拍照', $r('sys.symbol.camera'), 'composer-camera', this.acceptsImage, () => {
-            this.showComposerMenu = false;
-            void this.attachImage('camera');
-          })
-          this.composerMenuAction('照片', $r('sys.symbol.picture'), 'composer-photos', this.acceptsImage, () => {
-            this.showComposerMenu = false;
-            void this.attachImage('gallery');
-          })
-          this.composerMenuAction('添加文件', $r('sys.symbol.paperclip'), 'composer-files', true, () => {
-            this.showComposerMenu = false;
-            void this.attachFile();
-          })
-        }.width('100%')
-        if (!this.acceptsImage) {
-          Text('当前模型不支持图片输入。').fontSize(13).fontColor($r('app.color.pigo_muted')).width('100%')
+      this.chatTranscript()
+      Column({ space: 6 }) {
+        if (this.commandPalette && this.commandPaletteActive()) {
+          Column({ space: 2 }) {
+            if (!this.commandMatches().length) {
+              Text(this.commandsLoading ? '正在加载命令…' : !this.reachable ? '电脑离线，等待重连' :
+                this.commandError || (this.commandRows.length ? '没有匹配的命令' : '暂无可用命令'))
+                .fontSize(13).fontColor($r('app.color.pigo_muted')).padding({ left: 10, right: 10, top: 10, bottom: 10 }).maxLines(2)
+                .onClick(() => { if (this.commandError) void this.loadCommands(); })
+            } else {
+              Scroll() {
+                Column({ space: 2 }) {
+                  ForEach(this.commandMatches(), (row: CommandRow) => {
+                    Column({ space: 2 }) {
+                      Row({ space: 8 }) {
+                        Text(row.invoke ?? `/${row.name}`).fontSize(14).fontWeight(FontWeight.Medium)
+                          .fontColor($r('app.color.pigo_text')).maxLines(1).layoutWeight(1)
+                          .textOverflow({ overflow: TextOverflow.Ellipsis })
+                        if (row.source) {
+                          Text(this.commandSourceLabel(row.source)).fontSize(10).fontColor($r('app.color.pigo_muted'))
+                            .padding({ left: 6, right: 6, top: 2, bottom: 2 }).borderRadius(8)
+                            .backgroundColor($r('app.color.pigo_control')).maxLines(1)
+                        }
+                      }.width('100%')
+                      if (row.description) {
+                        Text(row.description).fontSize(12).fontColor($r('app.color.pigo_muted')).maxLines(1)
+                          .textOverflow({ overflow: TextOverflow.Ellipsis }).width('100%')
+                      }
+                    }.alignItems(HorizontalAlign.Start).width('100%').padding({ left: 10, right: 10, top: 7, bottom: 7 })
+                    .borderRadius(10).id(`command-row-${row.name}`)
+                    .onClick(() => { this.pickCommand(row); })
+                  }, (row: CommandRow) => row.name)
+                }.width('100%')
+              }.constraintSize({ maxHeight: this.keyboardHeight || this.windowHeight < SHORT_WINDOW_HEIGHT ? 132 : 216 })
+                .width('100%').edgeEffect(EdgeEffect.Spring)
+            }
+          }.width('100%').padding(4)
+          .backgroundColor($r('app.color.pigo_panel')).border({ width: 1, color: $r('app.color.pigo_line') }).borderRadius(14)
+          .id('command-palette')
         }
-        Button({ type: ButtonType.Normal }) {
-          Row({ space: 10 }) {
-            SymbolGlyph($r('sys.symbol.wand_and_stars')).fontSize(22).fontColor([$r('app.color.pigo_text')])
-            Text('技能').fontSize(16).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text')).layoutWeight(1)
-            SymbolGlyph($r('sys.symbol.chevron_right')).fontSize(15).fontColor([$r('app.color.pigo_muted')])
-          }.width('100%')
-        }.id('composer-skills').width('100%').height(48).padding({ left: 10, right: 10 })
-          .borderRadius(12).backgroundColor(Color.Transparent).onClick(() => { this.openSkillPicker(); })
-      }
-    }.id('composer-menu').width('100%').constraintSize({ maxWidth: 560 })
-      .padding({ left: 16, right: 16, top: 14, bottom: 16 })
+        this.composer()
+      }.width('100%').padding({
+        left: 16,
+        right: 16,
+        top: 4,
+        bottom: (this.showRootBottomTabs() ? this.bottomTabsHeight() + 10 : 0) + this.bottomPad() + 8
+      })
+    }
   }
 
   @Builder
   composer() {
-    Column({ space: 2 }) {
-      if (this.attachments.length) {
-        Scroll() {
-          Row({ space: 10 }) {
-            ForEach(this.attachments, (item: DraftAttachment, index: number) => {
-              Stack({ alignContent: Alignment.TopEnd }) {
-                if (item.kind === 'image' && item.image) {
-                  Image(item.image.preview).id(`attachment-${index}`).width(64).height(64).borderRadius(10)
-                    .objectFit(ImageFit.Cover)
-                } else if (item.kind === 'file') {
-                  Column({ space: 3 }) {
-                    Text(item.file ? this.fileIcon(item.file.name) : '文件').fontSize(15).fontColor($r('app.color.pigo_muted'))
-                    Text(item.name).fontSize(12).fontColor($r('app.color.pigo_text')).maxLines(1)
-                      .textOverflow({ overflow: TextOverflow.Ellipsis }).constraintSize({ maxWidth: 150 })
-                    Text(this.fileSize(item.size)).fontSize(11).fontColor($r('app.color.pigo_muted'))
-                  }.justifyContent(FlexAlign.Center).width('100%').height('100%')
-                }
-                Button({ type: ButtonType.Circle }) {
-                  SymbolGlyph($r('sys.symbol.xmark')).fontSize(11).fontColor([$r('app.color.pigo_text')])
-                }.id(`remove-attachment-${index}`).width(26).height(26).backgroundColor($r('app.color.pigo_selected'))
-                  .accessibilityText(`移除附件 ${item.name}`)
-                  .enabled(!this.busy && !this.pendingSend)
-                  .onClick(() => { this.removeAttachment(index); })
-              }.width(item.kind === 'image' ? 64 : 170).height(64)
-                .borderRadius(item.kind === 'image' ? 10 : 12)
-                .backgroundColor(item.kind === 'image' ? Color.Transparent : $r('app.color.pigo_control'))
-                .padding(item.kind === 'file' ? 6 : 0)
-            }, (item: DraftAttachment, index: number) => `${index}-${item.kind}-${item.name}-${item.size}`)
-          }.padding({ bottom: 2 })
-        }.scrollable(ScrollDirection.Horizontal).scrollBar(BarState.Off).align(Alignment.Start)
-          .width('100%').height(70).padding({ left: 6, right: 6 })
-      }
-      if (this.voiceMode) {
-        Button({ type: ButtonType.Normal }) {
-          Text(this.voicePreparing ? '正在准备…' : this.voiceFinishing ? (this.voiceCancelling ? '按住说话' : '正在转文字…') : this.recording ? (this.holdCancel ? '松开取消' : '松开发送') : '按住说话')
-            .fontSize(16).fontColor(this.holdCancel ? $r('app.color.pigo_error') : $r('app.color.pigo_text')).maxLines(1)
-        }.id('hold-to-talk').width('100%').height(44).borderRadius(12)
-          .backgroundColor(this.recording ? (this.holdCancel ? $r('app.color.pigo_error_panel') : $r('app.color.pigo_selected')) : $r('app.color.pigo_control'))
-          .enabled(!!this.currentId && this.reachable && !this.pendingSend && !this.busy && !this.openingSession)
-          .onTouch((event: TouchEvent) => { this.holdTouch(event); })
-      } else {
-        TextArea({ placeholder: !this.reachable ? '设备离线' : this.windowWidth < 360 ? '输入消息' : '输入消息，/ 唤起命令',
-          text: this.draft })
-          .id('draft').width('100%').constraintSize({ minHeight: 42, maxHeight: 108 }).onFocus(() => { this.armTranscriptFollow(); })
-          .fontSize(16).fontColor($r('app.color.pigo_text')).placeholderColor($r('app.color.pigo_muted')).backgroundColor(Color.Transparent)
-          .padding({ left: 6, right: 6, top: 8, bottom: 8 })
-          .enabled(!this.pendingSend).onChange((value: string) => { this.draft = value; this.syncCommandPalette(); })
-      }
-      Row({ space: 6 }) {
-        Button({ type: ButtonType.Normal }) {
-          SymbolGlyph(this.voiceMode ? $r('sys.symbol.keyboard') : $r('sys.symbol.mic')).fontSize(21)
-            .fontColor([this.voiceMode ? this.accent() : $r('app.color.pigo_muted')])
-        }.id('voice-toggle').width(44).height(44).padding(0).backgroundColor(Color.Transparent).borderRadius(12)
-          .accessibilityText(this.voiceMode ? '切换到文字输入' : '切换到语音输入')
-          .enabled(!!this.currentId && !this.pendingSend && !this.busy && !this.recording && !this.voicePreparing && !this.voiceFinishing)
-          .onClick(() => { this.voiceMode = !this.voiceMode; this.liveVoiceText = ''; this.status = ''; if (this.voiceMode) this.dismissKeyboard(); })
-        Button({ type: ButtonType.Normal }) {
-          Row({ space: 5 }) {
-            Text(this.modelLabel || '选择模型').fontSize(12).fontWeight(FontWeight.Medium)
-              .fontColor($r('app.color.pigo_muted')).maxLines(1)
-              .textOverflow({ overflow: TextOverflow.Ellipsis }).constraintSize({ maxWidth: '85%' })
-            SymbolGlyph($r('sys.symbol.chevron_down')).fontSize(12).fontColor([$r('app.color.pigo_muted')])
-          }
-        }.id('model-pill').height(44).padding({ left: 6, right: 6 }).borderRadius(10)
-          .constraintSize({ maxWidth: '48%' }).backgroundColor(Color.Transparent)
-          .accessibilityText(this.modelLabel ? `切换模型，当前为${this.modelLabel}` : '切换模型')
-          .enabled(this.reachable && !this.busy && !this.openingSession && !!this.currentId && this.idle && !this.queued)
-          .onClick(() => { void this.openModelMenu(); })
-          .bindSheet($$this.showModelMenu, this.modelSheet(), {
-            detents: ['60%', SheetSize.LARGE], preferType: SheetType.BOTTOM, dragBar: true, showClose: false,
-            backgroundColor: $r('app.color.pigo_panel'), maskColor: '#66000000'
-          })
-        Blank()
-        Button({ type: ButtonType.Normal }) {
-          SymbolGlyph($r('sys.symbol.plus')).fontSize(21).fontColor([$r('app.color.pigo_muted')])
-        }.id('attach-image').width(44).height(44).padding(0).backgroundColor(Color.Transparent).borderRadius(12)
-          .accessibilityText('添加附件或技能')
-          .enabled(!!this.currentId && this.reachable && !this.busy && !this.openingSession && !this.pendingSend &&
-            !this.recording && !this.voicePreparing && !this.voiceFinishing)
-          .onClick(() => { this.openComposerMenu(); })
-          .bindSheet($$this.showComposerMenu, this.composerMenu(), {
-            height: SheetSize.FIT_CONTENT, preferType: SheetType.BOTTOM, showClose: false,
-            backgroundColor: $r('app.color.pigo_panel'), maskColor: '#66000000'
-          })
-        if (this.idle || this.hasDraft()) {
-          Button({ type: ButtonType.Normal }) {
-            SymbolGlyph($r('sys.symbol.arrow_up')).fontSize(20)
-              .fontColor([this.canSend() ? this.accentForeground() : $r('app.color.pigo_muted')])
-          }.id('send').width(44).height(44).padding(0).borderRadius(13)
-            .backgroundColor(this.canSend() ? this.accent() : $r('app.color.pigo_control'))
-            .accessibilityText(this.idle ? '发送消息' : '发送消息以引导当前任务').enabled(this.canSend())
-            .onClick(() => { void this.send(); })
-        } else {
-          Button({ type: ButtonType.Normal }) {
-            Rect().width(12).height(12).fill(this.accentForeground()).radius(2)
-          }.id('abort').width(44).height(44).borderRadius(13).backgroundColor(this.accent())
-            .accessibilityText('停止生成').enabled(this.reachable && !this.busy && !this.openingSession)
-            .onClick(() => { void this.requestAction('/abort', { id: this.currentId }); })
-        }
-      }.width('100%')
-    }.width('100%').padding({ left: 7, right: 7, top: 6, bottom: 6 }).backgroundColor($r('app.color.pigo_panel'))
-      .border({ width: 1, color: $r('app.color.pigo_line') }).borderRadius(18)
+    ChatComposer({
+      acceptsImage: this.acceptsImage,
+      applyModelFromMenu: (index: number): Promise<void> => this.applyModelFromMenu(index),
+      applyThinkingLevelFromMenu: (level: string): Promise<void> => this.applyThinkingLevelFromMenu(level),
+      armTranscriptFollow: (): void => this.armTranscriptFollow(),
+      attachFile: (): Promise<void> => this.attachFile(),
+      attachImage: (source: string): Promise<void> => this.attachImage(source),
+      attachments: this.$attachments,
+      busy: this.busy,
+      commandError: this.commandError,
+      commandRows: this.$commandRows,
+      commandsLoading: this.commandsLoading,
+      currentId: this.currentId,
+      currentLevel: this.currentLevel,
+      currentModel: this.currentModel,
+      dismissKeyboard: (): void => this.dismissKeyboard(),
+      draft: this.$draft,
+      holdCancel: this.holdCancel,
+      holdTouch: (event: TouchEvent): void => this.holdTouch(event),
+      idle: this.idle,
+      liveVoiceText: this.$liveVoiceText,
+      loadCommands: (): Promise<void> => this.loadCommands(),
+      modelLabel: this.modelLabel,
+      models: this.$models,
+      openComposerMenu: (): void => this.openComposerMenu(),
+      openModelMenu: (): Promise<void> => this.openModelMenu(),
+      openSkillPicker: (): void => this.openSkillPicker(),
+      openingSession: this.openingSession,
+      hasPendingSend: this.pendingSend !== undefined,
+      pickSkill: (row: CommandRow): void => this.pickSkill(row),
+      queued: this.queued,
+      reachable: this.reachable,
+      recording: this.recording,
+      removeAttachment: (index: number): void => this.removeAttachment(index),
+      requestAction: (path: string, input?: Payload): Promise<boolean> => this.requestAction(path, input),
+      runId: this.runId,
+      send: (): Promise<void> => this.send(),
+      showComposerMenu: this.$showComposerMenu,
+      showModelMenu: this.$showModelMenu,
+      showSkillPicker: this.$showSkillPicker,
+      status: this.$status,
+      syncCommandPalette: (): void => this.syncCommandPalette(),
+      voiceCancelling: this.voiceCancelling,
+      voiceFinishing: this.voiceFinishing,
+      voiceMode: this.$voiceMode,
+      voicePreparing: this.voicePreparing,
+      windowHeight: this.windowHeight,
+      windowWidth: this.windowWidth,
+      accent: this.accent(),
+      accentForeground: this.accentForeground(),
+      accentTint: this.accentTint()
+    })
   }
 
   private cacheChat(session: SessionState): void {
@@ -5611,15 +4221,13 @@ struct Index {
       ? { id: session.id, cwd: session.cwd, name: this.sessionName, idle: this.idle, runId: this.runId || null,
         queued: this.queued, acceptsImage: this.acceptsImage, model: this.currentModel, thinkingLevel: this.currentLevel }
       : session;
-    this.chatCache.delete(key);
-    this.chatCache.set(key, {
+    this.chatState.cacheTranscript(key, {
       session: current, messages: this.messages.slice(start), liveText: this.liveText,
       liveSeq: this.liveSeq, liveThinking: this.liveThinking, liveThinkSeq: this.liveThinkSeq,
       tools: this.liveTools.slice(0),
       historyCursor: start > 0 ? this.messages[start].id : this.historyCursor,
       interaction: this.interaction
     });
-    if (this.chatCache.size > 8) this.chatCache.delete(Array.from(this.chatCache.keys())[0]);
   }
 
   private presentChat(chat: BridgeReply, reveal: boolean, currentSnapshot: boolean = true): void {
@@ -5718,37 +4326,17 @@ struct Index {
   }
 
   private updateSidebarRows(): void {
-    const rows: SidebarRow[] = [];
-    const visibleSessions = this.sessionView === this.loadedView ? this.sessions : [];
-    if (this.sessionView === 'all') {
-      const bySpace = new Map<string, SessionRow[]>();
-      const paths = new Set<string>(this.projects);
-      const expanded = new Set<string>(this.expandedSpaces);
-      for (const session of visibleSessions) {
-        if (!session.cwd) continue;
-        if (this.hasWorkspaceDetails) paths.add(session.cwd);
-        if (!expanded.has(session.cwd)) continue;
-        let group = bySpace.get(session.cwd);
-        if (!group) { group = []; bySpace.set(session.cwd, group); }
-        group.push(session);
-      }
-      for (const path of paths) {
-        rows.push({ key: `space:${path}:${this.workspaceName(path)}`, path: path, nested: false });
-        for (const session of bySpace.get(path) ?? []) {
-          rows.push({ key: this.sidebarSessionKey(session, true), session: session, nested: true });
-        }
-      }
-    } else {
-      for (const session of visibleSessions) {
-        rows.push({ key: this.sidebarSessionKey(session, false), session: session, nested: false });
-      }
-    }
-    this.sidebarRows.replace(rows);
+    this.sidebarRows.replace(this.sessionStore.rows({
+      view: this.sessionView, loadedView: this.loadedView, sessions: this.sessions, projects: this.projects,
+      workspaces: this.workspaces, hasWorkspaceDetails: this.hasWorkspaceDetails, expandedSpaces: this.expandedSpaces
+    }));
     if (this.pendingLibraryReveal) setTimeout(() => { this.revealLibraryAnchor(); }, 0);
   }
 
-  private sidebarSessionKey(session: SessionRow, nested: boolean): string {
-    return `session:${session.id}:${nested}:${session.revision}:${session.pinned}:${session.archived}:${session.cwd ?? ''}:${session.name ?? ''}`;
+  private onSidebarAppear(): void {
+    if (!this.dockedSessions()) this.focusActiveSpace();
+    this.pendingLibraryReveal = !!this.currentId;
+    this.updateSidebarRows();
   }
 
   private revealLibraryAnchor(): void {
@@ -5789,8 +4377,7 @@ struct Index {
 
   private toggleSpace(path: string): void {
     this.pendingLibraryReveal = false;
-    this.expandedSpaces = this.expandedSpaces.includes(path) ?
-      this.expandedSpaces.filter((item: string): boolean => item !== path) : this.expandedSpaces.concat([path]);
+    this.expandedSpaces = this.sessionStore.toggleSpace(this.expandedSpaces, path);
     this.scheduleSidebarSave();
   }
 
@@ -5813,90 +4400,23 @@ struct Index {
 
   // Sidebar choices are per computer: folders stay collapsed on connect unless the user opened them.
   private applySidebar(address: string): void {
-    const entry = this.sidebarBook.entries.find((kept: SidebarEntry): boolean => kept.address === address);
-    this.expandedSpaces = entry ? entry.state.expandedSpaces.slice() : [];
-    this.sessionView = entry && SIDEBAR_VIEWS.includes(entry.state.sessionView) ? entry.state.sessionView : 'all';
-    this.loadedView = this.sessionView;
+    const saved = this.sessionStore.sidebarFor(address);
+    this.expandedSpaces = saved.expandedSpaces;
+    this.sessionView = saved.sessionView;
+    this.loadedView = saved.sessionView;
   }
 
   private scheduleSidebarSave(): void {
-    if (!this.base) return;
-    const state: SidebarState = {
-      expandedSpaces: this.expandedSpaces.slice(0, SIDEBAR_MAX_EXPANDED),
-      sessionView: SIDEBAR_VIEWS.includes(this.sessionView) ? this.sessionView : 'all'
-    };
-    const entry: SidebarEntry = { address: this.base, state: state };
-    const kept: SidebarEntry[] = this.sidebarBook.entries.filter((item: SidebarEntry): boolean => item.address !== this.base);
-    kept.push(entry);
-    this.sidebarBook = { version: 1, entries: kept.slice(0, SIDEBAR_MAX_ENTRIES) };
-    if (this.sidebarSaveTimer !== -1) clearTimeout(this.sidebarSaveTimer);
-    this.sidebarSaveTimer = setTimeout(() => { this.flushSidebarSave(); }, 300);
+    this.sessionStore.saveSidebar(this.base, { expandedSpaces: this.expandedSpaces, sessionView: this.sessionView },
+      (book: SidebarBook): void => { this.persistSidebar(book); });
   }
 
   private flushSidebarSave(): void {
-    if (this.sidebarSaveTimer !== -1) {
-      clearTimeout(this.sidebarSaveTimer);
-      this.sidebarSaveTimer = -1;
-    }
-    const vault = this.vault;
-    if (vault) vault.saveSidebar(this.sidebarBook).catch(() => {});
+    this.sessionStore.flushSidebar((book: SidebarBook): void => { this.persistSidebar(book); });
   }
 
-  @Builder
-  modelSheet() {
-    Column({ space: 12 }) {
-      Text('模型与思考').fontSize(20).fontWeight(FontWeight.Bold).fontColor($r('app.color.pigo_text')).width('100%')
-      if (!this.idle || this.queued) {
-        Text('等待当前任务和队列结束后可切换模型。').fontSize(13).fontColor($r('app.color.pigo_warning')).width('100%')
-      }
-      if ((this.currentModelOption()?.levels.length ?? 0) > 1) {
-        Column({ space: 6 }) {
-          Text('思考级别').fontSize(13).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_muted')).width('100%')
-          Row({ space: 4 }) {
-            ForEach(this.currentModelOption()?.levels ?? [], (level: string) => {
-              Button(this.thinkingLevelLabel(level), { type: ButtonType.Normal }).chatAction()
-                .layoutWeight(1).height(36).padding(2).borderRadius(10).fontSize(13)
-                .backgroundColor(this.currentLevel === level ? this.accent() : Color.Transparent)
-                .fontColor(this.currentLevel === level ? this.accentForeground() : $r('app.color.pigo_muted'))
-                .enabled(this.reachable && this.idle && !this.queued && !this.busy)
-                .onClick(() => { this.showModelMenu = false; void this.applyThinkingLevelFromMenu(level); })
-            }, (level: string) => level)
-          }.width('100%').padding(4).borderRadius(14).backgroundColor($r('app.color.pigo_control'))
-        }.width('100%')
-      }
-      List({ initialIndex: this.currentModelIndex(), space: 8 }) {
-        ForEach(this.models, (model: ModelOption, index: number) => {
-          ListItem() {
-            Button({ type: ButtonType.Normal }) {
-              Row({ space: 10 }) {
-                Column({ space: 3 }) {
-                  Text(model.name).fontSize(15).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
-                    .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
-                  Text(`${model.provider}${model.image ? ' · 支持图片' : ''}`)
-                    .fontSize(12).fontColor($r('app.color.pigo_muted')).maxLines(1)
-                    .textOverflow({ overflow: TextOverflow.Ellipsis })
-                }.layoutWeight(1).alignItems(HorizontalAlign.Start)
-                if (this.isCurrentModel(model)) {
-                  SymbolGlyph($r('sys.symbol.checkmark')).fontSize(17).fontColor([this.accent()])
-                }
-              }.width('100%')
-            }.id(`model-option-${index}`).width('100%').height(54).padding({ left: 14, right: 14 })
-              .backgroundColor(this.isCurrentModel(model) ? this.accentTint() : $r('app.color.pigo_control'))
-              .border({ width: this.isCurrentModel(model) ? 1 : 0, radius: 12, color: this.accent() })
-              .accessibilitySelected(this.isCurrentModel(model))
-              .enabled(this.reachable && this.idle && !this.queued && !this.busy)
-              .onClick(() => { this.showModelMenu = false; void this.applyModelFromMenu(index); })
-          }
-        }, (model: ModelOption) => `${model.provider}-${model.id}`)
-        if (!this.models.length) {
-          ListItem() {
-            Text('没有可用模型，请在电脑上检查 Pi CLI 的模型配置。').fontSize(13)
-              .fontColor($r('app.color.pigo_muted')).width('100%')
-          }
-        }
-      }.layoutWeight(1).width('100%').scrollBar(BarState.Off)
-    }.width('100%').height('100%').constraintSize({ maxWidth: 560 })
-      .padding({ left: 16, right: 16, top: 8, bottom: 20 })
+  private persistSidebar(book: SidebarBook): void {
+    if (this.vault) this.vault.saveSidebar(book).catch(() => {});
   }
 
   @Builder
@@ -5948,78 +4468,78 @@ struct Index {
     return this.windowHeight < SHORT_WINDOW_HEIGHT ? 48 : 60;
   }
 
-  @Builder
-  bottomTabs() {
-    Stack() {
-      this.glassSurface(32)
-      this.bottomTabButtons()
-    }.width('100%').height(this.bottomTabsHeight())
-      .constraintSize({ maxWidth: 520 }).alignSelf(ItemAlign.Center).borderRadius(32)
-      .shadow({ radius: 10, offsetY: 2, color: this.darkMode ? '#40000000' : '#12637587' })
+  private rootTabs(): string[] {
+    return this.isPaired ? ['tasks', 'pending', 'files', 'mine'] : ['tasks', 'mine'];
+  }
+
+  private activeTabIndex(): number {
+    const index = this.rootTabs().indexOf(this.activeTab);
+    return index >= 0 ? index : 0;
+  }
+
+  private selectRootTab(tab: string): boolean {
+    this.dismissKeyboard();
+    if (this.busy) return false;
+    if (this.editingPath && this.fileText !== this.fileOriginal) {
+      this.status = '请先保存或放弃文件修改。';
+      return false;
+    }
+    if (tab === 'files') {
+      if (!this.reachable || !this.workspaceCwd) {
+        this.status = '请先连接电脑并打开一个任务。';
+        return false;
+      }
+      if (this.activeTab === 'files' && this.showFiles) return true;
+      if (this.fileRoot !== this.workspaceCwd) {
+        this.resetFileTree();
+        this.fileRoot = this.workspaceCwd;
+      }
+      this.showFiles = true;
+      this.status = '';
+      if (!this.fileDirectories.has('')) void this.loadFileDirectory('');
+    } else {
+      this.showFiles = false;
+      this.showSettings = false;
+    }
+    if (tab === 'mine' && this.minePage) {
+      this.mineBack();
+      this.minePage = '';
+    }
+    if (tab !== this.activeTab) {
+      this.status = '';
+      this.minePage = '';
+      this.addingComputer = false;
+      this.pairingComputerId = '';
+      this.closeComputerEditors();
+      this.restoringComputer = undefined;
+      this.removeTarget = '';
+    }
+    this.activeTab = tab;
+    if (tab === 'pending') void this.loadScheduleJobs();
+    return true;
   }
 
   @Builder
-  bottomTabButtons() {
-    Row({ space: 4 }) {
-      ForEach(this.isPaired ? ['tasks', 'pending', 'files', 'mine'] : ['tasks', 'mine'], (tab: string) => {
-        Button({ type: ButtonType.Normal }) {
-          Column({ space: 3 }) {
-            Stack({ alignContent: Alignment.TopEnd }) {
-              Row() {
-                SymbolGlyph(this.tabSymbol(tab, this.activeTab === tab)).fontSize(23)
-                  .fontColor([this.activeTab === tab ? this.accent() : $r('app.color.pigo_muted')])
-                  .accessibilityLevel('no')
-              }.width('100%').height('100%').justifyContent(FlexAlign.Center)
-              if (tab === 'pending' && this.runningTaskCount()) {
-                Text(this.runningTaskCount() > 9 ? '9+' : `${this.runningTaskCount()}`)
-                  .fontSize(9).fontWeight(FontWeight.Medium).fontColor(this.accentForeground())
-                  .textAlign(TextAlign.Center).constraintSize({ minWidth: 14 }).height(14)
-                  .padding({ left: 2, right: 2 }).backgroundColor(this.accent()).borderRadius(7)
-              }
-            }.width(48).height(25)
-            Text(tab === 'tasks' ? '会话' : tab === 'pending' ? '任务' : tab === 'files' ? '工作区' : '我的')
-              .fontSize(11).fontWeight(this.activeTab === tab ? FontWeight.Bold : FontWeight.Medium)
-              .fontColor(this.activeTab === tab ? this.accent() : $r('app.color.pigo_muted'))
-          }
-        }.id(`tab-${tab}`).layoutWeight(1).height(this.windowHeight < SHORT_WINDOW_HEIGHT ? 44 : 54)
-          .borderRadius(24)
-          .padding(0)
-          .accessibilitySelected(this.activeTab === tab)
-          .backgroundColor(Color.Transparent)
-          .enabled(!this.busy).onClick(() => {
-            this.dismissKeyboard();
-            if (this.editingPath && this.fileText !== this.fileOriginal) {
-              this.status = '请先保存或放弃文件修改。'; return;
-            }
-            if (tab === 'files') {
-              if (!this.reachable || !this.workspaceCwd) { this.status = '请先连接电脑并打开一个任务。'; return; }
-              if (this.activeTab === 'files' && this.showFiles) return;
-              if (this.fileRoot !== this.workspaceCwd) {
-                this.resetFileTree();
-                this.fileRoot = this.workspaceCwd;
-              }
-              this.showFiles = true;
-              this.status = '';
-              if (!this.fileDirectories.has('')) void this.loadFileDirectory('');
-            } else { this.showFiles = false; this.showSettings = false; }
-            if (tab === 'mine' && this.minePage) {
-              this.mineBack();
-              this.minePage = '';
-            }
-            if (tab !== this.activeTab) {
-              this.status = '';
-              this.minePage = '';
-              this.addingComputer = false;
-              this.pairingComputerId = '';
-              this.closeComputerEditors();
-              this.restoringComputer = undefined;
-              this.removeTarget = '';
-            }
-            this.activeTab = tab;
-            if (tab === 'pending') void this.loadScheduleJobs();
-          })
-      }, (tab: string) => tab)
-    }.width('100%').height('100%').padding({ left: 6, right: 6 })
+  rootTabBar(tab: string) {
+    Column({ space: 3 }) {
+      Stack({ alignContent: Alignment.TopEnd }) {
+        Row() {
+          SymbolGlyph(this.tabSymbol(tab, this.activeTab === tab)).fontSize(23)
+            .fontColor([this.activeTab === tab ? this.accent() : $r('app.color.pigo_muted')])
+            .accessibilityLevel('no')
+        }.width('100%').height('100%').justifyContent(FlexAlign.Center)
+        if (tab === 'pending' && this.runningTaskCount()) {
+          Text(this.runningTaskCount() > 9 ? '9+' : `${this.runningTaskCount()}`)
+            .fontSize(9).fontWeight(FontWeight.Medium).fontColor(this.accentForeground())
+            .textAlign(TextAlign.Center).constraintSize({ minWidth: 14 }).height(14)
+            .padding({ left: 2, right: 2 }).backgroundColor(this.accent()).borderRadius(7)
+        }
+      }.width(48).height(25)
+      Text(tab === 'tasks' ? '会话' : tab === 'pending' ? '任务' : tab === 'files' ? '工作区' : '我的')
+        .fontSize(11).fontWeight(this.activeTab === tab ? FontWeight.Bold : FontWeight.Medium)
+        .fontColor(this.activeTab === tab ? this.accent() : $r('app.color.pigo_muted'))
+    }.id(`tab-${tab}`).width('100%').height('100%').justifyContent(FlexAlign.Center)
+      .accessibilitySelected(this.activeTab === tab)
   }
 
   @Builder
@@ -6048,122 +4568,35 @@ struct Index {
   }
 
   @Builder
-  taskRow(session: SessionRow, nested: boolean) {
-    Row({ space: 0 }) {
-      Button({ type: ButtonType.Normal }) {
-        Flex({ direction: this.compactSessionPane() ? FlexDirection.Column : FlexDirection.Row,
-          justifyContent: this.compactSessionPane() ? FlexAlign.Center : FlexAlign.Start,
-          alignItems: this.compactSessionPane() ? ItemAlign.Start : ItemAlign.Center }) {
-          if (this.compactSessionPane()) {
-            Text(session.name === '(no messages)' ? '新任务' : session.name || '未命名任务')
-              .fontSize(14).fontColor($r('app.color.pigo_text')).width('100%').maxLines(2)
-              .textOverflow({ overflow: TextOverflow.Ellipsis })
-          } else {
-            Text(session.name === '(no messages)' ? '新任务' : session.name || '未命名任务')
-              .fontSize(16).fontColor($r('app.color.pigo_text')).maxLines(1)
-              .textOverflow({ overflow: TextOverflow.Ellipsis }).layoutWeight(1)
-          }
-          if (session.id === this.openingSessionId) {
-            Text('正在打开…').id('session-opening').fontSize(11).fontColor(this.accent()).maxLines(1)
-              .margin({ left: this.compactSessionPane() ? 0 : 8, top: this.compactSessionPane() ? 2 : 0 })
-          } else if (this.sessionRunning(session.id)) {
-            Row({ space: 4 }) {
-              Text('').width(6).height(6).borderRadius(3)
-                .backgroundColor(this.stateColor(this.sessionState(session.id)))
-              Text(this.stateLabel(this.sessionState(session.id))).fontSize(11)
-                .fontColor(this.stateColor(this.sessionState(session.id)))
-            }.margin({ left: this.compactSessionPane() ? 0 : 8, top: this.compactSessionPane() ? 2 : 0 })
-              .accessibilityText(this.stateLabel(this.sessionState(session.id)))
-          }
-        }.width('100%').height('100%')
-      }.id(`session-${session.id}`).layoutWeight(1)
-        .height(this.compactSessionPane() && (session.id === this.openingSessionId || this.sessionRunning(session.id)) ? 54 : 46)
-        .padding({ left: this.compactSessionPane() ? (nested ? 16 : 6) : (nested ? 40 : 12), right: 2 })
-        .backgroundColor(Color.Transparent).enabled(!this.busy && (this.reachable || session.id === this.currentId))
-        .accessibilitySelected(session.id === this.currentId)
-        .onClick(() => {
-          if (this.openingSession) return;
-          this.activeTab = 'tasks'; this.showSettings = false; this.showFiles = false;
-          if (session.id === this.currentId) this.setDrawer(false);
-          else void this.requestAction('/open', { id: session.id });
-        })
-      Button({ type: ButtonType.Normal }) {
-        Image($r('app.media.ic_more')).width(16).height(16).fillColor($r('app.color.pigo_muted'))
-      }.id(`session-more-${session.id}`).width(this.compactSessionPane() ? 36 : 32).height(40).padding(0)
-        .backgroundColor(Color.Transparent)
-        .accessibilityText('任务操作').enabled(this.reachable && !this.busy).bindMenu([
-          { value: session.pinned ? '取消置顶' : '置顶', action: () => { void this.updateSessionMeta(session, true); } },
-          { value: session.archived ? '取消归档' : '归档', action: () => { void this.updateSessionMeta(session, false); } }
-        ])
-    }.width('100%').borderRadius(this.dockedSessions() ? 9 : 12)
-      .backgroundColor(session.id === this.openingSessionId || (session.id === this.currentId && this.dockedSessions()) ?
-        this.accentTint() : session.id === this.currentId ? $r('app.color.pigo_selected') : Color.Transparent)
-  }
-
-  @Builder
   taskView() {
-    Scroll() {
-      Column({ space: 24 }) {
-        this.runningTasksSection()
-        this.scheduledTasksSection()
-      }.width('100%').alignItems(HorizontalAlign.Start).padding({ top: 12, bottom: 16 })
-    }.scrollable(ScrollDirection.Vertical).scrollBar(BarState.Off).width('100%').layoutWeight(1)
-      .align(Alignment.TopStart).edgeEffect(EdgeEffect.Spring)
-  }
-
-  @Builder
-  runningTasksSection() {
-      Column({ space: 10 }) {
-        Text('运行中').fontSize(17).fontWeight(FontWeight.Bold).fontColor($r('app.color.pigo_text'))
-        ForEach(this.standaloneScheduleRuns(),
-          (row: RunMessage) => {
-            Text(`${row.run.name} · 定时任务运行中`).fontSize(15).fontColor($r('app.color.pigo_text'))
-              .width('100%').padding(14).borderRadius(16).backgroundColor($r('app.color.pigo_panel'))
-              .border({ width: 1, color: $r('app.color.pigo_line') })
-          }, (row: RunMessage) => row.key)
-        if (this.reachable && this.allRunningRows().length) {
-          ForEach(this.allRunningRows(), (row: RunningRow) => {
-            Button({ type: ButtonType.Normal }) {
-              Row({ space: 10 }) {
-                Column({ space: 4 }) {
-                  Text(row.name || '后台任务').fontSize(16).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text')).maxLines(1)
-                    .textOverflow({ overflow: TextOverflow.Ellipsis })
-                  if (row.cwd) Text(row.cwd.split('/').pop() || row.cwd).fontSize(12).fontColor($r('app.color.pigo_muted')).maxLines(1)
-                    .textOverflow({ overflow: TextOverflow.Ellipsis })
-                }.layoutWeight(1).alignItems(HorizontalAlign.Start)
-                Row({ space: 5 }) {
-                  Text('').width(6).height(6).borderRadius(3)
-                    .backgroundColor(this.stateColor(this.sessionState(row.id)))
-                  Text(`${row.id === this.currentId ? '当前 · ' : ''}${this.stateLabel(this.sessionState(row.id))}`)
-                    .fontSize(12).fontColor(this.stateColor(this.sessionState(row.id)))
-                }
-                SymbolGlyph($r('sys.symbol.chevron_right')).fontSize(14).fontColor([$r('app.color.pigo_muted')])
-              }.width('100%').padding(14)
-            }.id(`running-session-${row.id}`).width('100%').constraintSize({ minHeight: 60 }).padding(0)
-              .backgroundColor(row.id === this.currentId ? this.accentTint() : $r('app.color.pigo_panel'))
-              .border({ width: 1, radius: 16, color: row.id === this.currentId ? this.accent() : $r('app.color.pigo_line') })
-              .accessibilityText(`${row.name || '后台任务'}，${this.stateLabel(this.sessionState(row.id))}，点击切换查看`)
-              .enabled(!this.busy && !this.openingSession && (this.reachable || row.id === this.currentId))
-              .onClick(() => {
-                if (this.openingSession) return;
-                if (row.id !== this.currentId) void this.requestAction('/open', { id: row.id });
-                this.activeTab = 'tasks';
-              })
-          }, (row: RunningRow) => row.id)
-        } else if (!this.standaloneScheduleRuns().length) {
-          Row({ space: 12 }) {
-            Stack() {
-              SymbolGlyph(this.reachable ? $r('sys.symbol.clock') : $r('sys.symbol.computer'))
-                .fontSize(20).fontColor([$r('app.color.pigo_muted')])
-            }.width(40).height(40).borderRadius(12).backgroundColor($r('app.color.pigo_control'))
-            Column({ space: 4 }) {
-              Text(this.reachable ? '暂无运行中的任务' : '电脑未连接')
-                .fontSize(15).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
-            }.layoutWeight(1).alignItems(HorizontalAlign.Start)
-          }.width('100%').padding(14).borderRadius(16).backgroundColor($r('app.color.pigo_panel'))
-            .border({ width: 1, color: $r('app.color.pigo_line') })
-        }
-      }.width('100%').alignItems(HorizontalAlign.Start)
+    TaskPanel({
+      topClearance: this.topContentClearance(),
+      bottomClearance: this.bottomContentClearance(),
+      runningRows: this.taskPanelRows(),
+      scheduleRuns: this.standaloneScheduleRuns(),
+      currentId: this.currentId,
+      busy: this.busy,
+      openingSession: this.openingSession,
+      accentTint: this.accentTint(),
+      openRunningTask: (id: string): void => {
+        if (id !== this.currentId) void this.requestAction('/open', { id: id });
+        this.activeTab = 'tasks';
+      },
+      editSchedule: (job?: ScheduleJob): void => this.editSchedule(job),
+      loadScheduleJobs: (): Promise<void> => this.loadScheduleJobs(),
+      projects: this.$projects,
+      reachable: this.reachable,
+      scheduleError: this.$scheduleError,
+      scheduleJobMenu: (job: ScheduleJob): MenuElement[] => this.scheduleJobMenu(job),
+      scheduleJobs: this.$scheduleJobs,
+      scheduleListError: this.scheduleListError,
+      scheduleLoading: this.scheduleLoading,
+      schedulePage: this.$schedulePage,
+      scheduleSaving: this.scheduleSaving,
+      workspaces: this.$workspaces,
+      accent: this.accent(),
+      accentForeground: this.accentForeground()
+    })
   }
 
   @Builder
@@ -6199,151 +4632,64 @@ struct Index {
   }
 
   @Builder
-  spaceMenu(path: string, epoch: number) {
-    Menu() {
-      if ((!this.hasWorkspaceDetails && this.projects.includes(path)) ||
-        this.workspaces.some((row: WorkspaceRow): boolean => row.cwd === path)) {
-        MenuItem({ content: '移除空间' }).id('space-remove').contentFontColor($r('app.color.pigo_error'))
-          .onClick(() => { this.confirmCloseSpace(path, epoch); })
-      }
-    }
-  }
-
-  @Builder
-  librarySpace(path: string) {
-    Row({ space: 4 }) {
-      Row({ space: this.compactSessionPane() ? 4 : 9 }) {
-        SymbolGlyph($r('sys.symbol.folder')).fontSize(18).fontColor([this.accent()])
-        Text(this.workspaceName(path)).fontSize(14).fontWeight(FontWeight.Medium)
-          .fontColor($r('app.color.pigo_text'))
-          .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).layoutWeight(1)
-        if (this.hasWorkspaceDetails && !this.workspaces.some((row: WorkspaceRow): boolean => row.cwd === path)) {
-          Text('未登记').fontSize(10).fontColor($r('app.color.pigo_muted'))
-        }
-        SymbolGlyph($r('sys.symbol.chevron_down'))
-          .fontSize(this.compactSessionPane() ? 12 : 14).fontColor([$r('app.color.pigo_muted')])
-          .rotate({ angle: this.expandedSpaces.includes(path) ? 0 : -90 })
-      }.id(`space-${path}`).layoutWeight(1).height(44).onClick(() => { this.toggleSpace(path); })
-        .bindContextMenu(this.spaceMenu(path, this.epoch), ResponseType.LongPress, { placement: Placement.BottomLeft })
-      Button({ type: ButtonType.Normal }) {
-        SymbolGlyph($r('sys.symbol.plus')).fontSize(16).fontColor([$r('app.color.pigo_muted')])
-      }.id(`space-new-task-${path}`).width(40).height(44).padding(0).borderRadius(10)
-        .backgroundColor(Color.Transparent)
-        .accessibilityText(`在${this.workspaceName(path)}空间新建任务`)
-        .visibility(this.projects.includes(path) ? Visibility.Visible : Visibility.Hidden)
-        .enabled(!this.busy && !this.openingSession && this.projects.includes(path))
-        .onClick(() => { this.createSpaceTask(path); })
-    }.width('100%').padding({ left: this.compactSessionPane() ? 4 : 8 })
-  }
-
-  @Builder
-  sessionLibrary() {
-    if (!this.sessionLoading && !this.sessionCatalogFailed && this.loadedView === this.sessionView &&
-      (this.sessionView === 'all' ? this.sidebarRows.totalCount() === 0 : this.sessions.length === 0)) {
-      Text(this.reachable ? (this.sessionView === 'all' ? '暂无空间' : '暂无任务') : '连接电脑后加载任务')
-        .fontSize(14).fontColor($r('app.color.pigo_muted')).width('100%').padding(this.compactSessionPane() ? 6 : 16)
-        .layoutWeight(1).align(Alignment.TopStart)
-    } else {
-      List({ scroller: this.library, space: 5 }) {
-        LazyForEach(this.sidebarRows, (row: SidebarRow) => {
-          ListItem() {
-            if (row.path !== undefined) {
-              this.librarySpace(row.path)
-            } else if (row.session !== undefined) {
-              this.taskRow(row.session, row.nested)
-            }
-          }
-        }, (row: SidebarRow): string => row.key)
-      }.cachedCount(4).layoutWeight(1).width('100%').scrollBar(BarState.Off)
-        .padding({ bottom: 20 })
-        .onAreaChange(() => { this.revealLibraryAnchor(); })
-    }
-  }
-
-  @Builder
   sessionDrawer() {
-    Column({ space: !this.dockedSessions() || this.compactSessionPane() || this.windowHeight < SHORT_WINDOW_HEIGHT ? 8 : 12 }) {
-      Row({ space: this.compactSessionPane() ? 6 : 10 }) {
-        if (this.dockedSessions()) {
-          Stack() {
-            SymbolGlyph($r('sys.symbol.computer')).fontSize(19).fontColor([this.accent()])
-          }.width(34).height(34).borderRadius(10).backgroundColor(this.accentTint())
-        }
-        Button({ type: ButtonType.Normal }) {
-          Row({ space: this.dockedSessions() ? 6 : 8 }) {
-            if (!this.dockedSessions()) {
-              SymbolGlyph($r('sys.symbol.computer')).fontSize(21).fontColor([this.accent()])
-            }
-            Text(this.computerTitle()).fontSize(this.compactSessionPane() ? 14 : this.dockedSessions() ? 17 : 19)
-              .fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
-              .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
-              .layoutWeight(this.dockedSessions() ? 1 : 0)
-              .constraintSize({ maxWidth: this.dockedSessions() ? '100%' : '65%' })
-            SymbolGlyph($r('sys.symbol.chevron_down')).fontSize(13).fontColor([$r('app.color.pigo_muted')])
-          }.width('100%')
-        }.id('computers').layoutWeight(1).height(48).padding(0).backgroundColor(Color.Transparent)
-          .accessibilityText('切换电脑').enabled(!this.busy).onClick(() => { this.openComputers(); })
-        if (!this.dockedSessions()) {
-          Button({ type: ButtonType.Normal }) {
-            SymbolGlyph($r('sys.symbol.xmark')).fontSize(18).fontColor([$r('app.color.pigo_muted')])
-          }.width(44).height(44).padding(0).backgroundColor(Color.Transparent).accessibilityText('关闭会话抽屉')
-            .onClick(() => { this.setDrawer(false); })
-        }
-      }.width('100%').padding({ left: this.dockedSessions() ? 2 : 10 })
-      Button({ type: ButtonType.Normal }) {
-        Row({ space: this.compactSessionPane() ? 6 : 8 }) {
-          SymbolGlyph($r('sys.symbol.square_and_pencil')).fontSize(18)
-            .fontColor([this.dockedSessions() ? this.accentForeground() : this.accent()])
-          Text('新建会话').fontSize(this.dockedSessions() ? 15 : 15).fontWeight(FontWeight.Medium)
-            .fontColor(this.dockedSessions() ? this.accentForeground() : $r('app.color.pigo_text')).maxLines(1)
-        }.justifyContent(FlexAlign.Center).width('100%')
-      }.id('drawer-new-task').width('100%').height(44).padding(0)
-        .backgroundColor(this.dockedSessions() ? this.accent() : $r('app.color.pigo_panel'))
-        .border({ width: this.dockedSessions() ? 0 : 1, radius: 12, color: $r('app.color.pigo_line') })
-        .enabled(this.reachable && !this.busy && !this.openingSession && this.hostAvailable &&
-          (this.projects.length > 0 || this.canCreateWorkspace))
-        .bindMenu(this.newTaskOptions())
-      if (!this.reachable) this.offlineNotice(true, this.compactSessionPane())
-      Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.SpaceBetween, alignContent: FlexAlign.SpaceBetween }) {
-        ForEach(SIDEBAR_VIEWS, (view: string) => {
-          Button({ type: ButtonType.Normal }) {
-            Text(this.sessionViewLabel(view))
-              .fontSize(13).fontColor(this.sessionView === view ? this.accentForeground() : $r('app.color.pigo_muted')).maxLines(1)
-              .fontWeight(this.sessionView === view ? FontWeight.Medium : FontWeight.Regular)
-          }.id(`session-view-${view}`).width(this.compactSessionPane() ? '49%' : '24%')
-            .height(34).padding(0).borderRadius(9)
-            .backgroundColor(this.sessionView === view ? this.accent() : Color.Transparent)
-            .accessibilitySelected(this.sessionView === view).enabled(!this.busy && !this.sessionLoading && this.reachable)
-            .onClick(() => { this.selectSessionView(view); })
-        }, (view: string) => view)
-      }.width('100%').padding(4).borderRadius(12).backgroundColor($r('app.color.pigo_control'))
-      if (this.sessionLoading && (!this.sessionCatalogLoaded || this.loadedView !== this.sessionView)) {
-        Text('正在加载任务…').fontSize(13).fontColor($r('app.color.pigo_muted')).width('100%')
-      } else if (this.sessionCatalogFailed) {
-        Button('任务加载失败，重试').chatAction().id('session-retry').width('100%').height(38)
-          .enabled(this.reachable && !this.busy && !this.openingSession).onClick(() => { void this.loadSessions(); })
-      }
-      this.sessionLibrary()
-      Row({ space: 6 }) {
-        Blank().width(6).height(6).borderRadius(3)
-          .backgroundColor(this.reachable ? $r('app.color.pigo_success') : $r('app.color.pigo_warning'))
-        Text(this.base.split('://')[1] || '').id('active-computer').fontSize(11).fontColor($r('app.color.pigo_muted'))
-          .layoutWeight(1).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
-      }.width('100%').padding({ left: this.compactSessionPane() ? 4 : 10 })
-    }.id('session-sidebar').width(this.dockedSessions() ? this.sessionPaneWidth() : this.drawerWidth()).height('100%')
-      .padding({ left: this.compactSessionPane() ? 8 : 12, right: 12,
-        top: this.statusBarHeight + (this.compactSessionPane() ? 8 : 12), bottom: this.bottomPad() + 18 })
-      .border({ width: { right: this.dockedSessions() ? 1 : 0 }, color: $r('app.color.pigo_line') })
-      .backgroundColor($r('app.color.pigo_sidebar'))
-      .transition(TransitionEffect.move(TransitionEdge.START))
-      .onGestureJudgeBegin(() => this.dockedSessions() ? GestureJudgeResult.REJECT : GestureJudgeResult.CONTINUE)
-      .gesture(PanGesture({ direction: PanDirection.Horizontal }).onActionEnd((event: GestureEvent) => { this.swipeDrawer(event); }))
-      .onAppear(() => {
-        // On entry, reveal the current session or its workspace when available.
-        if (!this.dockedSessions()) this.focusActiveSpace();
-        this.pendingLibraryReveal = !!this.currentId;
-        this.updateSidebarRows();
-      })
+    SessionSidebar({
+      activeTab: this.$activeTab,
+      base: this.base,
+      busy: this.busy,
+      canCreateWorkspace: this.canCreateWorkspace,
+      confirmCloseSpace: (path: string, epoch: number): void => this.confirmCloseSpace(path, epoch),
+      createSpaceTask: (path: string): void => this.createSpaceTask(path),
+      currentId: this.currentId,
+      expandedSpaces: this.$expandedSpaces,
+      hasWorkspaceDetails: this.hasWorkspaceDetails,
+      hostAvailable: this.hostAvailable,
+      idle: this.idle,
+      interaction: this.interaction,
+      library: this.library,
+      loadSessions: (): Promise<void> => this.loadSessions(),
+      loadedView: this.loadedView,
+      offlineDismissed: this.$offlineDismissed,
+      openComputers: (): void => this.openComputers(),
+      openingSession: this.openingSession,
+      openingSessionId: this.openingSessionId,
+      projects: this.$projects,
+      queued: this.queued,
+      reachable: this.reachable,
+      requestAction: (path: string, input?: Payload): Promise<boolean> => this.requestAction(path, input),
+      revealLibraryAnchor: (): void => this.revealLibraryAnchor(),
+      runningSessionIds: this.$runningSessionIds,
+      runningSessions: this.$runningSessions,
+      schedule: (delay: number): void => this.schedule(delay),
+      selectSessionView: (view: string): void => this.selectSessionView(view),
+      sessionCatalogFailed: this.sessionCatalogFailed,
+      sessionCatalogLoaded: this.sessionCatalogLoaded,
+      sessionLoading: this.sessionLoading,
+      sessionView: this.sessionView,
+      sessions: this.$sessions,
+      setDrawer: (open: boolean): void => this.setDrawer(open),
+      showFiles: this.$showFiles,
+      showSettings: this.$showSettings,
+      sidebarRows: this.sidebarRows,
+      statusBarHeight: this.statusBarHeight,
+      swipeDrawer: (event: GestureEvent): void => this.swipeDrawer(event),
+      toggleSpace: (path: string): void => this.toggleSpace(path),
+      updateSessionMeta: (session: SessionRow, pin: boolean): Promise<void> => this.updateSessionMeta(session, pin),
+      windowHeight: this.windowHeight,
+      workspaces: this.$workspaces,
+      accent: this.accent(),
+      accentForeground: this.accentForeground(),
+      accentTint: this.accentTint(),
+      bottomPad: this.bottomPad(),
+      compactSessionPane: this.compactSessionPane(),
+      computerTitle: this.computerTitle(),
+      dockedSessions: this.dockedSessions(),
+      drawerWidth: this.drawerWidth(),
+      sessionPaneWidth: this.sessionPaneWidth(),
+      openNewSpace: (): void => { this.openNewSpace(); },
+      onDrawerAppear: (): void => { this.onSidebarAppear(); },
+      connectionEpoch: (): number => this.epoch
+    })
   }
 
   @Builder
@@ -6391,8 +4737,8 @@ struct Index {
     Column({ space: 12 }) {
       Row({ space: 12 }) {
         Button({ type: ButtonType.Normal }) {
-          this.headerSymbol($r('sys.symbol.chevron_left'), $r('app.color.pigo_text'), 21)
-        }.id('text-preview-close').headerAction().accessibilityText('返回').enabled(!this.savingPreview)
+          headerSymbol($r('sys.symbol.chevron_left'), $r('app.color.pigo_text'), 21)
+        }.id('text-preview-close').headerAction().attributeModifier(glassButtonSurface(this.darkMode)).accessibilityText('返回').enabled(!this.savingPreview)
           .onClick(() => { this.textFilePreview = undefined; })
         Text(preview.name).id('text-preview-title').layoutWeight(1)
           .fontSize(19).fontWeight(FontWeight.Bold).fontColor($r('app.color.pigo_text'))
@@ -6460,8 +4806,8 @@ struct Index {
     Column({ space: 8 }) {
       Row({ space: 12 }) {
         Button({ type: ButtonType.Normal }) {
-          this.headerSymbol($r('sys.symbol.chevron_left'), $r('app.color.pigo_text'), 21)
-        }.id('markdown-exit-landscape').headerAction().accessibilityText('退出横屏')
+          headerSymbol($r('sys.symbol.chevron_left'), $r('app.color.pigo_text'), 21)
+        }.id('markdown-exit-landscape').headerAction().attributeModifier(glassButtonSurface(this.darkMode)).accessibilityText('退出横屏')
           .onClick(() => { this.closeMarkdownTableReader(); })
         Text('表格').fontSize(19).fontWeight(FontWeight.Bold).fontColor($r('app.color.pigo_text')).layoutWeight(1)
       }.width('100%').height(this.headerHeight())
@@ -6482,28 +4828,60 @@ struct Index {
   @Builder
   mainNavigation() {
     Navigation() {
-      Column({ space: this.windowHeight < SHORT_WINDOW_HEIGHT ? 4 : 8 }) {
-        if (this.loading) {
-          this.welcome()
-        } else if (this.activeTab === 'mine') {
-          this.mineView()
-        } else if (this.isPaired) {
-          this.chat()
-        } else {
-          this.welcome()
+      Stack({ alignContent: Alignment.Bottom }) {
+        Tabs({ barPosition: BarPosition.End, index: this.activeTabIndex() }) {
+          ForEach(this.rootTabs(), (tab: string) => {
+            TabContent() {
+              Column() {
+                if (this.loading) {
+                  this.welcome()
+                } else if (tab === 'mine') {
+                  this.mineView()
+                } else if (!this.isPaired) {
+                  this.welcome()
+                } else if (tab === 'files') {
+                  this.workspaceFiles()
+                } else if (tab === 'pending') {
+                  this.taskView()
+                } else {
+                  this.chat()
+                }
+              }.width('100%').height('100%').alignItems(HorizontalAlign.Start)
+            }.tabBar(this.rootTabBar(tab))
+          }, (tab: string) => tab)
         }
-        if (!this.loading) {
-          if (this.status) this.statusNotice()
-          if (this.showRootBottomTabs()) this.bottomTabs()
+        .width('100%').height('100%')
+        .vertical(false).scrollable(false).animationDuration(0)
+        .barOverlap(true)
+        .barHeight(this.showRootBottomTabs() ? this.bottomTabsHeight() : 0)
+        .barBackgroundColor(Color.Transparent)
+        .attributeModifier(immersiveFloatingTabs(this.showRootBottomTabs(), this.bottomPad() + 8, this.darkMode))
+        .onContentWillChange((_from: number, to: number): boolean => {
+          const tab = this.rootTabs()[to];
+          return !!tab && this.selectRootTab(tab);
+        })
+        .onTabBarClick((index: number) => {
+          const tab = this.rootTabs()[index];
+          if (tab && tab === this.activeTab) this.selectRootTab(tab);
+        })
+        if (!this.loading && this.status) {
+          Column() {
+            this.statusNotice()
+          }.width('100%').padding({
+            left: 16,
+            right: 16,
+            bottom: (this.showRootBottomTabs() ? this.bottomTabsHeight() + 14 : 0) + this.bottomPad() + 8
+          }).hitTestBehavior(HitTestMode.Transparent)
         }
-      }.width('100%').height('100%').alignItems(HorizontalAlign.Start)
-        .padding({ top: this.loading || (!this.isPaired && this.activeTab !== 'mine') ? 0 : 8,
-          bottom: this.bottomPad() + 6 })
+      }.width('100%').height('100%')
     }.width('100%').height('100%').constraintSize({ maxWidth: this.activeTab === 'mine' || this.showSettings ? 600 : 840 })
+      .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP])
       .mode(NavigationMode.Stack).hideBackButton(true).hideToolBar(true)
-      .title({ builder: this.pageHeader, height: this.headerHeight() }, { backgroundColor: Color.Transparent })
+      .title({ builder: this.pageHeader, height: this.headerHeight() + this.statusBarHeight + 20 }, {
+        backgroundColor: Color.Transparent,
+        barStyle: BarStyle.STACK
+      })
       .hideTitleBar(this.loading || (!this.isPaired && this.activeTab !== 'mine'))
-      .padding({ left: 16, right: 16, top: this.statusBarHeight + 8 })
   }
 
   @Builder
@@ -6561,12 +4939,6 @@ struct Index {
     }.width('100%').justifyContent(FlexAlign.Center).padding({ left: 16, right: 16 })
       .margin({ top: this.statusBarHeight + 8 }).hitTestBehavior(HitTestMode.Transparent)
       .transition(TransitionEffect.OPACITY.animation({ duration: 180, curve: Curve.EaseOut }))
-  }
-
-  private isCurrentScheduleComputer(message: RunMessage): boolean {
-    const current = this.computers.find((item: Companion): boolean => item.address === this.base);
-    const origin = this.computers.find((item: Companion): boolean => item.address === message.address);
-    return !!current && !!origin && computerGroupId(current) === computerGroupId(origin);
   }
 
   private confirmDeleteSchedule(job: ScheduleJob): void {
@@ -6632,289 +5004,61 @@ struct Index {
     }
   }
 
-  private scheduleStatusSymbol(status: string): Resource {
-    if (status === 'succeeded') return $r('sys.symbol.checkmark_circle');
-    if (status === 'failed' || status === 'interrupted') return $r('sys.symbol.exclamationmark_circle');
-    return $r('sys.symbol.clock');
-  }
-
-  private scheduleStatusColor(status: string): Resource {
-    if (status === 'succeeded') return $r('app.color.pigo_success');
-    if (status === 'failed' || status === 'interrupted') return $r('app.color.pigo_error');
-    return $r('app.color.pigo_warning');
-  }
-
-  private scheduleStatusPanel(status: string): Resource {
-    if (status === 'succeeded') return $r('app.color.pigo_control');
-    if (status === 'failed' || status === 'interrupted') return $r('app.color.pigo_error_panel');
-    return $r('app.color.pigo_warning_panel');
-  }
-
   @Builder
   scheduleInboxButton() {
     Button({ type: ButtonType.Normal }) {
       Stack({ alignContent: Alignment.TopEnd }) {
-        this.headerSymbol($r('sys.symbol.inbox'), $r('app.color.pigo_text'), 19)
+        Stack() {
+          headerSymbol($r('sys.symbol.inbox'), $r('app.color.pigo_text'), 19)
+        }.width('100%').height('100%')
         if (this.scheduleMessages.some((item: RunMessage): boolean => item.unread)) {
           Blank().width(8).height(8).borderRadius(4).backgroundColor(this.accent())
-            .margin({ top: 4, right: 4 })
+            .margin({ top: 9, right: 9 })
         }
-      }
-    }.id('schedule-inbox').headerAction().accessibilityText(this.scheduleMessages.some((item: RunMessage): boolean =>
+      }.width('100%').height('100%')
+    }.id('schedule-inbox').headerAction().attributeModifier(immersiveSurface(this.darkMode)).accessibilityText(this.scheduleMessages.some((item: RunMessage): boolean =>
       item.unread) ? '收件箱，有未读消息' : '收件箱')
       .onClick(() => { this.showScheduleInbox(); })
   }
 
   @Builder
-  scheduledMessageRow(message: RunMessage) {
-    Button({ type: ButtonType.Normal }) {
-      Row({ space: 12 }) {
-        Stack() {
-          SymbolGlyph(this.scheduleStatusSymbol(message.run.status)).fontSize(19)
-            .fontColor([this.scheduleStatusColor(message.run.status)])
-        }.width(36).height(36).borderRadius(10).backgroundColor(this.scheduleStatusPanel(message.run.status))
-        Column({ space: 3 }) {
-          Text(message.run.name).fontSize(16).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
-            .maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis })
-          Text(`${message.computer} · ${scheduleRunStatus(message.run.status)}`).fontSize(13)
-            .fontColor($r('app.color.pigo_muted')).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
-          Text(scheduleTime(message.run.finishedAt ?? message.run.scheduledAt)).fontSize(12).fontColor($r('app.color.pigo_muted'))
-        }.layoutWeight(1).alignItems(HorizontalAlign.Start)
-        if (message.unread) Blank().width(7).height(7).borderRadius(4).backgroundColor(this.accent())
-        SymbolGlyph($r('sys.symbol.chevron_right')).fontSize(14).fontColor([$r('app.color.pigo_muted')])
-      }.width('100%').padding(12)
-    }.id(`schedule-message-${message.run.id}`).width('100%').padding(0)
-      .backgroundColor($r('app.color.pigo_panel')).border({ width: 1, radius: 16, color: $r('app.color.pigo_line') })
-      .onClick(() => { this.showScheduleDetail(message); })
-  }
-
-  @Builder
-  scheduleInboxDelete(message: RunMessage) {
-    Button('删除').id(`schedule-dismiss-${message.run.id}`).width(72).height('100%').padding(0)
-      .fontColor(Color.White).backgroundColor($r('app.color.pigo_error')).borderRadius(14)
-      .accessibilityText(`删除收件箱消息 ${message.run.name}`)
-      .onClick(() => { this.dismissScheduleMessage(message); })
-  }
-
-  @Builder
-  scheduleInboxList() {
-    List({ space: 12 }) {
-      ListItem() {
-        Text('所有电脑').fontSize(13).fontColor($r('app.color.pigo_muted'))
-      }
-      if (this.scheduleOffline.length) {
-        ListItem() {
-          Text('部分电脑暂时无法连接，恢复连接后可补收结果。').fontSize(13).fontColor($r('app.color.pigo_muted'))
-        }
-      } else if (!this.scheduleMessages.some((message: RunMessage): boolean => !message.dismissed)) {
-        ListItem() {
-          Text('暂无定时任务消息').fontSize(14).fontColor($r('app.color.pigo_muted'))
-        }
-      }
-      ForEach(this.scheduleMessages.filter((message: RunMessage): boolean => !message.dismissed), (message: RunMessage) => {
-        ListItem() {
-          this.scheduledMessageRow(message)
-        }.swipeAction({ end: this.scheduleInboxDelete.bind(this, message), edgeEffect: SwipeEdgeEffect.None })
-      }, (message: RunMessage) => `${message.key}:${message.unread}`)
-    }.layoutWeight(1).width('100%').scrollBar(BarState.Off).padding({ top: 6, bottom: 12 })
-  }
-
-  @Builder
-  scheduleEditor() {
-    Column({ space: 12 }) {
-      Text('工作区').fontSize(13).fontColor($r('app.color.pigo_muted'))
-      Button({ type: ButtonType.Normal }) {
-        Row({ space: 8 }) {
-          SymbolGlyph($r('sys.symbol.folder')).fontSize(17).fontColor([this.accent()])
-          Text(this.scheduleCwd ? this.workspaceName(this.scheduleCwd) : '选择已共享工作区')
-            .fontSize(15).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
-            .layoutWeight(1).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
-          SymbolGlyph($r('sys.symbol.chevron_down')).fontSize(14).fontColor([$r('app.color.pigo_muted')])
-        }.width('100%').padding({ left: 14, right: 14 })
-      }.width('100%').height(44).padding(0).borderRadius(12)
-        .backgroundColor($r('app.color.pigo_control'))
-        .enabled(!this.scheduleEditing && this.projects.length > 0)
-        .bindMenu(this.projects.map((cwd: string): MenuElement => ({
-          value: this.workspaceName(cwd), action: () => { this.scheduleCwd = cwd; }
-        })))
-      Text('名称').fontSize(13).fontColor($r('app.color.pigo_muted'))
-      TextInput({ text: this.scheduleName, placeholder: '例如 每日汇总' }).id('schedule-name').maxLength(80)
-        .backgroundColor($r('app.color.pigo_control')).fontColor($r('app.color.pigo_text'))
-        .placeholderColor($r('app.color.pigo_muted'))
-        .onChange((value: string) => { this.scheduleName = value; })
-      Text('让 Pi 执行什么').fontSize(13).fontColor($r('app.color.pigo_muted'))
-      TextArea({ text: this.schedulePrompt, placeholder: '汇总今天的工作区变更' }).id('schedule-prompt').maxLength(1600).height(112)
-        .backgroundColor($r('app.color.pigo_control')).fontColor($r('app.color.pigo_text'))
-        .placeholderColor($r('app.color.pigo_muted'))
-        .onChange((value: string) => { this.schedulePrompt = value; })
-      Row({ space: 4 }) {
-        ForEach(['once', 'daily', 'interval'], (kind: string) => {
-          Button(kind === 'once' ? '指定时间' : kind === 'daily' ? '每天' : '固定间隔', { type: ButtonType.Normal }).chatAction()
-            .id(`schedule-kind-${kind}`).layoutWeight(1).height(38).borderRadius(10)
-            .accessibilitySelected(this.scheduleKind === kind)
-            .backgroundColor(this.scheduleKind === kind ? this.accent() : Color.Transparent)
-            .fontColor(this.scheduleKind === kind ? this.accentForeground() : $r('app.color.pigo_muted'))
-            .onClick(() => {
-              if (this.scheduleKind === kind) return;
-              this.scheduleKind = kind;
-              this.scheduleWhen = kind === 'once' ? scheduleTime(Date.now() + 120_000) : kind === 'daily' ? '18:00' : '60';
-            })
-        }, (kind: string) => kind)
-      }.width('100%').padding(4).borderRadius(14).backgroundColor($r('app.color.pigo_control'))
-      Text(this.scheduleKind === 'once' ? '执行时间（手机时区）' : this.scheduleKind === 'daily' ?
-        `每天执行时间（${this.scheduleZone || '电脑时区'}）` : '每隔多少分钟执行')
-        .fontSize(13).fontColor($r('app.color.pigo_muted'))
-      Row({ space: 8 }) {
-        TextInput({ text: this.scheduleWhen, placeholder: this.scheduleKind === 'once' ? 'YYYY-MM-DD HH:mm' :
-          this.scheduleKind === 'daily' ? 'HH:mm' : '分钟' }).maxLength(16).layoutWeight(1)
-          .backgroundColor($r('app.color.pigo_control')).fontColor($r('app.color.pigo_text'))
-          .placeholderColor($r('app.color.pigo_muted'))
-          .onChange((value: string) => { this.scheduleWhen = value; })
-        if (this.scheduleKind !== 'interval') {
-          Button({ type: ButtonType.Normal }) {
-            SymbolGlyph(this.scheduleKind === 'once' ? $r('sys.symbol.calendar') : $r('sys.symbol.clock'))
-              .fontSize(19).fontColor([this.accent()])
-          }.width(44).height(40).padding(0).borderRadius(12)
-            .backgroundColor(this.accentTint())
-            .accessibilityText(this.scheduleKind === 'once' ? '选择日期与时间' : '选择时间')
-            .onClick(() => { this.openScheduleTimePicker(); })
-        }
-      }.width('100%')
-      Text('错过后可补跑的分钟数，0 表示跳过').fontSize(13).fontColor($r('app.color.pigo_muted'))
-      TextInput({ text: this.scheduleCatchUp, placeholder: '0' }).type(InputType.Number).maxLength(4)
-        .backgroundColor($r('app.color.pigo_control')).fontColor($r('app.color.pigo_text'))
-        .placeholderColor($r('app.color.pigo_muted'))
-        .onChange((value: string) => { this.scheduleCatchUp = value; })
-      Button(this.scheduleSaving ? '等待电脑确认…' : '保存到电脑').chatAction().id('schedule-save')
-        .width('100%').height(46)
-        .backgroundColor(this.accent()).fontColor(this.accentForeground())
-        .enabled(!this.scheduleSaving).onClick(() => {
-          void this.updateSchedule(this.scheduleEditing ? 'edit' : 'create', this.scheduleEditing);
-        })
-    }.width('100%').alignItems(HorizontalAlign.Start)
-  }
-
-  @Builder
-  scheduledRunDetail(message: RunMessage) {
-    Column({ space: 12 }) {
-      Text(message.run.name).fontSize(24).fontWeight(FontWeight.Bold).fontColor($r('app.color.pigo_text'))
-      Text(`${message.computer} · ${scheduleRunStatus(message.run.status)}`).fontSize(15)
-        .fontColor(this.scheduleStatusColor(message.run.status))
-      Column({ space: 8 }) {
-        Text(`工作区 · ${message.run.cwd.split('/').pop() || message.run.cwd}`).fontSize(14).fontColor($r('app.color.pigo_text'))
-        Text(`计划 · ${scheduleTime(message.run.scheduledAt)}`).fontSize(14).fontColor($r('app.color.pigo_text'))
-        if (message.run.startedAt) Text(`开始 · ${scheduleTime(message.run.startedAt)}`).fontSize(14).fontColor($r('app.color.pigo_text'))
-        if (message.run.finishedAt) Text(`结束 · ${scheduleTime(message.run.finishedAt)}`).fontSize(14).fontColor($r('app.color.pigo_text'))
-      }.width('100%').alignItems(HorizontalAlign.Start).padding(14).borderRadius(16)
-        .backgroundColor($r('app.color.pigo_panel')).border({ width: 1, color: $r('app.color.pigo_line') })
-      if (message.run.reason) Text(scheduleRunReason(message.run.reason)).fontSize(14).fontColor($r('app.color.pigo_muted'))
-      if ((message.run.coalesced ?? 0) > 0) {
-        Text(`此前还有 ${message.run.coalesced} 次到期，已合并处理。`).fontSize(14).fontColor($r('app.color.pigo_muted'))
-      }
-      if (message.run.summary) {
-        Text('运行结果').fontSize(16).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
-        Text(message.run.summary).fontSize(15).copyOption(CopyOptions.LocalDevice).fontColor($r('app.color.pigo_text'))
-          .width('100%').padding(14).borderRadius(16).backgroundColor($r('app.color.pigo_panel'))
-          .border({ width: 1, color: $r('app.color.pigo_line') })
-      }
-    }.width('100%').alignItems(HorizontalAlign.Start)
-  }
-
-  @Builder
-  scheduledTasksSection() {
-    Column({ space: 12 }) {
-      Row({ space: 8 }) {
-        Text('定时任务').layoutWeight(1).fontSize(17).fontWeight(FontWeight.Bold)
-          .fontColor($r('app.color.pigo_text'))
-        Button({ type: ButtonType.Normal }) {
-          SymbolGlyph($r('sys.symbol.arrow_clockwise')).fontSize(17).fontColor([$r('app.color.pigo_muted')])
-        }.id('schedule-refresh').width(36).height(36).padding(0).borderRadius(10)
-          .backgroundColor($r('app.color.pigo_control')).accessibilityText('刷新定时任务')
-          .enabled(!this.scheduleSaving && !this.scheduleLoading)
-          .onClick(() => { void this.loadScheduleJobs(); })
-      }.width('100%')
-      Row({ space: 8 }) {
-        Button('新建定时任务').chatAction().id('schedule-create').height(42)
-          .backgroundColor(this.accent()).fontColor(this.accentForeground())
-          .enabled(this.reachable && this.projects.length > 0 && !this.scheduleLoading &&
-            !this.scheduleSaving && !this.scheduleListError).onClick(() => { this.editSchedule(); })
-        Button('运行历史').chatAction().id('schedule-history').height(42)
-          .onClick(() => { this.scheduleError = ''; this.schedulePage = 'history'; })
-      }.width('100%')
-      if (this.scheduleLoading) Text('正在读取电脑上的计划…').fontSize(14).fontColor($r('app.color.pigo_muted'))
-      if (this.scheduleListError) Text(this.scheduleListError).fontSize(14).fontColor($r('app.color.pigo_error'))
-      else if (!this.reachable && this.scheduleJobs.length) {
-        Text('显示上次连接时的定时计划').fontSize(13).fontColor($r('app.color.pigo_muted'))
-      } else if (this.reachable && !this.scheduleLoading && !this.scheduleJobs.length) {
-        Text(this.projects.length ? '还没有定时任务' : '共享工作区后可创建定时任务').fontSize(14).fontColor($r('app.color.pigo_muted'))
-      }
-      ForEach(this.scheduleJobs, (job: ScheduleJob) => {
-        Row({ space: 8 }) {
-          Column({ space: 4 }) {
-            Text(job.name).fontSize(16).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
-            Text(`${this.workspaceName(job.cwd)} · ${!job.enabled ? '已暂停' :
-              job.nextAt === null ? '已结束' : `下次 ${scheduleTime(job.nextAt)}`}`)
-              .fontSize(13).fontColor($r('app.color.pigo_muted'))
-          }.layoutWeight(1).alignItems(HorizontalAlign.Start)
-          Button({ type: ButtonType.Normal }) {
-            Image($r('app.media.ic_more')).width(18).height(18).fillColor($r('app.color.pigo_muted'))
-          }.id(`schedule-operations-${job.id}`).width(40).height(40).padding(0).borderRadius(10)
-            .backgroundColor(Color.Transparent).accessibilityText('定时任务操作')
-            .enabled(this.reachable && !this.scheduleSaving && !this.scheduleLoading).bindMenu(this.scheduleJobMenu(job))
-        }.width('100%').padding({ left: 14, right: 6, top: 12, bottom: 12 }).borderRadius(16)
-          .backgroundColor($r('app.color.pigo_panel')).border({ width: 1, color: $r('app.color.pigo_line') })
-      }, (job: ScheduleJob) => `${job.id}:${job.version}:${job.nextAt}`)
-    }.width('100%').alignItems(HorizontalAlign.Start)
-  }
-
-  @Builder
   scheduleOverlay() {
-    Column({ space: 10 }) {
-      Row({ space: 12 }) {
-        Button({ type: ButtonType.Normal }) {
-          this.headerSymbol($r('sys.symbol.chevron_left'), $r('app.color.pigo_text'), 21)
-        }.headerAction().accessibilityText('返回').enabled(!this.scheduleSaving)
-          .onClick(() => { this.backFromSchedule(); })
-        Text(this.schedulePage === 'inbox' ? '收件箱' : this.schedulePage === 'detail' ? '运行详情' :
-          this.schedulePage === 'editor' ? (this.scheduleEditing ? '编辑定时任务' : '新建定时任务') : '运行历史')
-          .layoutWeight(1).fontSize(20).fontWeight(FontWeight.Bold).fontColor($r('app.color.pigo_text'))
-      }.width('100%').height(this.headerHeight())
-        .border({ width: { bottom: 1 }, color: $r('app.color.pigo_line') })
-      if (this.schedulePage === 'inbox') {
-        this.scheduleInboxList()
-      } else {
-        Scroll() {
-          Column({ space: 12 }) {
-            if (this.scheduleError) Text(this.scheduleError).fontSize(14).fontColor($r('app.color.pigo_error'))
-            if (this.schedulePage === 'detail' && this.scheduleDetail) {
-              this.scheduledRunDetail(this.scheduleDetail)
-            } else if (this.schedulePage === 'editor') {
-              this.scheduleEditor()
-            } else if (this.schedulePage === 'history') {
-              Text(this.computerTitle()).fontSize(13).fontColor($r('app.color.pigo_muted'))
-              if (!this.scheduleMessages.some((item: RunMessage): boolean => this.isCurrentScheduleComputer(item))) {
-                Text('暂无运行记录').fontSize(14).fontColor($r('app.color.pigo_muted'))
-              }
-              ForEach(this.scheduleMessages.filter((item: RunMessage): boolean => this.isCurrentScheduleComputer(item)),
-                (message: RunMessage) => { this.scheduledMessageRow(message) },
-                (message: RunMessage) => `${message.key}:${message.unread}`)
-            }
-          }.width('100%').alignItems(HorizontalAlign.Start).padding({ top: 6, bottom: 12 })
-        }.layoutWeight(1).width('100%').align(Alignment.TopStart).scrollBar(BarState.Off)
-      }
-      if (this.schedulePage === 'detail' && this.scheduleDetail?.run.sessionId) {
-        if (this.isPaired && !this.isCurrentScheduleComputer(this.scheduleDetail)) {
-          Text(`当前聊天在 ${this.computerTitle()}`).fontSize(13).fontColor($r('app.color.pigo_muted'))
-        }
-        Button(`在 ${this.scheduleDetail.computer} 打开会话`).chatAction().width('100%').height(46)
-          .backgroundColor(this.accent()).fontColor(this.accentForeground())
-          .enabled(!this.busy && !this.openingSession).onClick(() => {
-            if (this.scheduleDetail) void this.openScheduledSession(this.scheduleDetail);
-          })
-      }
-    }.id('schedule-overlay').width('100%').height('100%').padding({
-      left: 16, right: 16, top: this.statusBarHeight + 8, bottom: this.bottomPad() + 8
-    }).backgroundColor($r('app.color.launch_background')).hitTestBehavior(HitTestMode.BLOCK_HIERARCHY)
+    ScheduleOverlay({
+      backFromSchedule: (): void => this.backFromSchedule(),
+      base: this.base,
+      busy: this.busy,
+      computers: this.$computers,
+      dismissScheduleMessage: (message: RunMessage): void => this.dismissScheduleMessage(message),
+      isPaired: this.isPaired,
+      openScheduleTimePicker: (): void => this.openScheduleTimePicker(),
+      openScheduledSession: (message: RunMessage): Promise<void> => this.openScheduledSession(message),
+      openingSession: this.openingSession,
+      projects: this.$projects,
+      scheduleCatchUp: this.$scheduleCatchUp,
+      scheduleCwd: this.$scheduleCwd,
+      scheduleDetail: this.scheduleDetail,
+      scheduleEditing: this.scheduleEditing,
+      scheduleError: this.scheduleError,
+      scheduleKind: this.$scheduleKind,
+      scheduleMessages: this.$scheduleMessages,
+      scheduleName: this.$scheduleName,
+      scheduleOffline: this.$scheduleOffline,
+      schedulePage: this.schedulePage,
+      schedulePrompt: this.$schedulePrompt,
+      scheduleSaving: this.scheduleSaving,
+      scheduleWhen: this.$scheduleWhen,
+      scheduleZone: this.scheduleZone,
+      showScheduleDetail: (message: RunMessage): void => this.showScheduleDetail(message),
+      statusBarHeight: this.statusBarHeight,
+      updateSchedule: (operation: string, job?: ScheduleJob): Promise<void> => this.updateSchedule(operation, job),
+      workspaces: this.$workspaces,
+      accent: this.accent(),
+      accentForeground: this.accentForeground(),
+      accentTint: this.accentTint(),
+      headerHeight: this.headerHeight(),
+      bottomPad: this.bottomPad(),
+      computerTitle: this.computerTitle()
+    })
   }
 
   @Builder
@@ -6942,12 +5086,6 @@ struct Index {
         // Reserve the sidebar's space without rebuilding the conversation or moving the session list.
         Blank().width(this.dockedSessions() ? this.sessionPaneWidth() : 0)
         Stack({ alignContent: Alignment.Bottom }) {
-          if (!this.darkMode && this.showRootBottomTabs()) {
-            Row().width('100%').height(this.bottomTabsHeight() + this.bottomPad() + 18)
-              .linearGradient({ direction: GradientDirection.Bottom,
-                colors: [['#00FFFFFF', 0], ['#FFFFFF', 0.20], ['#FFFFFF', 1]] })
-              .hitTestBehavior(HitTestMode.None).accessibilityLevel('no')
-          }
           this.mainNavigation()
         }.height('100%').layoutWeight(1)
           .onGestureJudgeBegin(() => this.dockedSessions() || this.showSessions || this.holdActive || this.recording ||

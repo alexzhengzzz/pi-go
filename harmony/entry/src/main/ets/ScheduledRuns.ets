@@ -1,3 +1,6 @@
+import type { Companion } from './CredentialVault';
+import { computerGroupId } from './ComputerGroups';
+
 export interface ScheduleJob {
   id: string;
   cwd: string;
@@ -36,6 +39,12 @@ export interface RunMessage {
   run: ScheduleRun;
   unread: boolean;
   dismissed?: boolean;
+}
+
+export function isCurrentScheduleComputer(computers: Companion[], address: string, message: RunMessage): boolean {
+  const current = computers.find((item: Companion): boolean => item.address === address);
+  const origin = computers.find((item: Companion): boolean => item.address === message.address);
+  return !!current && !!origin && computerGroupId(current) === computerGroupId(origin);
 }
 
 export interface ScheduleWatch {

@@ -1,4 +1,4 @@
-import { Companion } from './CredentialVault';
+import type { Companion } from './CredentialVault';
 
 export interface ComputerGroup {
   id: string;

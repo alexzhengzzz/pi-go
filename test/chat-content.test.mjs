@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { stripTypeScriptTypes } from 'node:module';
 import { test } from 'node:test';
+import { pageSource } from './harmony-source.mjs';
 
 const chat = readFileSync(new URL('../harmony/entry/src/main/ets/ChatContent.ets', import.meta.url), 'utf8');
 const { contentBlocks, inlineParts } = new Function(stripTypeScriptTypes(chat.slice(chat.indexOf('interface'), chat.indexOf('@Component'))) +
@@ -42,7 +43,7 @@ test('landscape reader opens the selected table with its original Markdown synta
   assert.deepEqual(contentBlocks(selected.text)[0].rows, selected.rows);
 });
 
-const indexSource = readFileSync(new URL('../harmony/entry/src/main/ets/pages/Index.ets', import.meta.url), 'utf8');
+const indexSource = pageSource();
 const readerMethods = ['openMarkdownTableReader', 'closeMarkdownTableReader'].map((name) => {
   const start = indexSource.indexOf(`  private ${name}(`);
   assert.ok(start >= 0);

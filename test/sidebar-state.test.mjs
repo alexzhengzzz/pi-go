@@ -1,44 +1,31 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { stripTypeScriptTypes } from 'node:module';
 import { test } from 'node:test';
+import './harmony-modules.mjs';
+import { harmonyFile } from './harmony-source.mjs';
 
-// Exercise the real page and vault methods without requiring an ArkUI device runtime.
-const page = readFileSync(new URL('../harmony/entry/src/main/ets/pages/Index.ets', import.meta.url), 'utf8');
-const vaultSource = readFileSync(new URL('../harmony/entry/src/main/ets/CredentialVault.ets', import.meta.url), 'utf8');
-
-function method(source, name) {
-  const start = source.search(new RegExp(`  (?:private )?(?:async )?${name}\\(`));
-  assert.ok(start >= 0, `Missing method: ${name}`);
-  const end = source.indexOf('\n  }', start) + 4;
-  return source.slice(start, end);
-}
-
-const pageMethods = ['toggleSpace', 'applySidebar', 'scheduleSidebarSave', 'flushSidebarSave'];
-const Page = new Function(stripTypeScriptTypes(
-  `const SIDEBAR_VIEWS = ['all', 'pinned', 'recent', 'archived'];\n` +
-  `const SIDEBAR_MAX_EXPANDED = 100;\n` +
-  `const SIDEBAR_MAX_ENTRIES = 24;\n` +
-  `class Harness {\n${pageMethods.map(name => method(page, name)).join('\n')}\n}`
-) + '; return Harness;')();
-
-const vaultMethods = ['loadSidebar', 'saveSidebar'];
-const Vault = new Function(stripTypeScriptTypes(
-  `const SIDEBAR_VIEWS = ['all', 'pinned', 'recent', 'archived'];\n` +
-  `const SIDEBAR_MAX_EXPANDED = 100;\n` +
-  `const SIDEBAR_MAX_ENTRIES = 24;\n` +
-  `class Harness {\n${vaultMethods.map(name => method(vaultSource, name)).join('\n')}\n}`
-) + '; return Harness;')();
+const { SessionStore } = await import('../harmony/entry/src/main/ets/model/SessionStore.ets');
+const { CredentialVault } = await import('../harmony/entry/src/main/ets/CredentialVault.ets');
 
 function pageFixture(book = { version: 1, entries: [] }) {
-  const state = new Page();
-  const saves = [];
-  Object.assign(state, {
-    sidebarBook: book, sidebarSaveTimer: -1, base: 'http://127.0.0.1:18977',
-    expandedSpaces: [], sessionView: 'all', loadedView: 'all',
-    vault: { saveSidebar: book => { saves.push(book); return Promise.resolve(); } }
-  });
-  state.savedBooks = saves;
+  const store = new SessionStore();
+  store.restoreSidebar(book);
+  const state = {
+    base: 'http://127.0.0.1:18977',
+    expandedSpaces: [],
+    sessionView: 'all',
+    savedBooks: [],
+    toggleSpace(path) {
+      this.expandedSpaces = store.toggleSpace(this.expandedSpaces, path);
+      store.saveSidebar(this.base, this, this.persist);
+    },
+    applySidebar(address) {
+      Object.assign(this, store.sidebarFor(address));
+    },
+    flushSidebarSave() {
+      store.flushSidebar(this.persist);
+    }
+  };
+  state.persist = saved => state.savedBooks.push(saved);
   return state;
 }
 
@@ -50,8 +37,7 @@ function vaultFixture(raw = '') {
     put: async (key, value) => { store.values.set(key, value); },
     flush: async () => { store.flushes++; }
   };
-  const instance = new Vault();
-  Object.assign(instance, { store, writing: Promise.resolve() });
+  const instance = new CredentialVault(store);
   return { instance, store };
 }
 
@@ -86,7 +72,6 @@ test('connecting restores the remembered expanded folders and filter state per c
   state.applySidebar('lan://desk');
   assert.deepEqual(state.expandedSpaces, ['/a', '/b']);
   assert.equal(state.sessionView, 'pinned');
-  assert.equal(state.loadedView, 'pinned');
   state.applySidebar('usb://other');
   assert.deepEqual(state.expandedSpaces, []);
   assert.equal(state.sessionView, 'all');
@@ -127,22 +112,21 @@ test('toggles without a connected computer never enter the book', () => {
   const state = pageFixture();
   state.base = '';
   state.toggleSpace('/repo');
-  assert.deepEqual(state.sidebarBook.entries, []);
+  assert.equal(state.savedBooks.length, 0);
   state.flushSidebarSave();
   assert.equal(state.savedBooks.length, 1);
   assert.deepEqual(state.savedBooks[0].entries, []);
 });
 
-test('the drawer groups default task rows by space and retains the recent filter', () => {
-  assert.doesNotMatch(page, /\.id\('session-(query|search)'\)/);
-  assert.match(method(page, 'selectSessionView'), /this\.sessionView = view;\s+this\.scheduleSidebarSave\(\);/,
-    'filter controls must persist');
-  assert.ok(page.includes('this.applySidebar(record.address);'), 'connecting a computer must restore its sidebar');
-  assert.ok(page.includes("view === 'recent' ? '最近'"));
-  assert.ok(page.includes('this.expandedSpaces.includes(path) ? 0 : -90'),
-    'folder chevrons must render collapsed unless the folder was opened');
-  assert.match(method(page, 'sessionLibrary'), /LazyForEach\(this\.sidebarRows/);
-  assert.match(method(page, 'updateSidebarRows'), /new Set<string>\(this\.projects\)[\s\S]*?for \(const path of paths\)[\s\S]*?bySpace\.get\(path\)/);
+test('the drawer connects the filter and virtualized rows to the session store', () => {
+  const sidebar = harmonyFile('components/SessionSidebar.ets');
+  const page = harmonyFile('pages/Index.ets');
+  assert.doesNotMatch(sidebar, /\.id\('session-(query|search)'\)/);
+  assert.match(page, /this\.sessionView = view;\s+this\.scheduleSidebarSave\(\);/);
+  assert.match(page, /this\.applySidebar\(record\.address\);/);
+  assert.match(sidebar, /view === 'recent' \? '最近'/);
+  assert.match(sidebar, /this\.expandedSpaces\.includes\(path\) \? 0 : -90/);
+  assert.match(sidebar, /LazyForEach\(this\.sidebarRows/);
 });
 
 test('the vault roundtrips sidebar state through the store', async () => {

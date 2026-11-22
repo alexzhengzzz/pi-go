@@ -1,18 +1,14 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import { stripTypeScriptTypes } from 'node:module';
 import { test } from 'node:test';
+import { pageSource } from './harmony-source.mjs';
 
-const page = readFileSync(new URL('../harmony/entry/src/main/ets/pages/Index.ets', import.meta.url), 'utf8');
-const paths = readFileSync(new URL('../harmony/entry/src/main/ets/ChatPaths.ets', import.meta.url), 'utf8');
-function declaration(name) {
-  const start = paths.indexOf(`function ${name}(`);
-  assert.ok(start >= 0);
-  return paths.slice(start, paths.indexOf('\n}', start) + 2);
-}
-const { messageFileChips, normalizeWorkspacePath, markdownWorkspacePath } = new Function(stripTypeScriptTypes(
-  ['normalizeWorkspacePath', 'messageFileChips', 'markdownWorkspacePath'].map(declaration).join('\n')
-) + '; return { messageFileChips, normalizeWorkspacePath, markdownWorkspacePath };')();
+import './harmony-modules.mjs';
+const { isImageFile, markdownWorkspacePath, messageFileChips, normalizeWorkspacePath, safeLocalFileName, textPreviewFormat } = await import('../harmony/entry/src/main/ets/ChatPaths.ets');
+const { PiGoClient } = await import('../harmony/entry/src/main/ets/model/PiGoClient.ets');
+const { BridgeFailure } = await import('../harmony/entry/src/main/ets/model/PiGoTypes.ets');
+
+const page = pageSource();
 
 test('chat file cards preserve root filenames, quoted spaces and Markdown destinations', () => {
   assert.deepEqual(messageFileChips('请下载 `report.pdf`。 已生成 `exports/项目 报告.pdf`。', '/workspace'),
@@ -94,15 +90,17 @@ function receiveFixture(respond, pickDestination = async () => []) {
       destroy() {}
     })
   };
-  const source = `${['safeLocalFileName', 'textPreviewFormat', 'isImageFile'].map(declaration).join('\n')}\nclass Harness {
-    ${['downloadFile', 'openWorkspaceFile', 'downloadFailure', 'readTextFilePreview', 'savePreviewLocally',
+  globalThis.pigoTestHttp = http;
+  globalThis.pigoTestFiles = fileIo;
+  const source = `class Harness {
+    ${['openWorkspaceFile', 'downloadFailure', 'readTextFilePreview', 'savePreviewLocally',
       'openReferencedFile', 'openFile', 'showTextPreview', 'editPreview', 'saveFile', 'fileFailure',
       'returnToFilePreview', 'closeFileEditor'].map(method).join('\n')}
   }`;
-  const Harness = new Function('fileIo', 'http', 'util', 'fileUri', 'filePreview', 'picker', 'BridgeFailure',
-    'MAX_DOWNLOAD_BYTES', 'MAX_DOWNLOAD_ERROR_BYTES', 'RECEIVED_FILE_DIR', 'MAX_TEXT_PREVIEW_BYTES',
+  const Harness = new Function('fileIo', 'util', 'fileUri', 'filePreview', 'picker', 'BridgeFailure',
+    'RECEIVED_FILE_DIR', 'MAX_TEXT_PREVIEW_BYTES', 'isImageFile', 'safeLocalFileName', 'textPreviewFormat',
     stripTypeScriptTypes(source) + '; return Harness;')(
-    fileIo, http, {
+    fileIo, {
       generateRandomUUID: () => 'temporary',
       TextDecoder: {
         create: (encoding, options) => ({
@@ -113,15 +111,14 @@ function receiveFixture(respond, pickDestination = async () => []) {
     { getUriFromPath: (path) => `file://app${path}` },
     { canPreview: async () => true, openPreview: async (_, info) => { previews.push(info); } },
     { DocumentSaveOptions: class {}, DocumentViewPicker: class { save(options) { return pickDestination(options); } } },
-    class BridgeFailure extends Error {
-      constructor(status, code) {
-        super(code);
-        this.status = status;
-      }
-    },
-    64 * 1024 * 1024, 4096, 'pigo-files', 128 * 1024
+    BridgeFailure, 'pigo-files', 128 * 1024, isImageFile, safeLocalFileName, textPreviewFormat
   );
+  const client = new PiGoClient();
   const state = Object.assign(new Harness(), {
+    downloadFile(cwd, path, temporary, lookupName, limit) {
+      return client.downloadFile({ address: this.base, token: this.token, ca: this.ca, pin: this.pin },
+        cwd, path, temporary, lookupName, limit);
+    },
     reachable: true, epoch: 1, base: 'http://localhost', token: 'test',
     getUIContext: () => ({ getHostContext: () => ({ cacheDir: '/cache' }) }),
     localFilePrefix: () => 'source', pruneReceivedFiles() {}, dismissKeyboard() {}, closeToolDetails() {},

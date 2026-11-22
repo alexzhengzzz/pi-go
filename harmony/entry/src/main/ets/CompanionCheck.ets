@@ -1,6 +1,6 @@
 // 电脑条目校验与标签:从 pages/Index.ets 外移的无状态纯函数。
 
-import { Companion } from './CredentialVault';
+import type { Companion } from './CredentialVault';
 import { validSecureAddress, validUsb } from './PairingCode';
 
 export function validCompanion(record: Companion): boolean {
