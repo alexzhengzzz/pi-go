@@ -5,6 +5,7 @@ const TABLE_COLUMN_WIDTH = 144;
 interface ContentBlock {
   kind: string;
   text: string;
+  level?: number;
   language?: string;
   target?: string;
   rows?: string[][];
@@ -85,7 +86,7 @@ function contentBlocks(source: string): ContentBlock[] {
       continue;
     }
     const start = /^ {0,3}(`{3,}|~{3,})\s*([^\s`~]*).*$/.exec(line);
-    const heading = /^ {0,3}#{1,6}[ \t]+(.+)$/.exec(line);
+    const heading = /^ {0,3}(#{1,6})[ \t]+(.+)$/.exec(line);
     const quote = /^ {0,3}>\s?(.*)$/.exec(line);
     const divider = /^ {0,3}(?:(?:-\s*){3,}|(?:\*\s*){3,}|(?:_\s*){3,})$/.test(line);
     const header = line.includes('|') ? tableCells(line) : [];
@@ -98,7 +99,11 @@ function contentBlocks(source: string): ContentBlock[] {
       if (start) {
         fence = start[1];
         language = start[2];
-      } else if (heading) blocks.push({ kind: 'heading', text: heading[1].replace(/[ \t]+#+[ \t]*$/, '').trimEnd() });
+      } else if (heading) blocks.push({
+        kind: 'heading',
+        level: heading[1].length,
+        text: heading[2].replace(/[ \t]+#+[ \t]*$/, '').trimEnd()
+      });
       else if (quote) {
         const quoted = [quote[1]];
         while (index + 1 < lines.length) {
@@ -141,13 +146,14 @@ export struct ChatContent {
   openImage: (source: string, label: string) => void = () => {};
   openLink: (target: string) => void = () => {};
   openLandscape: (source: string) => void = () => {};
+  copyCode?: (value: string) => void;
 
   @Builder
-  inlineText(value: string, heading: boolean, tableCell: boolean = false) {
+  inlineText(value: string, heading: boolean, tableCell: boolean = false, headingLevel: number = 0) {
     Text() {
       ForEach(inlineParts(value), (part: InlinePart) => {
         if (part.kind === 'code') {
-          Span(part.text).fontFamily('monospace').fontSize(15)
+          Span(part.text).fontFamily('monospace').fontSize(14)
             .textBackgroundStyle({ color: $r('app.color.pigo_control'), radius: 4 })
         } else if (part.kind === 'link' || part.kind === 'image') {
           Span(part.text || part.target || '').fontColor(this.accent).decoration({ type: TextDecorationType.Underline })
@@ -158,7 +164,9 @@ export struct ChatContent {
             .decoration({ type: part.kind === 'strike' ? TextDecorationType.LineThrough : TextDecorationType.None })
         }
       }, (part: InlinePart, index: number) => `${index}-${part.kind}-${part.text}-${part.target ?? ''}`)
-    }.fontSize(heading ? 19 : 16).fontColor($r('app.color.pigo_text')).lineHeight(27)
+    }.fontSize(heading ? (headingLevel === 1 ? 21 : headingLevel === 2 ? 19 : 17) : 16)
+      .fontColor($r('app.color.pigo_text'))
+      .lineHeight(heading ? (headingLevel === 1 ? 29 : headingLevel === 2 ? 27 : 25) : 27)
       .wordBreak(tableCell ? WordBreak.BREAK_ALL : WordBreak.BREAK_WORD).copyOption(CopyOptions.LocalDevice).width('100%')
   }
 
@@ -194,11 +202,26 @@ export struct ChatContent {
     Column({ space: 12 }) {
       ForEach(contentBlocks(this.text), (block: ContentBlock) => {
         if (block.kind === 'code') {
-          Column({ space: 8 }) {
-            if (block.language) Text(block.language).fontSize(11).fontColor(this.accent)
+          Column({ space: 6 }) {
+            if (block.language || this.copyCode) {
+              Row() {
+                Text(block.language || '代码').fontSize(12).fontWeight(FontWeight.Medium)
+                  .fontColor(block.language ? this.accent : $r('app.color.pigo_muted')).layoutWeight(1)
+                if (this.copyCode && block.text) {
+                  Button({ type: ButtonType.Normal }) {
+                    SymbolGlyph($r('sys.symbol.rectangle_on_rectangle')).fontSize(16)
+                      .fontColor([$r('app.color.pigo_muted')])
+                  }.width(32).height(32).padding(0).borderRadius(8).backgroundColor(Color.Transparent)
+                    .accessibilityText('复制代码')
+                    .onClick(() => { this.copyCode?.(block.text); })
+                }
+              }.width('100%')
+            }
             Text(block.text).fontSize(14).fontFamily('monospace').lineHeight(22).fontColor($r('app.color.pigo_text'))
               .wordBreak(WordBreak.BREAK_ALL).copyOption(CopyOptions.LocalDevice).width('100%')
-          }.alignItems(HorizontalAlign.Start).width('100%').padding(12).backgroundColor($r('app.color.pigo_panel')).borderRadius(12)
+          }.alignItems(HorizontalAlign.Start).width('100%')
+            .padding({ left: 12, right: 10, top: block.language || this.copyCode ? 8 : 12, bottom: 12 })
+            .backgroundColor($r('app.color.pigo_panel')).borderRadius(12)
             .border({ width: 1, color: $r('app.color.pigo_line') })
         } else if (block.kind === 'image' && block.target) {
           ChatImage({
@@ -217,10 +240,10 @@ export struct ChatContent {
           }.padding({ left: 12 }).width('100%')
             .border({ width: { left: 3 }, color: $r('app.color.pigo_line') })
         } else {
-          this.inlineText(block.text, block.kind === 'heading')
+          this.inlineText(block.text, block.kind === 'heading', false, block.level ?? 2)
         }
       }, (block: ContentBlock, index: number) =>
-        `${index}-${block.kind}-${block.text}-${block.language ?? ''}-${block.target ?? ''}`)
+        `${index}-${block.kind}-${block.level ?? 0}-${block.text}-${block.language ?? ''}-${block.target ?? ''}`)
     }.width('100%').alignItems(HorizontalAlign.Start).onAreaChange((_: Area, area: Area) => {
       this.contentWidth = Number(area.width);
     })

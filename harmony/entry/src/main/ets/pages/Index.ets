@@ -1027,7 +1027,10 @@ struct Index {
     let read: string[] = [];
     try {
       const raw = this.settings?.getSync(key, '[]') as string;
-      if (raw) read = JSON.parse(raw) as string[];
+      if (raw) {
+        const ids = JSON.parse(raw) as string[];
+        if (Array.isArray(ids)) read = ids.filter((id: string): boolean => typeof id === 'string').slice(0, 80);
+      }
     } catch { }
     cache.set(source, read);
     return read;
@@ -2878,7 +2881,8 @@ struct Index {
         if (!allowLandscape && markdownWorkspacePath(target, cwd, documentPath)) this.closeMarkdownTableReader();
         void this.openMarkdownLink(target, cwd, documentPath);
       },
-      openLandscape: (source: string): void => { this.openMarkdownTableReader(source, cwd, documentPath); }
+      openLandscape: (source: string): void => { this.openMarkdownTableReader(source, cwd, documentPath); },
+      copyCode: (value: string): void => { void this.copyText(value); }
     })
   }
 
@@ -2928,10 +2932,10 @@ struct Index {
   }
 
   private toolIcon(tool: LiveTool): Resource {
-    if (tool.name === 'bash') return $r('app.media.ic_terminal');
-    if (tool.name === 'grep' || tool.name === 'find' || tool.name === 'web_search') return $r('app.media.ic_search');
-    if (tool.name === 'write' || tool.name === 'edit') return $r('app.media.ic_compose');
-    return $r('app.media.ic_folder');
+    if (tool.name === 'bash') return $r('sys.symbol.code_square');
+    if (tool.name === 'grep' || tool.name === 'find' || tool.name === 'web_search') return $r('sys.symbol.magnifyingglass');
+    if (tool.name === 'write' || tool.name === 'edit') return $r('sys.symbol.square_and_pencil');
+    return $r('sys.symbol.folder');
   }
 
   private toolKey(tool: LiveTool): string {
@@ -3125,6 +3129,7 @@ struct Index {
       alignment: DialogAlignment.Bottom,
       primaryButton: {
         value: '取消',
+        fontColor: $r('app.color.pigo_muted'),
         action: () => {}
       },
       secondaryButton: {
@@ -3308,8 +3313,8 @@ struct Index {
         Text('✻').fontSize(13).fontColor($r('app.color.pigo_info'))
         Text(id ? (ms >= 0 ? `思考 · ${(ms / 1000).toFixed(1)}s` : '思考') : '思考中…')
           .fontSize(13).fontColor($r('app.color.pigo_info')).layoutWeight(1)
-        Image($r('app.media.ic_chevron')).width(16).height(16).fillColor($r('app.color.pigo_text'))
-          .rotate({ angle: open ? 90 : 0 }).align(Alignment.End)
+        SymbolGlyph(open ? $r('sys.symbol.chevron_down') : $r('sys.symbol.chevron_right'))
+          .fontSize(14).fontColor([$r('app.color.pigo_muted')])
       }.width('100%').onClick(() => {
         if (id) this.toggleThinking(id, !open);
         else this.liveThinkingOpen = !open;
@@ -3318,25 +3323,29 @@ struct Index {
         Scroll() {
           Text(content).fontSize(13).fontStyle(FontStyle.Italic).fontColor($r('app.color.pigo_muted')).lineHeight(21)
             .copyOption(CopyOptions.LocalDevice).width('100%')
-        }.constraintSize({ maxHeight: 320 }).width('100%')
+        }.constraintSize({ maxHeight: 320 }).width('100%').scrollBar(BarState.Off)
       } else if (!id) {
         Text(content.split('\n').pop() ?? '').fontSize(12).fontColor($r('app.color.pigo_muted')).maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis }).width('100%')
       }
-    }.width('100%').padding(10).backgroundColor($r('app.color.pigo_control')).borderRadius(10)
+    }.width('100%').padding(12).backgroundColor($r('app.color.pigo_control')).borderRadius(12)
   }
 
   @Builder
   fileChip(path: string, lookupName: boolean) {
     Button({ type: ButtonType.Normal }) {
-      Row({ space: 8 }) {
-        Text(this.fileIcon(path.split('/').pop() ?? path)).fontSize(10).fontColor($r('app.color.pigo_info'))
-        Text(path.split('/').pop() ?? path).fontSize(14).fontColor($r('app.color.pigo_text')).maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis }).constraintSize({ maxWidth: 220 })
-        Text(this.openingFile ? '接收中…' : '打开').fontSize(12).fontColor($r('app.color.pigo_muted'))
+      Row({ space: 6 }) {
+        SymbolGlyph($r('sys.symbol.doc')).fontSize(14).fontColor([this.accent()])
+        Text(path.split('/').pop() ?? path).fontSize(13).fontWeight(FontWeight.Medium)
+          .fontColor($r('app.color.pigo_text')).maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis }).constraintSize({ maxWidth: 196 })
+        if (this.openingFile) {
+          LoadingProgress().width(12).height(12).color($r('app.color.pigo_muted'))
+        }
       }
-    }.id(`file-chip-${path}`).backgroundColor($r('app.color.pigo_panel')).borderRadius(12)
-      .padding({ left: 14, right: 14, top: 10, bottom: 10 }).enabled(!this.openingFile)
+    }.id(`file-chip-${path}`).backgroundColor($r('app.color.pigo_panel'))
+      .border({ width: 1, radius: 10, color: $r('app.color.pigo_line') })
+      .padding({ left: 10, right: 10, top: 7, bottom: 7 }).enabled(!this.openingFile)
       .onClick(() => { void this.openReferencedFile(this.workspaceCwd, path, lookupName); })
   }
 
@@ -3344,7 +3353,7 @@ struct Index {
   toolRow(tool: LiveTool, messageId: string) {
     Button({ type: ButtonType.Normal }) {
       Row({ space: 9 }) {
-        Image(this.toolIcon(tool)).width(18).height(18).fillColor(this.accent())
+        SymbolGlyph(this.toolIcon(tool)).fontSize(17).fontColor([this.accent()])
         Text(this.toolTitle(tool)).fontSize(13).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
           .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).constraintSize({ maxWidth: '38%' })
         Text(tool.detail).fontSize(12).fontColor($r('app.color.pigo_muted')).maxLines(1)
@@ -3354,7 +3363,7 @@ struct Index {
         } else if (tool.state === 'fail') {
           Text('失败').fontSize(12).fontColor($r('app.color.pigo_error'))
         }
-        Image($r('app.media.ic_chevron')).width(14).height(14).rotate({ angle: -90 }).fillColor($r('app.color.pigo_muted'))
+        SymbolGlyph($r('sys.symbol.chevron_right')).fontSize(13).fontColor([$r('app.color.pigo_muted')])
       }.width('100%')
     }.width('100%').height(44).padding({ left: 10, right: 8 }).borderRadius(8).backgroundColor(Color.Transparent)
       .onClick(() => { this.openToolDetails(tool, messageId); })
@@ -3377,8 +3386,8 @@ struct Index {
   @Builder
   copyButton(label: string, value: string) {
     Button({ type: ButtonType.Normal }) {
-      Image($r('app.media.ic_copy')).width(18).height(18).fillColor($r('app.color.pigo_text'))
-    }.width(38).height(38).borderRadius(10).backgroundColor(Color.Transparent)
+      SymbolGlyph($r('sys.symbol.rectangle_on_rectangle')).fontSize(17).fontColor([$r('app.color.pigo_muted')])
+    }.width(36).height(36).padding(0).borderRadius(10).backgroundColor(Color.Transparent)
       .accessibilityText(label).onClick(() => { void this.copyText(value); })
   }
 
@@ -3404,7 +3413,7 @@ struct Index {
       Column({ space: 12 }) {
         if (this.selectedTool) {
           Row({ space: 10 }) {
-            Image(this.toolIcon(this.selectedTool)).width(21).height(21).fillColor(this.accent())
+            SymbolGlyph(this.toolIcon(this.selectedTool)).fontSize(20).fontColor([this.accent()])
             Text(this.toolTitle(this.selectedTool)).fontSize(21).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
           }.width('100%').padding({ right: 40 })
           if (this.toolFile(this.selectedTool)) this.fileChip(this.toolFile(this.selectedTool), false)
@@ -3435,7 +3444,7 @@ struct Index {
           }
         }
       }.width('100%').alignItems(HorizontalAlign.Start).padding({ left: 18, right: 18, top: 22, bottom: 24 })
-    }.width('100%').height('100%').align(Alignment.TopStart)
+    }.width('100%').height('100%').align(Alignment.TopStart).scrollBar(BarState.Off)
   }
 
   @Builder
@@ -3456,9 +3465,11 @@ struct Index {
         } else if (request.method === 'input' || request.method === 'editor') {
           if (request.method === 'editor') {
             TextArea({ text: this.interactionDraft, placeholder: '编辑内容' }).id('interaction-editor').height(92).maxLength(1024)
+              .backgroundColor($r('app.color.pigo_panel')).fontColor($r('app.color.pigo_text')).placeholderColor($r('app.color.pigo_muted'))
               .onChange((value: string) => { if (request.id === this.interaction?.id) this.interactionDraft = value; })
           } else {
             TextInput({ text: this.interactionDraft, placeholder: request.placeholder ?? '输入答复' }).id('interaction-input').maxLength(1024)
+              .backgroundColor($r('app.color.pigo_panel')).fontColor($r('app.color.pigo_text')).placeholderColor($r('app.color.pigo_muted'))
               .onChange((value: string) => { if (request.id === this.interaction?.id) this.interactionDraft = value; })
           }
           Row({ space: 10 }) {
@@ -3477,7 +3488,7 @@ struct Index {
             .onClick(() => { void this.answerInteraction(request.id, false); })
         }
       }.padding(12).width('100%').backgroundColor($r('app.color.pigo_warning_panel')).borderRadius(14)
-    }.constraintSize({ maxHeight: 240 }).width('100%')
+    }.constraintSize({ maxHeight: 240 }).width('100%').scrollBar(BarState.Off)
   }
 
   private commandPaletteActive(): boolean {
@@ -4062,6 +4073,35 @@ struct Index {
       modelId: model.id, thinkingLevel: level });
   }
 
+  private async applyThinkingLevelFromMenu(level: string): Promise<void> {
+    const model = this.currentModel ?? this.models.find((item: ModelOption): boolean => this.isCurrentModel(item));
+    if (!model || level === this.currentLevel) return;
+    await this.requestAction('/model', { id: this.currentId, provider: model.provider,
+      modelId: model.id, thinkingLevel: level });
+  }
+
+  private currentModelOption(): ModelOption | undefined {
+    return this.models.find((item: ModelOption): boolean => this.isCurrentModel(item)) ?? this.currentModel;
+  }
+
+  private thinkingLevelLabel(level: string): string {
+    switch (level) {
+      case 'off': return '关闭';
+      case 'minimal': return '极简';
+      case 'low': return '低';
+      case 'medium': return '中';
+      case 'high': return '高';
+      case 'xhigh': return '极高';
+      case 'max': return '最高';
+      default: return level;
+    }
+  }
+
+  private currentModelIndex(): number {
+    const idx = this.models.findIndex((item: ModelOption): boolean => this.isCurrentModel(item));
+    return idx >= 0 ? idx : 0;
+  }
+
   private isCurrentModel(model: ModelOption): boolean {
     return this.currentModel?.provider === model.provider && this.currentModel?.id === model.id;
   }
@@ -4471,50 +4511,91 @@ struct Index {
     return group ? computerGroupTitle(group) : '';
   }
 
+  private computerConnectionMenu(record: Companion): MenuElement[] {
+    const items: MenuElement[] = [];
+    if (this.computers.length > 1) {
+      items.push({
+        value: '更改归组',
+        action: () => {
+          this.closeComputerEditors();
+          this.moveConnectionAddress = record.address;
+        }
+      });
+    }
+    items.push({
+      value: '移除连接',
+      action: () => {
+        this.closeComputerEditors();
+        this.removeTarget = record.address;
+      }
+    });
+    return items;
+  }
+
   @Builder
   computerConnection(record: Companion, group: ComputerGroup) {
     Column({ space: 6 }) {
       Row({ space: 6 }) {
         Button({ type: ButtonType.Normal }) {
-          Column({ space: 3 }) {
-            Text(`${connectionLabel(record)}${this.isPaired && this.base === record.address ? ' · 当前' : ''}`)
-              .fontSize(14).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
-            Text(record.address.split('://')[1]).fontSize(12).fontColor($r('app.color.pigo_muted'))
-          }.width('100%').alignItems(HorizontalAlign.Start)
+          Row({ space: 10 }) {
+            Column({ space: 3 }) {
+              Row({ space: 6 }) {
+                if (this.isPaired && this.base === record.address) {
+                  Blank().width(7).height(7).borderRadius(4)
+                    .backgroundColor(this.reachable ? $r('app.color.pigo_success') : $r('app.color.pigo_warning'))
+                }
+                Text(connectionLabel(record))
+                  .fontSize(14).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
+                if (this.isPaired && this.base === record.address) {
+                  Text(this.reachable ? '当前 · 已连接' : '当前 · 离线')
+                    .fontSize(11).fontWeight(FontWeight.Medium)
+                    .fontColor(this.reachable ? $r('app.color.pigo_success') : $r('app.color.pigo_warning'))
+                }
+              }
+              Text(record.address.split('://')[1]).fontSize(12).fontColor($r('app.color.pigo_muted'))
+                .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+            }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+            if (this.isPaired && this.base === record.address) {
+              SymbolGlyph($r('sys.symbol.checkmark')).fontSize(16).fontColor([this.accent()])
+            }
+          }.width('100%')
         }.id(`computer-${record.address}`).accessibilityText(`${connectionLabel(record)} ${record.address.split('://')[1]}`)
-          .layoutWeight(1).padding(10).borderRadius(12)
+          .layoutWeight(1).padding({ left: 12, right: 12, top: 10, bottom: 10 })
           .backgroundColor(this.isPaired && this.base === record.address ? this.accentTint() : $r('app.color.pigo_control'))
-          .enabled(!this.busy && !this.openingSession && !this.removeTarget && (!this.isPaired || this.base !== record.address))
-          .onClick(() => { this.chooseComputer(record); })
+          .border({ width: this.isPaired && this.base === record.address ? 1 : 0, radius: 12, color: this.accent() })
+          .enabled(!this.busy && !this.openingSession && !this.removeTarget)
+          .onClick(() => {
+            if (!this.isPaired || this.base !== record.address) this.chooseComputer(record);
+          })
         if (this.removeTarget === record.address) {
-          Button('确认移除').chatAction().id('confirm-remove').enabled(!this.busy)
+          Button('确认移除').chatAction().id('confirm-remove').height(40).enabled(!this.busy)
+            .backgroundColor($r('app.color.pigo_error_panel')).fontColor($r('app.color.pigo_error'))
             .onClick(() => { this.removeComputer(record.address); })
-          Button('取消').chatAction().enabled(!this.busy).onClick(() => { this.removeTarget = ''; })
+          Button('取消').chatAction().height(40).enabled(!this.busy).onClick(() => { this.removeTarget = ''; })
         } else {
-          if (this.computers.length > 1) {
-            Button('归组').chatAction().id(`group-${record.address}`).accessibilityText('更改连接归属')
-              .enabled(!this.busy && !this.openingSession && !this.removeTarget)
-              .onClick(() => {
-                this.closeComputerEditors();
-                this.moveConnectionAddress = record.address;
-              })
-          }
-          Button('移除').chatAction().id(`remove-${record.address}`).enabled(!this.busy && !this.openingSession && !this.removeTarget)
-            .onClick(() => { this.closeComputerEditors(); this.removeTarget = record.address; })
+          Button({ type: ButtonType.Normal }) {
+            Image($r('app.media.ic_more')).width(18).height(18).fillColor($r('app.color.pigo_muted'))
+          }.id(`remove-${record.address}`).width(40).height(44).padding(0).borderRadius(12)
+            .backgroundColor(Color.Transparent)
+            .accessibilityText('连接操作')
+            .enabled(!this.busy && !this.openingSession && !this.removeTarget)
+            .bindMenu(this.computerConnectionMenu(record))
         }
       }.width('100%')
       if (this.moveConnectionAddress === record.address) {
-        Text('将此连接归到哪台电脑？').fontSize(13).fontColor($r('app.color.pigo_muted')).width('100%')
-        ForEach(computerGroups(this.computers).filter((other: ComputerGroup): boolean => other.id !== group.id),
-          (other: ComputerGroup) => {
-            Button(computerGroupTitle(other)).chatAction().id(`move-to-${other.id}`).width('100%')
-              .onClick(() => { this.assignComputerConnection(record.address, other); })
-          }, (other: ComputerGroup) => `${other.id}|${other.name}`)
-        if (group.connections.length > 1) {
-          Button('设为独立电脑').chatAction().id('separate-connection').width('100%')
-            .onClick(() => { this.assignComputerConnection(record.address); })
-        }
-        Button('取消').chatAction().onClick(() => { this.closeComputerEditors(); })
+        Column({ space: 6 }) {
+          Text('将此连接归到哪台电脑？').fontSize(13).fontColor($r('app.color.pigo_muted')).width('100%')
+          ForEach(computerGroups(this.computers).filter((other: ComputerGroup): boolean => other.id !== group.id),
+            (other: ComputerGroup) => {
+              Button(computerGroupTitle(other)).chatAction().id(`move-to-${other.id}`).width('100%').height(40)
+                .onClick(() => { this.assignComputerConnection(record.address, other); })
+            }, (other: ComputerGroup) => `${other.id}|${other.name}`)
+          if (group.connections.length > 1) {
+            Button('设为独立电脑').chatAction().id('separate-connection').width('100%').height(40)
+              .onClick(() => { this.assignComputerConnection(record.address); })
+          }
+          Button('取消').chatAction().width('100%').height(38).onClick(() => { this.closeComputerEditors(); })
+        }.width('100%').padding(10).borderRadius(12).backgroundColor($r('app.color.launch_background'))
       }
     }.width('100%').alignItems(HorizontalAlign.Start)
   }
@@ -4522,12 +4603,24 @@ struct Index {
   @Builder
   computerList() {
     ForEach(computerGroups(this.computers), (group: ComputerGroup) => {
-      Column({ space: 9 }) {
+      Column({ space: 10 }) {
         Row({ space: 8 }) {
-          Image($r('app.media.ic_computer')).width(21).height(21).fillColor(this.accent())
-          Text(computerGroupTitle(group)).fontSize(17).fontWeight(FontWeight.Bold).fontColor($r('app.color.pigo_text'))
+          SymbolGlyph($r('sys.symbol.computer')).fontSize(20).fontColor([this.accent()])
+          Text(computerGroupTitle(group)).fontSize(16).fontWeight(FontWeight.Bold).fontColor($r('app.color.pigo_text'))
             .layoutWeight(1).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
-          Button('备注').chatAction().id(`rename-computer-${group.id}`).enabled(!this.busy && !this.removeTarget)
+          Button({ type: ButtonType.Normal }) {
+            SymbolGlyph($r('sys.symbol.plus')).fontSize(18).fontColor([$r('app.color.pigo_text')])
+          }.id(`add-connection-${group.id}`).width(36).height(36).padding(0).borderRadius(10)
+            .backgroundColor($r('app.color.pigo_control'))
+            .accessibilityText(`为${computerGroupTitle(group)}添加连接`)
+            .enabled(!this.busy && !this.openingSession && !this.removeTarget)
+            .onClick(() => { this.addComputerConnection(group.id); })
+          Button({ type: ButtonType.Normal }) {
+            SymbolGlyph($r('sys.symbol.pencil_line')).fontSize(17).fontColor([$r('app.color.pigo_muted')])
+          }.id(`rename-computer-${group.id}`).width(36).height(36).padding(0).borderRadius(10)
+            .backgroundColor(Color.Transparent)
+            .accessibilityText(`修改${computerGroupTitle(group)}备注`)
+            .enabled(!this.busy && !this.removeTarget)
             .onClick(() => {
               this.closeComputerEditors();
               this.computerNameDraft = group.name;
@@ -4536,20 +4629,21 @@ struct Index {
         }.width('100%')
         if (this.renameComputerId === group.id) {
           TextInput({ placeholder: '电脑备注名', text: this.computerNameDraft }).id('computer-name-input')
+            .backgroundColor($r('app.color.pigo_control')).fontColor($r('app.color.pigo_text'))
+            .placeholderColor($r('app.color.pigo_muted'))
             .maxLength(40).onChange((value: string) => { this.computerNameDraft = value; }).width('100%')
           Row({ space: 8 }) {
-            Button('保存').chatAction().id('save-computer-name')
+            Button('保存').chatAction().id('save-computer-name').height(38)
+              .backgroundColor(this.accent()).fontColor(this.accentForeground())
               .onClick(() => { this.saveComputerName(group.id); })
-            Button('取消').chatAction().onClick(() => { this.closeComputerEditors(); this.dismissKeyboard(); })
+            Button('取消').chatAction().height(38).onClick(() => { this.closeComputerEditors(); this.dismissKeyboard(); })
           }.width('100%')
         }
         ForEach(group.connections, (record: Companion) => {
           this.computerConnection(record, group)
         }, (record: Companion) => record.address)
-        Button('添加连接').chatAction().id(`add-connection-${group.id}`).width('100%')
-          .enabled(!this.busy && !this.openingSession && !this.removeTarget)
-          .onClick(() => { this.addComputerConnection(group.id); })
       }.width('100%').padding(14).borderRadius(16).backgroundColor($r('app.color.pigo_panel'))
+        .border({ width: 1, color: $r('app.color.pigo_line') })
     }, (group: ComputerGroup) => `${group.id}|${group.name}|${group.connections.map((record: Companion): string => record.address).join('|')}`)
     if (this.removeTarget) {
       Text(this.huaweiProfile ? '移除手机上的配对和账号列表中的连接记录。' : '移除手机上的这条配对记录。')
@@ -4560,7 +4654,7 @@ struct Index {
   @Builder
   cloudComputerList() {
     if (this.cloudOnlyComputers().length) {
-      Text('从账号恢复的连接').fontSize(16).fontWeight(FontWeight.Bold).width('100%')
+      Text('从账号恢复的连接').fontSize(16).fontWeight(FontWeight.Bold).fontColor($r('app.color.pigo_text')).width('100%')
       ForEach(this.cloudOnlyComputers(), (computer: CloudComputer) => {
         Column({ space: 8 }) {
           Text(`${computer.mode === 'usb' ? 'USB' : computer.mode === 'lan' ? '局域网' : '公网'} · ${computer.address.split('://')[1]}`)
@@ -4568,6 +4662,7 @@ struct Index {
           Row({ space: 8 }) {
             if (this.removeTarget === computer.address) {
               Button('从账号移除').chatAction().enabled(!this.busy)
+                .backgroundColor($r('app.color.pigo_error_panel')).fontColor($r('app.color.pigo_error'))
                 .onClick(() => { this.removeCloudComputer(computer); })
               Button('取消').chatAction().onClick(() => { this.removeTarget = ''; })
             } else {
@@ -4578,7 +4673,8 @@ struct Index {
                 .onClick(() => { this.removeTarget = computer.address; })
             }
           }.width('100%')
-        }.width('100%').padding(12).backgroundColor($r('app.color.pigo_panel')).borderRadius(14)
+        }.width('100%').padding(14).backgroundColor($r('app.color.pigo_panel')).borderRadius(16)
+          .border({ width: 1, color: $r('app.color.pigo_line') })
       }, (computer: CloudComputer) => computer.address)
     }
   }
@@ -4587,29 +4683,30 @@ struct Index {
   pairingForm() {
     Column({ space: 14 }) {
       if (this.pairingComputerId) {
-        Text(this.pairingComputerTitle()).fontSize(16).fontWeight(FontWeight.Medium).width('100%')
+        Text(this.pairingComputerTitle()).fontSize(16).fontWeight(FontWeight.Medium)
+          .fontColor($r('app.color.pigo_text')).width('100%')
       }
       if (this.restoringComputer) {
         Text('请从这台电脑获取新的配对码或配对包。')
           .fontSize(14).fontColor($r('app.color.pigo_text')).width('100%')
       }
-      Row({ space: 8 }) {
-        Button('USB').chatAction().id('usb-transport').layoutWeight(1).height(42)
+      Row({ space: 4 }) {
+        Button('USB', { type: ButtonType.Normal }).chatAction().id('usb-transport').layoutWeight(1).height(38).borderRadius(10)
           .accessibilitySelected(this.pairingMode === 'usb')
-          .backgroundColor(this.pairingMode === 'usb' ? this.accentTint() : Color.Transparent)
-          .fontColor(this.pairingMode === 'usb' ? this.accent() : $r('app.color.pigo_muted'))
+          .backgroundColor(this.pairingMode === 'usb' ? this.accent() : Color.Transparent)
+          .fontColor(this.pairingMode === 'usb' ? this.accentForeground() : $r('app.color.pigo_muted'))
           .onClick(() => { this.selectPairingMode('usb'); })
-        Button('局域网').chatAction().id('transport').layoutWeight(1).height(42)
+        Button('局域网', { type: ButtonType.Normal }).chatAction().id('transport').layoutWeight(1).height(38).borderRadius(10)
           .accessibilitySelected(this.pairingMode === 'lan')
-          .backgroundColor(this.pairingMode === 'lan' ? this.accentTint() : Color.Transparent)
-          .fontColor(this.pairingMode === 'lan' ? this.accent() : $r('app.color.pigo_muted'))
+          .backgroundColor(this.pairingMode === 'lan' ? this.accent() : Color.Transparent)
+          .fontColor(this.pairingMode === 'lan' ? this.accentForeground() : $r('app.color.pigo_muted'))
           .onClick(() => { this.selectPairingMode('lan'); })
-        Button('公网').chatAction().id('remote-transport').layoutWeight(1).height(42)
+        Button('公网', { type: ButtonType.Normal }).chatAction().id('remote-transport').layoutWeight(1).height(38).borderRadius(10)
           .accessibilitySelected(this.pairingMode === 'remote')
-          .backgroundColor(this.pairingMode === 'remote' ? this.accentTint() : Color.Transparent)
-          .fontColor(this.pairingMode === 'remote' ? this.accent() : $r('app.color.pigo_muted'))
+          .backgroundColor(this.pairingMode === 'remote' ? this.accent() : Color.Transparent)
+          .fontColor(this.pairingMode === 'remote' ? this.accentForeground() : $r('app.color.pigo_muted'))
           .onClick(() => { this.selectPairingMode('remote'); })
-      }.width('100%').padding(4).borderRadius(17).backgroundColor($r('app.color.pigo_control'))
+      }.width('100%').padding(4).borderRadius(14).backgroundColor($r('app.color.pigo_control'))
         .enabled(!this.busy && !this.removeTarget)
       if (this.pairingMode !== 'usb') {
         Text(this.pairingMode === 'remote' ? '扫描或粘贴 Pi Go.app「公网」生成的配对包。' :
@@ -4622,69 +4719,86 @@ struct Index {
             .enabled(!this.busy && !this.removeTarget).onClick(() => { void this.scanPairingBundle(); })
         }.width('100%')
         if (this.lanCandidates.length) {
-          Text('附近地址（未验证）').fontSize(12).width('100%')
+          Text('附近地址（未验证）').fontSize(12).fontColor($r('app.color.pigo_muted')).width('100%')
           Scroll() {
-            Column() {
+            Column({ space: 4 }) {
               ForEach(this.lanCandidates, (candidate: string) => {
-                Text(candidate).width('100%').fontSize(14)
+                Text(candidate).width('100%').fontSize(14).fontColor($r('app.color.pigo_text'))
               }, (candidate: string) => candidate)
             }.width('100%')
-          }.constraintSize({ maxHeight: 100 }).width('100%')
+          }.constraintSize({ maxHeight: 100 }).width('100%').scrollBar(BarState.Off)
         }
         TextInput({ placeholder: this.pairingMode === 'remote' ? '公网配对包' : '局域网配对包', text: this.pairingBundle })
           .id(this.pairingMode === 'remote' ? 'remote-bundle' : 'lan-bundle').type(InputType.Password).maxLength(4096)
+          .backgroundColor($r('app.color.pigo_control')).fontColor($r('app.color.pigo_text'))
+          .placeholderColor($r('app.color.pigo_muted'))
           .onChange((value: string) => { this.pairingBundle = value; }).width('100%')
       } else {
         Text('用 USB 连接电脑并允许调试，再在 Pi Go.app 选择「USB」并点「连接手机」。').fontSize(14).fontColor($r('app.color.pigo_muted')).width('100%')
         TextInput({ placeholder: 'USB 地址', text: this.address }).id('address')
+          .backgroundColor($r('app.color.pigo_control')).fontColor($r('app.color.pigo_text'))
+          .placeholderColor($r('app.color.pigo_muted'))
           .onChange((value: string) => { this.address = value; }).width('100%')
         TextInput({ placeholder: '8 位配对码或一次性票据', text: this.ticket }).id('ticket').type(InputType.Password)
+          .backgroundColor($r('app.color.pigo_control')).fontColor($r('app.color.pigo_text'))
+          .placeholderColor($r('app.color.pigo_muted'))
           .onChange((value: string) => { this.ticket = value; }).width('100%')
       }
       Button('配对并连接').chatAction().id('pair').enabled(!this.busy && !this.openingSession && !this.removeTarget)
         .backgroundColor(this.accent()).fontColor(this.accentForeground()).width('100%').height(46)
         .onClick(() => { void this.pair(); })
-    }.padding(16).backgroundColor($r('app.color.pigo_panel')).borderRadius(22).width('100%')
+    }.padding(16).backgroundColor($r('app.color.pigo_panel')).borderRadius(16).width('100%')
       .border({ width: 1, color: $r('app.color.pigo_line') })
   }
 
   @Builder
   profileCard() {
-    Column({ space: 14 }) {
+    Column({ space: 12 }) {
       Row({ space: 14 }) {
         Stack() {
           if (this.huaweiProfile?.avatar && !this.avatarUnavailable) {
-            Image(this.huaweiProfile.avatar).width(52).height(52).objectFit(ImageFit.Cover)
+            Image(this.huaweiProfile.avatar).width(50).height(50).objectFit(ImageFit.Cover)
               .onError(() => { this.avatarUnavailable = true; })
           } else {
-            Image($r('app.media.ic_person')).width(24).height(24).fillColor(this.accent())
+            SymbolGlyph($r('sys.symbol.person')).fontSize(24).fontColor([this.accent()])
           }
-        }.width(52).height(52).backgroundColor(this.accentTint()).borderRadius(26).clip(true)
+        }.width(50).height(50).backgroundColor(this.accentTint()).borderRadius(25).clip(true)
         Column({ space: 4 }) {
-          Text(this.huaweiProfile?.name || '个人资料').fontSize(20).fontWeight(FontWeight.Bold)
+          Text(this.huaweiProfile?.name || '个人资料').fontSize(19).fontWeight(FontWeight.Bold)
             .fontColor($r('app.color.pigo_text')).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
           Text(this.huaweiProfile ? '华为账号已登录' : '华为账号未登录').fontSize(13).fontColor($r('app.color.pigo_muted'))
         }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+        if (this.huaweiProfile) {
+          Button(this.accountBusy ? '请稍候…' : '退出', { type: ButtonType.Normal })
+            .id('huawei-signout').height(34).padding({ left: 12, right: 12 }).borderRadius(10)
+            .fontSize(13).fontWeight(FontWeight.Medium)
+            .backgroundColor(Color.Transparent).fontColor($r('app.color.pigo_muted'))
+            .enabled(!this.accountBusy)
+            .onClick(() => { void this.signOutHuawei(); })
+        }
       }.width('100%')
-      Button(this.accountBusy ? '请稍候…' : this.huaweiProfile ? '退出登录' : '使用华为账号登录')
-        .chatAction().id('huawei-account').width('100%').height(44).enabled(!this.accountBusy)
-        .backgroundColor(this.huaweiProfile ? $r('app.color.pigo_control') : this.accent())
-        .fontColor(this.huaweiProfile ? $r('app.color.pigo_text') : this.accentForeground())
-        .onClick(() => {
-          if (this.huaweiProfile) void this.signOutHuawei();
-          else void this.signInHuawei();
-        })
+      if (!this.huaweiProfile) {
+        Button(this.accountBusy ? '请稍候…' : '使用华为账号登录')
+          .chatAction().id('huawei-account').width('100%').height(44).enabled(!this.accountBusy)
+          .backgroundColor(this.accent()).fontColor(this.accentForeground())
+          .onClick(() => { void this.signInHuawei(); })
+      }
       if (this.accountNotice) {
         Text(this.accountNotice).fontSize(13).fontColor($r('app.color.pigo_warning')).width('100%')
       }
       if (this.huaweiProfile) {
-        Text(this.cloudSyncStatus || '通过华为云空间同步电脑列表和主题偏好。')
-          .fontSize(13).fontColor($r('app.color.pigo_muted')).width('100%')
-        Button('立即同步').chatAction().id('sync-account-settings').width('100%').height(40)
-          .enabled(!this.cloudSyncBusy && !this.accountBusy)
-          .onClick(() => { this.scheduleCloudSync(0); })
+        Divider().color($r('app.color.pigo_line'))
+        Row({ space: 10 }) {
+          Text(this.cloudSyncStatus || '通过华为云空间同步电脑列表和主题偏好。')
+            .fontSize(13).fontColor($r('app.color.pigo_muted')).layoutWeight(1)
+            .maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis })
+          Button(this.cloudSyncBusy ? '同步中…' : '立即同步').chatAction().id('sync-account-settings')
+            .height(34).fontSize(13).padding({ left: 12, right: 12 })
+            .enabled(!this.cloudSyncBusy && !this.accountBusy)
+            .onClick(() => { this.scheduleCloudSync(0); })
+        }.width('100%')
       }
-    }.width('100%').padding(16).backgroundColor($r('app.color.pigo_panel')).borderRadius(22)
+    }.width('100%').padding(16).backgroundColor($r('app.color.pigo_panel')).borderRadius(16)
       .border({ width: 1, color: $r('app.color.pigo_line') })
   }
 
@@ -4694,7 +4808,7 @@ struct Index {
       Row({ space: 12 }) {
         Stack() {
           if (page === 'computers') {
-            Image($r('app.media.ic_computer')).width(22).height(22).fillColor(this.accent())
+            SymbolGlyph($r('sys.symbol.computer')).fontSize(21).fontColor([this.accent()])
           } else {
             Row({ space: 3 }) {
               Blank().width(6).height(6).borderRadius(3).backgroundColor(this.accentFor(THEME_STYLES[0]))
@@ -4708,10 +4822,10 @@ struct Index {
           Text(summary).fontSize(13).fontColor($r('app.color.pigo_muted')).maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
         }.layoutWeight(1).alignItems(HorizontalAlign.Start)
-        Image($r('app.media.ic_chevron')).width(18).height(18).rotate({ angle: -90 })
-          .fillColor($r('app.color.pigo_muted'))
+        SymbolGlyph($r('sys.symbol.chevron_right')).fontSize(15).fontColor([$r('app.color.pigo_muted')])
       }.width('100%').padding(14)
-    }.id(`mine-${page}`).width('100%').padding(0).backgroundColor($r('app.color.pigo_panel')).borderRadius(16)
+    }.id(`mine-${page}`).width('100%').padding(0).backgroundColor($r('app.color.pigo_panel'))
+      .border({ width: 1, radius: 16, color: $r('app.color.pigo_line') })
       .onClick(() => { this.minePage = page; })
   }
 
@@ -4719,31 +4833,35 @@ struct Index {
   themeSettings() {
     Column({ space: 10 }) {
       Text('显示模式').fontSize(16).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text')).width('100%')
-      Row({ space: 6 }) {
+      Row({ space: 4 }) {
         ForEach(APPEARANCE_MODES, (mode: AppearanceMode) => {
-          Button(mode.label, { type: ButtonType.Normal }).chatAction().layoutWeight(1).height(44).padding(4)
+          Button(mode.label, { type: ButtonType.Normal }).chatAction().layoutWeight(1).height(38).padding(4).borderRadius(10)
             .id(`appearance-${mode.id}`).accessibilitySelected(this.modeId === mode.id)
-            .backgroundColor(this.modeId === mode.id ? this.accent() : $r('app.color.pigo_control'))
-            .fontColor(this.modeId === mode.id ? this.accentForeground() : $r('app.color.pigo_text'))
+            .backgroundColor(this.modeId === mode.id ? this.accent() : Color.Transparent)
+            .fontColor(this.modeId === mode.id ? this.accentForeground() : $r('app.color.pigo_muted'))
             .onClick(() => { this.selectAppearanceMode(mode); })
         }, (mode: AppearanceMode) => mode.id)
-      }.width('100%')
-    }.width('100%').padding(16).backgroundColor($r('app.color.pigo_panel')).borderRadius(18)
-    Column({ space: 8 }) {
+      }.width('100%').padding(4).borderRadius(14).backgroundColor($r('app.color.pigo_control'))
+    }.width('100%').padding(16).backgroundColor($r('app.color.pigo_panel')).borderRadius(16)
+      .border({ width: 1, color: $r('app.color.pigo_line') })
+    Column({ space: 6 }) {
       Text('主题配色').fontSize(16).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text')).width('100%')
       ForEach(THEME_STYLES, (style: ThemeStyle) => {
         Button({ type: ButtonType.Normal }) {
           Row({ space: 12 }) {
             Blank().width(22).height(22).borderRadius(11).backgroundColor(this.accentFor(style))
             Text(style.label).fontSize(15).fontColor($r('app.color.pigo_text')).layoutWeight(1)
-            if (this.themeId === style.id) Text('✓').fontSize(18).fontColor(this.accent())
+            if (this.themeId === style.id) {
+              SymbolGlyph($r('sys.symbol.checkmark')).fontSize(17).fontColor([this.accent()])
+            }
           }.width('100%').padding({ left: 12, right: 12 })
         }.id(`theme-${style.id}`).width('100%').height(44).padding(0).borderRadius(12)
           .accessibilitySelected(this.themeId === style.id)
           .backgroundColor(this.themeId === style.id ? this.accentTint() : Color.Transparent)
           .onClick(() => { this.selectTheme(style.id); })
       }, (style: ThemeStyle) => style.id)
-    }.width('100%').padding(16).backgroundColor($r('app.color.pigo_panel')).borderRadius(18)
+    }.width('100%').padding(16).backgroundColor($r('app.color.pigo_panel')).borderRadius(16)
+      .border({ width: 1, color: $r('app.color.pigo_line') })
     if (this.appearanceNotice) Text(this.appearanceNotice).fontSize(13).fontColor($r('app.color.pigo_warning'))
   }
 
@@ -4758,12 +4876,13 @@ struct Index {
         .id('run-notice-setting').selectedColor(this.accent()).accessibilityText('运行结束通知')
         .onChange((enabled: boolean) => { void this.setRunNoticesEnabled(enabled); })
     }.width('100%').padding(14).backgroundColor($r('app.color.pigo_panel')).borderRadius(16)
+      .border({ width: 1, color: $r('app.color.pigo_line') })
   }
 
   private liveViewSummary(): string {
-    if (this.liveViewStatus === 'rights') return '未开通场景权益，请在 AppGallery Connect 开通并联调';
+    if (this.liveViewStatus === 'rights') return '当前版本暂不支持系统实况窗';
     if (this.liveViewStatus === 'disabled') return '系统实况窗开关未开启，请在系统应用设置中开启';
-    if (this.liveViewStatus === 'error') return '实况窗创建失败，将在运行期间自动重试';
+    if (this.liveViewStatus === 'error') return '实况窗暂时不可用，将在运行期间自动重试';
     return '在状态栏、锁屏和通知中心显示当前任务状态';
   }
 
@@ -4776,8 +4895,10 @@ struct Index {
       }.layoutWeight(1).alignItems(HorizontalAlign.Start)
       Toggle({ type: ToggleType.Switch, isOn: this.liveViewsEnabled })
         .id('live-view-setting').selectedColor(this.accent()).accessibilityText('任务实况窗')
+        .enabled(this.liveViewStatus !== 'rights')
         .onChange((enabled: boolean) => { void this.setLiveViewsEnabled(enabled); })
     }.width('100%').padding(14).backgroundColor($r('app.color.pigo_panel')).borderRadius(16)
+      .border({ width: 1, color: $r('app.color.pigo_line') })
   }
 
   @Builder
@@ -4791,10 +4912,10 @@ struct Index {
   }
 
   @Builder
-  headerIcon(icon: Resource, color: ResourceColor, rotation: number = 0) {
+  headerSymbol(symbol: Resource, color: ResourceColor, size: number = 20) {
     Stack() {
       this.glassSurface(22)
-      Image(icon).width(21).height(21).fillColor(color).rotate({ angle: rotation })
+      SymbolGlyph(symbol).fontSize(size).fontColor([color])
     }.width('100%').height('100%').accessibilityLevel('no-hide-descendants')
   }
 
@@ -4803,14 +4924,14 @@ struct Index {
     Row({ space: 12 }) {
       if (this.minePage) {
         Button({ type: ButtonType.Normal }) {
-          this.headerIcon($r('app.media.ic_chevron'), $r('app.color.pigo_text'), 90)
+          this.headerSymbol($r('sys.symbol.chevron_left'), $r('app.color.pigo_text'), 21)
         }.headerAction()
           .accessibilityText('返回').enabled(!this.busy).onClick(() => { this.mineBack(); })
       }
       Text(this.minePage === 'theme' ? '系统主题' : this.minePage === 'computers' ?
         (this.addingComputer ? (this.pairingComputerId ? '添加连接' : '添加电脑') : '电脑管理') : '我的')
-        .fontSize(this.minePage ? 21 : 26).fontWeight(FontWeight.Bold).fontColor($r('app.color.pigo_text')).layoutWeight(1)
-      if (this.computers.length) this.scheduleInboxButton()
+        .fontSize(this.minePage ? 20 : 26).fontWeight(FontWeight.Bold).fontColor($r('app.color.pigo_text')).layoutWeight(1)
+      if (!this.minePage && this.computers.length) this.scheduleInboxButton()
     }.width('100%').height(this.headerHeight())
       .border({ width: { bottom: 1 }, color: $r('app.color.pigo_line') })
   }
@@ -4821,24 +4942,13 @@ struct Index {
       Column({ space: 12 }) {
         if (this.minePage === 'computers') {
           if (!this.addingComputer) {
-            if (this.isPaired) {
-              Row({ space: 10 }) {
-                Image($r('app.media.ic_computer')).width(28).height(28).fillColor(this.accent())
-                Column({ space: 4 }) {
-                  Text(this.computerTitle()).fontSize(17).fontWeight(FontWeight.Medium)
-                    .fontColor($r('app.color.pigo_text')).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
-                  Text(`${this.base.split('://')[1]} · ${this.reachable ? '已连接' : '离线，正在尝试重连'}`).fontSize(13)
-                    .fontColor(this.reachable ? $r('app.color.pigo_success') : $r('app.color.pigo_warning'))
-                }.layoutWeight(1).alignItems(HorizontalAlign.Start)
-              }.width('100%').padding(16).borderRadius(16).backgroundColor($r('app.color.pigo_panel'))
-            }
             this.computerList()
             this.cloudComputerList()
           }
           if (this.addingComputer || !this.computers.length) {
             this.pairingForm()
           } else {
-            Button('添加电脑').chatAction().id('add-computer').width('100%').height(44)
+            Button('添加电脑').chatAction().id('add-computer').width('100%').height(46)
               .backgroundColor(this.accent()).fontColor(this.accentForeground())
               .enabled(!this.busy && !this.openingSession && !this.removeTarget)
               .onClick(() => { this.addComputerConnection(); })
@@ -4854,8 +4964,8 @@ struct Index {
           this.runNoticeSettings()
           this.liveViewSettings()
         }
-      }.width('100%').alignItems(HorizontalAlign.Start).padding({ top: 4, bottom: 12 })
-    }.layoutWeight(1).width('100%').align(Alignment.TopStart)
+      }.width('100%').alignItems(HorizontalAlign.Start).padding({ top: 4, bottom: 16 })
+    }.layoutWeight(1).width('100%').align(Alignment.TopStart).scrollBar(BarState.Off)
   }
 
   @Builder
@@ -4866,11 +4976,11 @@ struct Index {
     } else {
       Button({ type: ButtonType.Normal }) {
         Row({ space: 8 }) {
-          Image($r('app.media.ic_chevron')).width(14).height(14)
-            .rotate({ angle: row.expanded ? 0 : -90 }).fillColor($r('app.color.pigo_muted'))
+          SymbolGlyph(row.expanded ? $r('sys.symbol.chevron_down') : $r('sys.symbol.chevron_right'))
+            .fontSize(13).fontColor([$r('app.color.pigo_muted')])
             .opacity(row.kind === 'directory' ? 1 : 0)
           if (row.kind === 'directory') {
-            Image($r('app.media.ic_folder')).width(19).height(19).fillColor(this.accent())
+            SymbolGlyph($r('sys.symbol.folder')).fontSize(18).fontColor([this.accent()])
           } else if (row.kind !== 'more') {
             SymbolGlyph($r('sys.symbol.doc')).fontSize(18).fontColor([$r('app.color.pigo_muted')]).width(19)
           }
@@ -4898,61 +5008,62 @@ struct Index {
   @Builder
   fileEditorPage() {
     Column({ space: 12 }) {
-      Text(this.editingPath).fontSize(18).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
-        .width('100%').maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis })
-      TextArea({ text: this.fileText }).id('file-editor').layoutWeight(1).width('100%').maxLength(65536)
-        .fontFamily('monospace').enabled(!this.busy).onChange((value: string) => { this.fileText = value; })
-      if (this.editorNotice) {
-        Text(this.editorNotice).id('file-editor-notice').fontSize(13).fontColor($r('app.color.pigo_text')).width('100%')
-      }
-      Row({ space: 8 }) {
-        Button('预览').chatAction().id('file-editor-preview').enabled(!this.busy).onClick(() => {
+      Row({ space: 12 }) {
+        Button({ type: ButtonType.Normal }) {
+          this.headerSymbol($r('sys.symbol.chevron_left'), $r('app.color.pigo_text'), 21)
+        }.id('file-back').headerAction().accessibilityText(this.fileText !== this.fileOriginal ? '放弃修改' : '返回')
+          .enabled(!this.busy).onClick(() => { this.returnToFilePreview(true); })
+        Text(this.editingPath.split('/').pop() || this.editingPath)
+          .fontSize(19).fontWeight(FontWeight.Bold).fontColor($r('app.color.pigo_text'))
+          .layoutWeight(1).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+        Button('预览').chatAction().id('file-editor-preview').height(38).enabled(!this.busy).onClick(() => {
           this.showTextPreview(this.editingRoot, this.editingPath, this.fileText);
         })
-        Button(this.busy ? '正在保存…' : '保存到电脑').chatAction().id('file-save')
-          .enabled(this.reachable && !this.busy && this.fileText !== this.fileOriginal)
-          .onClick(() => { void this.saveFile(); })
-        Button(this.fileText !== this.fileOriginal ? '放弃修改' : '返回').chatAction().id('file-back').enabled(!this.busy)
-          .onClick(() => { this.returnToFilePreview(true); })
-      }.width('100%')
+      }.width('100%').height(this.headerHeight())
+        .border({ width: { bottom: 1 }, color: $r('app.color.pigo_line') })
+      Text(this.editingPath).fontSize(12).fontColor($r('app.color.pigo_muted'))
+        .width('100%').maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+      TextArea({ text: this.fileText }).id('file-editor').layoutWeight(1).width('100%').maxLength(65536)
+        .fontFamily('monospace').fontSize(14).backgroundColor($r('app.color.pigo_panel'))
+        .fontColor($r('app.color.pigo_text')).borderRadius(12)
+        .border({ width: 1, color: $r('app.color.pigo_line') })
+        .enabled(!this.busy).onChange((value: string) => { this.fileText = value; })
+      if (this.editorNotice) {
+        Text(this.editorNotice).id('file-editor-notice').fontSize(13).fontColor($r('app.color.pigo_warning')).width('100%')
+      }
+      Button(this.busy ? '正在保存…' : '保存到电脑').chatAction().id('file-save').width('100%').height(46)
+        .backgroundColor(this.accent()).fontColor(this.accentForeground())
+        .enabled(this.reachable && !this.busy && this.fileText !== this.fileOriginal)
+        .onClick(() => { void this.saveFile(); })
     }.width('100%').constraintSize({ maxWidth: 840 }).height('100%').alignItems(HorizontalAlign.Start)
-      .padding({ left: 16, right: 16, top: this.statusBarHeight + 12, bottom: this.bottomPad() + 4 })
+      .padding({ left: 16, right: 16, top: this.statusBarHeight + 8, bottom: this.bottomPad() + 8 })
   }
 
   @Builder
   workspaceFiles() {
     Column() {
       Row({ space: 10 }) {
-        Image($r('app.media.ic_folder')).width(23).height(23).fillColor(this.accent())
+        SymbolGlyph($r('sys.symbol.folder')).fontSize(21).fontColor([this.accent()])
         Column({ space: 2 }) {
           Text(this.project || '项目根目录').fontSize(15).fontWeight(FontWeight.Medium)
             .fontColor($r('app.color.pigo_text')).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
           Text(this.fileRoot).fontSize(11).fontColor($r('app.color.pigo_muted')).maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis }).copyOption(CopyOptions.LocalDevice)
         }.layoutWeight(1).alignItems(HorizontalAlign.Start)
-        Button({ type: ButtonType.Normal }) {
-          Stack() {
-            this.glassSurface(22)
-            SymbolGlyph($r('sys.symbol.arrow_clockwise')).fontSize(19).fontColor([$r('app.color.pigo_text')])
-              .accessibilityLevel('no')
-          }.width('100%').height('100%')
-        }.id('file-refresh').headerAction().accessibilityText('刷新工作区')
-          .enabled(!this.busy && !this.openingSession && this.reachable)
-          .onClick(() => { void this.loadFileDirectory(''); })
-      }.width('100%').padding({ left: 14, right: 6, top: 4, bottom: 4 })
+      }.width('100%').padding({ left: 14, right: 14, top: 10, bottom: 10 })
       Divider().color($r('app.color.pigo_line'))
       if (this.fileTreeRows.length) {
         List({ initialIndex: this.fileTreeIndex }) {
           ForEach(this.fileTreeRows, (row: FileTreeRow) => {
             ListItem() { this.workspaceTreeRow(row) }
           }, (row: FileTreeRow): string => `${row.kind}:${row.expanded ?? false}:${row.path}`)
-        }.width('100%').layoutWeight(1).padding({ top: 4, bottom: 4, left: 4, right: 4 })
+        }.width('100%').layoutWeight(1).padding({ top: 4, bottom: 4, left: 4, right: 4 }).scrollBar(BarState.Off)
           .onScrollIndex((start: number) => { this.fileTreeIndex = Math.max(0, start); })
       } else {
         Text(this.busy ? '正在读取目录…' : '未能读取目录')
           .fontSize(13).fontColor($r('app.color.pigo_muted')).width('100%').padding(16)
       }
-    }.width('100%').layoutWeight(1).alignItems(HorizontalAlign.Start).borderRadius(18)
+    }.width('100%').layoutWeight(1).alignItems(HorizontalAlign.Start).borderRadius(16)
       .backgroundColor($r('app.color.pigo_panel')).border({ width: 1, color: $r('app.color.pigo_line') })
       .clip(true)
   }
@@ -4960,93 +5071,134 @@ struct Index {
   @Builder
   sessionSettings() {
     Scroll() {
-      Column({ space: 12 }) {
-        Text('会话设置').fontSize(20).fontWeight(FontWeight.Bold).width('100%')
-        Text(this.modelLabel).fontSize(13).width('100%')
-        TextInput({ text: this.renameDraft, placeholder: '会话名称' }).id('rename-draft').maxLength(200)
-          .onChange((value: string) => { this.renameDraft = value; })
-        Button('保存名称').chatAction().id('rename-save').enabled(!this.busy && this.reachable && !!this.renameDraft.trim())
-          .onClick(() => { void this.requestAction('/rename', { id: this.currentId, name: this.renameDraft.trim() }); })
-        Text('模型').fontSize(16).width('100%')
-        if (this.models.length) {
-          Select(this.models.map((model: ModelOption): SelectOption => ({
-            value: `${model.name} · ${model.provider}${model.image ? ' · 图片' : ''}`
-          })))
-            .id('model-select').width('100%').selected(this.selectedModel)
-            .value(this.models[this.selectedModel] ? `${this.models[this.selectedModel].name} · ${this.models[this.selectedModel].provider}` : '选择模型')
-            .enabled(!this.busy)
-            .onSelect((index: number) => {
-              this.selectedModel = index;
-              const model = this.models[index];
-              if (model && !model.levels.includes(this.selectedLevel)) this.selectedLevel = model.levels[0] ?? 'off';
-            })
-        }
-        if (this.selectedModel >= 0 && this.models[this.selectedModel]) {
-          Text('思考级别').fontSize(16).width('100%')
-          Select(this.models[this.selectedModel].levels.map((level: string): SelectOption => ({ value: level })))
-            .id('thinking-select').width('100%').value(this.selectedLevel)
-            .selected(this.models[this.selectedModel].levels.indexOf(this.selectedLevel))
-            .enabled(!this.busy)
-            .onSelect((index: number) => {
-              this.selectedLevel = this.models[this.selectedModel].levels[index] ?? 'off';
-            })
-          if (this.models[this.selectedModel].levels.length === 1 && this.models[this.selectedModel].levels[0] === 'off') {
-            Text('此模型不支持调整思考级别。').fontSize(13).width('100%')
+      Column({ space: 14 }) {
+        Column({ space: 10 }) {
+          Text('会话名称').fontSize(15).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text')).width('100%')
+          TextInput({ text: this.renameDraft, placeholder: '输入会话名称' }).id('rename-draft').maxLength(200)
+            .backgroundColor($r('app.color.pigo_control')).fontColor($r('app.color.pigo_text'))
+            .placeholderColor($r('app.color.pigo_muted'))
+            .onChange((value: string) => { this.renameDraft = value; })
+          Button('保存名称').chatAction().id('rename-save').width('100%').height(42)
+            .backgroundColor(this.accent()).fontColor(this.accentForeground())
+            .enabled(!this.busy && this.reachable && !!this.renameDraft.trim())
+            .onClick(() => { void this.requestAction('/rename', { id: this.currentId, name: this.renameDraft.trim() }); })
+        }.width('100%').padding(14).borderRadius(16).backgroundColor($r('app.color.pigo_panel'))
+          .border({ width: 1, color: $r('app.color.pigo_line') })
+        Column({ space: 10 }) {
+          Row() {
+            Text('模型与思考').fontSize(15).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text')).layoutWeight(1)
+            Text(this.modelLabel).fontSize(12).fontColor($r('app.color.pigo_muted')).maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis }).constraintSize({ maxWidth: '60%' })
+          }.width('100%')
+          if (this.models.length) {
+            Select(this.models.map((model: ModelOption): SelectOption => ({
+              value: `${model.name} · ${model.provider}${model.image ? ' · 图片' : ''}`
+            })))
+              .id('model-select').width('100%').selected(this.selectedModel)
+              .value(this.models[this.selectedModel] ? `${this.models[this.selectedModel].name} · ${this.models[this.selectedModel].provider}` : '选择模型')
+              .fontColor($r('app.color.pigo_text')).backgroundColor($r('app.color.pigo_control'))
+              .enabled(!this.busy)
+              .onSelect((index: number) => {
+                this.selectedModel = index;
+                const model = this.models[index];
+                if (model && !model.levels.includes(this.selectedLevel)) this.selectedLevel = model.levels[0] ?? 'off';
+              })
           }
-          Button('应用模型与思考级别').chatAction().id('model-apply').enabled(this.reachable && !this.busy && this.idle && !this.queued)
-            .onClick(() => {
-              const model = this.models[this.selectedModel];
-              if (model) void this.requestAction('/model', { id: this.currentId, provider: model.provider,
-                modelId: model.id, thinkingLevel: this.selectedLevel });
-            })
-        }
-        if (!this.idle || this.queued) Text('等待当前任务和队列结束后可切换模型。').fontSize(13)
-        if (!this.models.length) Text('没有可用模型，请在电脑上检查 Pi CLI 的模型配置。').fontSize(13)
-      }.width('100%').padding(12)
-    }.layoutWeight(1).width('100%')
+          if (this.selectedModel >= 0 && this.models[this.selectedModel]) {
+            Text('思考级别').fontSize(14).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_muted')).width('100%')
+            if (this.models[this.selectedModel].levels.length > 1) {
+              Row({ space: 4 }) {
+                ForEach(this.models[this.selectedModel].levels, (level: string) => {
+                  Button(this.thinkingLevelLabel(level), { type: ButtonType.Normal }).chatAction()
+                    .layoutWeight(1).height(36).padding(2).borderRadius(10).fontSize(13)
+                    .backgroundColor(this.selectedLevel === level ? this.accent() : Color.Transparent)
+                    .fontColor(this.selectedLevel === level ? this.accentForeground() : $r('app.color.pigo_muted'))
+                    .enabled(!this.busy)
+                    .onClick(() => { this.selectedLevel = level; })
+                }, (level: string) => level)
+              }.id('thinking-select').width('100%').padding(4).borderRadius(14)
+                .backgroundColor($r('app.color.pigo_control'))
+            } else {
+              Text('此模型不支持调整思考级别。').fontSize(13).fontColor($r('app.color.pigo_muted')).width('100%')
+            }
+            Button('应用模型与思考级别').chatAction().id('model-apply').width('100%').height(44)
+              .backgroundColor(this.accent()).fontColor(this.accentForeground())
+              .enabled(this.reachable && !this.busy && this.idle && !this.queued)
+              .onClick(() => {
+                const model = this.models[this.selectedModel];
+                if (model) void this.requestAction('/model', { id: this.currentId, provider: model.provider,
+                  modelId: model.id, thinkingLevel: this.selectedLevel });
+              })
+          }
+          if (!this.idle || this.queued) {
+            Text('等待当前任务和队列结束后可切换模型。').fontSize(13).fontColor($r('app.color.pigo_warning')).width('100%')
+          }
+          if (!this.models.length) {
+            Text('没有可用模型，请在电脑上检查 Pi CLI 的模型配置。').fontSize(13).fontColor($r('app.color.pigo_muted')).width('100%')
+          }
+        }.width('100%').padding(14).borderRadius(16).backgroundColor($r('app.color.pigo_panel'))
+          .border({ width: 1, color: $r('app.color.pigo_line') })
+      }.width('100%').padding({ top: 4, bottom: 16 })
+    }.layoutWeight(1).width('100%').align(Alignment.TopStart).scrollBar(BarState.Off)
   }
 
   @Builder
   chatHeader() {
     Row({ space: 10 }) {
-      if (!this.dockedSessions()) {
+      if (this.showSettings) {
         Button({ type: ButtonType.Normal }) {
-          this.headerIcon($r('app.media.ic_menu'), $r('app.color.pigo_text'))
+          this.headerSymbol($r('sys.symbol.chevron_left'), $r('app.color.pigo_text'), 21)
+        }.headerAction().accessibilityText('返回会话').onClick(() => { this.showSettings = false; })
+      } else if (!this.dockedSessions() && !this.showFiles) {
+        Button({ type: ButtonType.Normal }) {
+          this.headerSymbol($r('sys.symbol.line_2_horizontal'), $r('app.color.pigo_text'), 20)
         }.id('history').headerAction()
-          .accessibilityText('打开会话抽屉').enabled(!this.busy && !this.showFiles)
+          .accessibilityText('打开会话抽屉').enabled(!this.busy)
           .onClick(() => { this.setDrawer(true); })
       }
       Column({ space: 3 }) {
         Text(this.showFiles ? '工作区文件' : this.showSettings ? '会话设置' : this.activeTab === 'pending' ? '任务' : this.chatTitle())
-          .fontSize(18).fontWeight(FontWeight.Bold).fontColor($r('app.color.pigo_text')).maxLines(1)
+          .fontSize(this.showFiles || this.showSettings ? 20 : 18).fontWeight(FontWeight.Bold).fontColor($r('app.color.pigo_text')).maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis }).width('100%')
-        Row({ space: 6 }) {
-          Blank().width(7).height(7).borderRadius(4)
-            .backgroundColor(this.reachable ? $r('app.color.pigo_success') : $r('app.color.pigo_warning'))
-            .accessibilityText(this.reachable ? '电脑已连接' : '电脑离线')
-          Text(this.reachable ? (this.project ? `${this.project} · ${this.computerTitle()}` : this.computerTitle()) :
-            `离线 · ${this.computerTitle()}`)
-            .fontSize(12).fontColor($r('app.color.pigo_muted')).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
-        }.width('100%').onClick(() => { if (!this.dockedSessions()) this.setDrawer(true); })
+        if (!this.showSettings) {
+          Row({ space: 6 }) {
+            Blank().width(7).height(7).borderRadius(4)
+              .backgroundColor(this.reachable ? $r('app.color.pigo_success') : $r('app.color.pigo_warning'))
+              .accessibilityText(this.reachable ? '电脑已连接' : '电脑离线')
+            Text(this.reachable ? (this.project ? `${this.project} · ${this.computerTitle()}` : this.computerTitle()) :
+              `离线 · ${this.computerTitle()}`)
+              .fontSize(12).fontColor($r('app.color.pigo_muted')).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+          }.width('100%').onClick(() => { if (!this.dockedSessions() && !this.showFiles) this.setDrawer(true); })
+        }
       }.layoutWeight(1).alignItems(HorizontalAlign.Start)
-      Row({ space: 6 }) {
-        this.scheduleInboxButton()
+      if (this.showFiles) {
         Button({ type: ButtonType.Normal }) {
-          this.headerIcon($r('app.media.ic_compose'), this.accent())
-        }.id('new-task').headerAction().accessibilityText('在当前工作区新建会话')
-          .enabled(this.reachable && !this.busy && !this.openingSession && this.hostAvailable &&
-            !!this.workspaceCwd && this.projects.includes(this.workspaceCwd))
-          .onClick(() => { this.activeTab = 'tasks'; void this.requestAction('/new', { cwd: this.workspaceCwd }); })
-        Button({ type: ButtonType.Normal }) {
-          this.headerIcon($r('app.media.ic_more'), $r('app.color.pigo_text'))
-        }.id('session-settings').headerAction().accessibilityText('更多操作')
-          .bindMenu([
-            { value: this.showSettings ? '返回聊天' : '模型与会话设置', action: () => {
-              if (this.showSettings) this.showSettings = false;
-              else if (this.reachable && this.currentId) void this.requestAction('/models');
-            } },
-            { value: '切换电脑', action: () => { if (!this.busy) this.openComputers(); } }
-          ])
+          this.headerSymbol($r('sys.symbol.arrow_clockwise'), $r('app.color.pigo_text'), 19)
+        }.id('file-refresh').headerAction().accessibilityText('刷新工作区')
+          .enabled(!this.busy && !this.openingSession && this.reachable)
+          .onClick(() => { void this.loadFileDirectory(''); })
+      } else if (!this.showSettings) {
+        Row({ space: 6 }) {
+          this.scheduleInboxButton()
+          Button({ type: ButtonType.Normal }) {
+            this.headerSymbol($r('sys.symbol.square_and_pencil'), this.accent(), 19)
+          }.id('new-task').headerAction().accessibilityText('在当前工作区新建会话')
+            .enabled(this.reachable && !this.busy && !this.openingSession && this.hostAvailable &&
+              !!this.workspaceCwd && this.projects.includes(this.workspaceCwd))
+            .onClick(() => { this.activeTab = 'tasks'; void this.requestAction('/new', { cwd: this.workspaceCwd }); })
+          Button({ type: ButtonType.Normal }) {
+            Stack() {
+              this.glassSurface(22)
+              Image($r('app.media.ic_more')).width(20).height(20).fillColor($r('app.color.pigo_text'))
+            }.width('100%').height('100%').accessibilityLevel('no-hide-descendants')
+          }.id('session-settings').headerAction().accessibilityText('更多操作')
+            .bindMenu([
+              { value: '模型与会话设置', action: () => {
+                if (this.reachable && this.currentId) void this.requestAction('/models');
+              } },
+              { value: '切换电脑', action: () => { if (!this.busy) this.openComputers(); } }
+            ])
+        }
       }
     }.width('100%').height(this.headerHeight())
       .border({ width: { bottom: 1 }, color: $r('app.color.pigo_line') })
@@ -5085,120 +5237,134 @@ struct Index {
           })
         }.width('100%')
       }
-      ForEach([this.currentId], (transcriptId: string) => {
-        Scroll(this.transcript) {
-          Column({ space: 10 }) {
-            if (this.historyCursor) {
-              Button('更早的消息').chatAction().id('history-more').enabled(this.reachable && !this.busy)
-                .onClick(() => { void this.loadHistory(); })
-            }
-            if (!this.messages.length && !this.liveText && !this.liveTools.length && !this.liveThinking && this.idle) {
-              this.welcome(true)
-            }
-            ForEach(this.messages, (message: ChatMessage) => {
-              if (message.text || message.thinking || message.imageCount) {
-                Row() {
-                  Column({ space: 8 }) {
-                    if (message.thinking) this.thinkingCard(message.id, message.thinking, message.thinkingMs ?? -1,
-                      this.thinkingOpenIds.includes(message.id))
-                    if (message.text) {
-                      if (message.role === 'user') {
-                        Text(message.text).fontSize(16).lineHeight(26)
-                          .copyOption(CopyOptions.LocalDevice).fontColor($r('app.color.pigo_text'))
-                      } else {
-                        this.richChatText(message.text, this.workspaceCwd)
-                      }
-                      ForEach(this.messageFiles(message), (path: string) => {
-                        this.fileChip(path, message.role !== 'user')
-                      }, (path: string) => path)
-                      if (message.textTruncated) {
-                        Button(this.loadingMessageText === message.id ? '正在加载全文…' : '查看完整回复').chatAction()
-                          .enabled(this.reachable && !this.loadingMessageText)
-                          .onClick(() => { void this.showFullReply(message.id); })
-                      } else if (message.role !== 'user') {
-                        this.copyButton('复制回复', message.text)
-                      }
-                    }
-                    if (message.imageCount) {
-                      Column({ space: 6 }) {
-                        this.historyImages(message.imageCount, this.currentId, message.id)
-                      }.id(`image-message-${message.id}`).alignItems(HorizontalAlign.Start)
-                    }
-                  }.alignItems(HorizontalAlign.Start).padding(message.role === 'user' ?
-                    { left: 14, right: 14, top: 10, bottom: 10 } : 0)
-                    .width(message.role === 'user' ? undefined : '100%')
-                    .constraintSize({ maxWidth: message.role === 'user' ? '88%' : '100%' })
-                    .backgroundColor(message.role === 'user' ? this.accentTint() : Color.Transparent)
-                    .borderRadius({ topLeft: 17, topRight: 6, bottomLeft: 17, bottomRight: 17 })
-                }.width('100%').justifyContent(message.role === 'user' ? FlexAlign.End : FlexAlign.Start)
-                  .padding({ top: message.role === 'user' ? 14 : 8, bottom: 4 })
+      Stack({ alignContent: Alignment.BottomEnd }) {
+        ForEach([this.currentId], (transcriptId: string) => {
+          Scroll(this.transcript) {
+            Column({ space: 10 }) {
+              if (this.historyCursor) {
+                Button('更早的消息').chatAction().id('history-more').enabled(this.reachable && !this.busy)
+                  .onClick(() => { void this.loadHistory(); })
               }
-              this.toolGroup(message.tools ?? [], message.id)
-            }, (message: ChatMessage) => this.transcriptMessageKey(message))
-            this.toolGroup(this.unlistedLiveTools(), '')
-            if (this.liveThinking) this.thinkingCard('', this.liveThinking, -1, this.liveThinkingOpen)
-            if (this.liveText) {
-              Column({ space: 8 }) {
-                this.richChatText(this.liveText, this.workspaceCwd)
-                ForEach(messageFileChips(this.liveText, this.workspaceCwd), (path: string) => {
-                  this.fileChip(path, true)
-                }, (path: string) => path)
-              }.alignItems(HorizontalAlign.Start).width('100%').padding({ top: 10, bottom: 18 })
-            }
-            ForEach(this.queuedSteering.filter((message: QueuedSteering): boolean => message.sessionKey === this.draftKey(this.currentId)),
-              (message: QueuedSteering) => {
-                Row() {
-                  Column({ space: 6 }) {
-                    if (message.text) Text(message.text).fontSize(16).lineHeight(26)
-                      .copyOption(CopyOptions.LocalDevice).fontColor($r('app.color.pigo_text'))
-                    if (message.imageCount) Text(`图片 × ${message.imageCount}`).fontSize(13).fontColor($r('app.color.pigo_muted'))
-                    ForEach(message.files, (name: string) => {
-                      Text(name).fontSize(13).fontColor($r('app.color.pigo_muted'))
-                        .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
-                    })
-                    Text('排队中').fontSize(12).fontColor($r('app.color.pigo_muted'))
-                  }.alignItems(HorizontalAlign.Start).padding(13).constraintSize({ maxWidth: '88%' })
-                    .backgroundColor(this.accentTint()).borderRadius({ topLeft: 17, topRight: 6, bottomLeft: 17, bottomRight: 17 })
-                }.width('100%').justifyContent(FlexAlign.End).padding({ top: 10, bottom: 4 })
-              }, (message: QueuedSteering) => message.id)
-          }.width('100%').padding({ top: 10, right: 10, bottom: 8 })
-            .onAreaChange((_oldArea: Area, newArea: Area) => {
-              this.positionTranscript(transcriptId, Number(newArea.height));
-            })
-        }.layoutWeight(1).width('100%').align(Alignment.TopStart)
-          .scrollBar(BarState.Auto).scrollBarWidth(4)
-          .onTouch((event: TouchEvent) => {
-            // 点击手势会被带 copyOption 的消息文本夺走，改用触摸广播：手指一按下就收键盘。
-            if (event.type === TouchType.Down && this.keyboardHeight > 0) this.dismissKeyboard();
-          })
-          .onWillScroll((_xOffset: number, yOffset: number, _state: ScrollState, source: ScrollSource) => {
-            if (yOffset < -2 && source !== ScrollSource.SCROLLER && source !== ScrollSource.SCROLLER_ANIMATION) {
-              this.transcriptFollow = false;
-            }
-          })
-          .onScrollEdge((side: Edge) => {
-            if (side === Edge.Bottom) this.transcriptFollow = true;
-          })
-          .onAreaChange((oldArea: Area, newArea: Area) => {
-            this.transcriptViewport = Number(newArea.height);
-            if (this.transcriptFollow && (oldArea.width !== newArea.width || oldArea.height !== newArea.height)) {
-              // Wait for the transcript to finish wrapping at the new width before scrolling.
-              setTimeout(() => {
-                if (this.currentId === transcriptId && this.transcriptFollow) {
-                  this.transcript.scrollTo({ xOffset: 0, yOffset: this.transcriptContentHeight, animation: false });
+              if (!this.messages.length && !this.liveText && !this.liveTools.length && !this.liveThinking && this.idle) {
+                this.welcome(true)
+              }
+              ForEach(this.messages, (message: ChatMessage) => {
+                if (message.text || message.thinking || message.imageCount) {
+                  Row() {
+                    Column({ space: 8 }) {
+                      if (message.thinking) this.thinkingCard(message.id, message.thinking, message.thinkingMs ?? -1,
+                        this.thinkingOpenIds.includes(message.id))
+                      if (message.text) {
+                        if (message.role === 'user') {
+                          Text(message.text).fontSize(16).lineHeight(26)
+                            .copyOption(CopyOptions.LocalDevice).fontColor($r('app.color.pigo_text'))
+                        } else {
+                          this.richChatText(message.text, this.workspaceCwd)
+                        }
+                        if (this.messageFiles(message).length) {
+                          Flex({ wrap: FlexWrap.Wrap }) {
+                            ForEach(this.messageFiles(message), (path: string) => {
+                              Column() {
+                                this.fileChip(path, message.role !== 'user')
+                              }.margin({ right: 8, bottom: 8 })
+                            }, (path: string) => path)
+                          }.width('100%')
+                        }
+                        if (message.textTruncated) {
+                          Button(this.loadingMessageText === message.id ? '正在加载全文…' : '查看完整回复').chatAction()
+                            .enabled(this.reachable && !this.loadingMessageText)
+                            .onClick(() => { void this.showFullReply(message.id); })
+                        } else if (message.role !== 'user') {
+                          this.copyButton('复制回复', message.text)
+                        }
+                      }
+                      if (message.imageCount) {
+                        Column({ space: 6 }) {
+                          this.historyImages(message.imageCount, this.currentId, message.id)
+                        }.id(`image-message-${message.id}`).alignItems(HorizontalAlign.Start)
+                      }
+                    }.alignItems(HorizontalAlign.Start).padding(message.role === 'user' ?
+                      { left: 14, right: 14, top: 10, bottom: 10 } : 0)
+                      .width(message.role === 'user' ? undefined : '100%')
+                      .constraintSize({ maxWidth: message.role === 'user' ? '88%' : '100%' })
+                      .backgroundColor(message.role === 'user' ? this.accentTint() : Color.Transparent)
+                      .borderRadius({ topLeft: 17, topRight: 6, bottomLeft: 17, bottomRight: 17 })
+                  }.width('100%').justifyContent(message.role === 'user' ? FlexAlign.End : FlexAlign.Start)
+                    .padding({ top: message.role === 'user' ? 14 : 8, bottom: 4 })
                 }
-              }, 0);
-            }
-          })
-      }, (transcriptId: string) => transcriptId)
-      if (!this.transcriptFollow) {
-        Row() {
+                this.toolGroup(message.tools ?? [], message.id)
+              }, (message: ChatMessage) => this.transcriptMessageKey(message))
+              this.toolGroup(this.unlistedLiveTools(), '')
+              if (this.liveThinking) this.thinkingCard('', this.liveThinking, -1, this.liveThinkingOpen)
+              if (this.liveText) {
+                Column({ space: 8 }) {
+                  this.richChatText(this.liveText, this.workspaceCwd)
+                  if (messageFileChips(this.liveText, this.workspaceCwd).length) {
+                    Flex({ wrap: FlexWrap.Wrap }) {
+                      ForEach(messageFileChips(this.liveText, this.workspaceCwd), (path: string) => {
+                        Column() {
+                          this.fileChip(path, true)
+                        }.margin({ right: 8, bottom: 8 })
+                      }, (path: string) => path)
+                    }.width('100%')
+                  }
+                }.alignItems(HorizontalAlign.Start).width('100%').padding({ top: 10, bottom: 18 })
+              }
+              ForEach(this.queuedSteering.filter((message: QueuedSteering): boolean => message.sessionKey === this.draftKey(this.currentId)),
+                (message: QueuedSteering) => {
+                  Row() {
+                    Column({ space: 6 }) {
+                      if (message.text) Text(message.text).fontSize(16).lineHeight(26)
+                        .copyOption(CopyOptions.LocalDevice).fontColor($r('app.color.pigo_text'))
+                      if (message.imageCount) Text(`图片 × ${message.imageCount}`).fontSize(13).fontColor($r('app.color.pigo_muted'))
+                      ForEach(message.files, (name: string) => {
+                        Text(name).fontSize(13).fontColor($r('app.color.pigo_muted'))
+                          .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+                      })
+                      Text('排队中').fontSize(12).fontColor($r('app.color.pigo_muted'))
+                    }.alignItems(HorizontalAlign.Start).padding(13).constraintSize({ maxWidth: '88%' })
+                      .backgroundColor(this.accentTint()).borderRadius({ topLeft: 17, topRight: 6, bottomLeft: 17, bottomRight: 17 })
+                  }.width('100%').justifyContent(FlexAlign.End).padding({ top: 10, bottom: 4 })
+                }, (message: QueuedSteering) => message.id)
+            }.width('100%').padding({ top: 10, right: 6, bottom: 8 })
+              .onAreaChange((_oldArea: Area, newArea: Area) => {
+                this.positionTranscript(transcriptId, Number(newArea.height));
+              })
+          }.width('100%').height('100%').align(Alignment.TopStart)
+            .scrollBar(BarState.Off)
+            .onTouch((event: TouchEvent) => {
+              // 点击手势会被带 copyOption 的消息文本夺走，改用触摸广播：手指一按下就收键盘。
+              if (event.type === TouchType.Down && this.keyboardHeight > 0) this.dismissKeyboard();
+            })
+            .onWillScroll((_xOffset: number, yOffset: number, _state: ScrollState, source: ScrollSource) => {
+              if (yOffset < -2 && source !== ScrollSource.SCROLLER && source !== ScrollSource.SCROLLER_ANIMATION) {
+                this.transcriptFollow = false;
+              }
+            })
+            .onScrollEdge((side: Edge) => {
+              if (side === Edge.Bottom) this.transcriptFollow = true;
+            })
+            .onAreaChange((oldArea: Area, newArea: Area) => {
+              this.transcriptViewport = Number(newArea.height);
+              if (this.transcriptFollow && (oldArea.width !== newArea.width || oldArea.height !== newArea.height)) {
+                // Wait for the transcript to finish wrapping at the new width before scrolling.
+                setTimeout(() => {
+                  if (this.currentId === transcriptId && this.transcriptFollow) {
+                    this.transcript.scrollTo({ xOffset: 0, yOffset: this.transcriptContentHeight, animation: false });
+                  }
+                }, 0);
+              }
+            })
+        }, (transcriptId: string) => transcriptId)
+        if (!this.transcriptFollow) {
           Button({ type: ButtonType.Normal }) {
-            Image($r('app.media.ic_chevron')).width(22).height(22).fillColor($r('app.color.pigo_text'))
-          }.id('scroll-bottom').width(44).height(44).borderRadius(12).backgroundColor($r('app.color.pigo_control'))
-            .accessibilityText('滚动到最新消息').onClick(() => { this.transcriptFollow = true; this.transcript.scrollEdge(Edge.Bottom); })
-        }.width('100%').justifyContent(FlexAlign.End)
-      }
+            this.headerSymbol($r('sys.symbol.chevron_down'), $r('app.color.pigo_text'), 19)
+          }.id('scroll-bottom').headerAction().margin({ right: 6, bottom: 10 })
+            .shadow({ radius: 10, offsetY: 2, color: this.darkMode ? '#60000000' : '#1F637587' })
+            .accessibilityText('滚动到最新消息')
+            .onClick(() => { this.transcriptFollow = true; this.transcript.scrollEdge(Edge.Bottom); })
+        }
+      }.layoutWeight(1).width('100%')
       if (this.commandPalette && this.commandPaletteActive()) {
         Column({ space: 2 }) {
           if (!this.commandMatches().length) {
@@ -5256,8 +5422,7 @@ struct Index {
   skillPicker() {
     Row({ space: 8 }) {
       Button({ type: ButtonType.Normal }) {
-        Image($r('app.media.ic_chevron')).width(20).height(20).rotate({ angle: 90 })
-          .fillColor($r('app.color.pigo_text'))
+        SymbolGlyph($r('sys.symbol.chevron_left')).fontSize(20).fontColor([$r('app.color.pigo_text')])
       }.width(44).height(44).borderRadius(12).padding(0).backgroundColor(Color.Transparent)
         .accessibilityText('返回添加菜单').onClick(() => { this.showSkillPicker = false; })
       Text('技能').fontSize(20).fontWeight(FontWeight.Bold).fontColor($r('app.color.pigo_text'))
@@ -5292,7 +5457,7 @@ struct Index {
               .onClick(() => { this.pickSkill(row); })
           }, (row: CommandRow) => row.name)
         }.width('100%')
-      }.width('100%').align(Alignment.TopStart)
+      }.width('100%').align(Alignment.TopStart).scrollBar(BarState.Off)
         .constraintSize({ maxHeight: Math.min(320, Math.max(72, this.windowHeight - 180)) })
     }
   }
@@ -5324,8 +5489,7 @@ struct Index {
           Row({ space: 10 }) {
             SymbolGlyph($r('sys.symbol.wand_and_stars')).fontSize(22).fontColor([$r('app.color.pigo_text')])
             Text('技能').fontSize(16).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text')).layoutWeight(1)
-            Image($r('app.media.ic_chevron')).width(18).height(18).rotate({ angle: -90 })
-              .fillColor($r('app.color.pigo_muted'))
+            SymbolGlyph($r('sys.symbol.chevron_right')).fontSize(15).fontColor([$r('app.color.pigo_muted')])
           }.width('100%')
         }.id('composer-skills').width('100%').height(48).padding({ left: 10, right: 10 })
           .borderRadius(12).backgroundColor(Color.Transparent).onClick(() => { this.openSkillPicker(); })
@@ -5354,7 +5518,7 @@ struct Index {
                   }.justifyContent(FlexAlign.Center).width('100%').height('100%')
                 }
                 Button({ type: ButtonType.Circle }) {
-                  Text('×').fontSize(13).fontColor($r('app.color.pigo_text'))
+                  SymbolGlyph($r('sys.symbol.xmark')).fontSize(11).fontColor([$r('app.color.pigo_text')])
                 }.id(`remove-attachment-${index}`).width(26).height(26).backgroundColor($r('app.color.pigo_selected'))
                   .accessibilityText(`移除附件 ${item.name}`)
                   .enabled(!this.busy && !this.pendingSend)
@@ -5386,8 +5550,8 @@ struct Index {
       }
       Row({ space: 6 }) {
         Button({ type: ButtonType.Normal }) {
-          Image(this.voiceMode ? $r('app.media.ic_keyboard') : $r('app.media.ic_mic')).width(22).height(22)
-            .fillColor(this.voiceMode ? this.accent() : $r('app.color.pigo_muted'))
+          SymbolGlyph(this.voiceMode ? $r('sys.symbol.keyboard') : $r('sys.symbol.mic')).fontSize(21)
+            .fontColor([this.voiceMode ? this.accent() : $r('app.color.pigo_muted')])
         }.id('voice-toggle').width(44).height(44).padding(0).backgroundColor(Color.Transparent).borderRadius(12)
           .accessibilityText(this.voiceMode ? '切换到文字输入' : '切换到语音输入')
           .enabled(!!this.currentId && !this.pendingSend && !this.busy && !this.recording && !this.voicePreparing && !this.voiceFinishing)
@@ -5397,16 +5561,20 @@ struct Index {
             Text(this.modelLabel || '选择模型').fontSize(12).fontWeight(FontWeight.Medium)
               .fontColor($r('app.color.pigo_muted')).maxLines(1)
               .textOverflow({ overflow: TextOverflow.Ellipsis }).constraintSize({ maxWidth: '85%' })
-            Image($r('app.media.ic_chevron')).width(12).height(12).fillColor($r('app.color.pigo_muted'))
+            SymbolGlyph($r('sys.symbol.chevron_down')).fontSize(12).fontColor([$r('app.color.pigo_muted')])
           }
-        }.id('model-pill').height(44).padding({ left: 6, right: 4 }).borderRadius(10)
-          .constraintSize({ maxWidth: '45%' }).backgroundColor(Color.Transparent)
+        }.id('model-pill').height(44).padding({ left: 6, right: 6 }).borderRadius(10)
+          .constraintSize({ maxWidth: '48%' }).backgroundColor(Color.Transparent)
           .accessibilityText(this.modelLabel ? `切换模型，当前为${this.modelLabel}` : '切换模型')
           .enabled(this.reachable && !this.busy && !this.openingSession && !!this.currentId && this.idle && !this.queued)
           .onClick(() => { void this.openModelMenu(); })
+          .bindSheet($$this.showModelMenu, this.modelSheet(), {
+            detents: ['60%', SheetSize.LARGE], preferType: SheetType.BOTTOM, dragBar: true, showClose: false,
+            backgroundColor: $r('app.color.pigo_panel'), maskColor: '#66000000'
+          })
         Blank()
         Button({ type: ButtonType.Normal }) {
-          Image($r('app.media.ic_plus')).width(22).height(22).fillColor($r('app.color.pigo_muted'))
+          SymbolGlyph($r('sys.symbol.plus')).fontSize(21).fontColor([$r('app.color.pigo_muted')])
         }.id('attach-image').width(44).height(44).padding(0).backgroundColor(Color.Transparent).borderRadius(12)
           .accessibilityText('添加附件或技能')
           .enabled(!!this.currentId && this.reachable && !this.busy && !this.openingSession && !this.pendingSend &&
@@ -5418,8 +5586,8 @@ struct Index {
           })
         if (this.idle || this.hasDraft()) {
           Button({ type: ButtonType.Normal }) {
-            Image($r('app.media.ic_send')).width(22).height(22)
-              .fillColor(this.canSend() ? this.accentForeground() : $r('app.color.pigo_text'))
+            SymbolGlyph($r('sys.symbol.arrow_up')).fontSize(20)
+              .fontColor([this.canSend() ? this.accentForeground() : $r('app.color.pigo_muted')])
           }.id('send').width(44).height(44).padding(0).borderRadius(13)
             .backgroundColor(this.canSend() ? this.accent() : $r('app.color.pigo_control'))
             .accessibilityText(this.idle ? '发送消息' : '发送消息以引导当前任务').enabled(this.canSend())
@@ -5677,15 +5845,28 @@ struct Index {
   @Builder
   modelSheet() {
     Column({ space: 12 }) {
-      Row({ space: 10 }) {
-        Text('切换模型').fontSize(20).fontWeight(FontWeight.Bold).fontColor($r('app.color.pigo_text')).layoutWeight(1)
-        Button('关闭').chatAction().height(44).fontSize(13)
-          .onClick(() => { this.showModelMenu = false; })
-      }.width('100%')
-      if (!this.idle || this.queued) Text('等待当前任务和队列结束后可切换模型。').fontSize(13).fontColor($r('app.color.pigo_warning')).width('100%')
-      Scroll() {
+      Text('模型与思考').fontSize(20).fontWeight(FontWeight.Bold).fontColor($r('app.color.pigo_text')).width('100%')
+      if (!this.idle || this.queued) {
+        Text('等待当前任务和队列结束后可切换模型。').fontSize(13).fontColor($r('app.color.pigo_warning')).width('100%')
+      }
+      if ((this.currentModelOption()?.levels.length ?? 0) > 1) {
         Column({ space: 6 }) {
-          ForEach(this.models, (model: ModelOption, index: number) => {
+          Text('思考级别').fontSize(13).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_muted')).width('100%')
+          Row({ space: 4 }) {
+            ForEach(this.currentModelOption()?.levels ?? [], (level: string) => {
+              Button(this.thinkingLevelLabel(level), { type: ButtonType.Normal }).chatAction()
+                .layoutWeight(1).height(36).padding(2).borderRadius(10).fontSize(13)
+                .backgroundColor(this.currentLevel === level ? this.accent() : Color.Transparent)
+                .fontColor(this.currentLevel === level ? this.accentForeground() : $r('app.color.pigo_muted'))
+                .enabled(this.reachable && this.idle && !this.queued && !this.busy)
+                .onClick(() => { this.showModelMenu = false; void this.applyThinkingLevelFromMenu(level); })
+            }, (level: string) => level)
+          }.width('100%').padding(4).borderRadius(14).backgroundColor($r('app.color.pigo_control'))
+        }.width('100%')
+      }
+      List({ initialIndex: this.currentModelIndex(), space: 8 }) {
+        ForEach(this.models, (model: ModelOption, index: number) => {
+          ListItem() {
             Button({ type: ButtonType.Normal }) {
               Row({ space: 10 }) {
                 Column({ space: 3 }) {
@@ -5695,46 +5876,65 @@ struct Index {
                     .fontSize(12).fontColor($r('app.color.pigo_muted')).maxLines(1)
                     .textOverflow({ overflow: TextOverflow.Ellipsis })
                 }.layoutWeight(1).alignItems(HorizontalAlign.Start)
-                if (this.isCurrentModel(model)) Text('✓').fontSize(17).fontColor(this.accent())
+                if (this.isCurrentModel(model)) {
+                  SymbolGlyph($r('sys.symbol.checkmark')).fontSize(17).fontColor([this.accent()])
+                }
               }.width('100%')
-            }.id(`model-option-${index}`).width('100%').height(52).padding({ left: 12, right: 12 })
-              .borderRadius(11).backgroundColor(this.isCurrentModel(model) ? this.accentTint() : $r('app.color.pigo_control'))
+            }.id(`model-option-${index}`).width('100%').height(54).padding({ left: 14, right: 14 })
+              .backgroundColor(this.isCurrentModel(model) ? this.accentTint() : $r('app.color.pigo_control'))
+              .border({ width: this.isCurrentModel(model) ? 1 : 0, radius: 12, color: this.accent() })
               .accessibilitySelected(this.isCurrentModel(model))
               .enabled(this.reachable && this.idle && !this.queued && !this.busy)
               .onClick(() => { this.showModelMenu = false; void this.applyModelFromMenu(index); })
-          }, (model: ModelOption) => `${model.provider}-${model.id}`)
-          if (!this.models.length) Text('没有可用模型，请在电脑上检查 Pi CLI 的模型配置。').fontSize(13).width('100%')
-        }.width('100%')
-      }.constraintSize({ maxHeight: Math.min(260, Math.max(96, this.windowHeight - 140)) })
-        .width('100%').align(Alignment.TopStart)
-    }.width('100%').constraintSize({ maxWidth: 560 })
-      .padding({ left: 14, right: 14, top: 14, bottom: this.bottomPad() + 14 })
-      .backgroundColor($r('app.color.pigo_panel')).borderRadius({ topLeft: 28, topRight: 28 })
-      .border({ width: { top: 1 }, color: $r('app.color.pigo_line') })
+          }
+        }, (model: ModelOption) => `${model.provider}-${model.id}`)
+        if (!this.models.length) {
+          ListItem() {
+            Text('没有可用模型，请在电脑上检查 Pi CLI 的模型配置。').fontSize(13)
+              .fontColor($r('app.color.pigo_muted')).width('100%')
+          }
+        }
+      }.layoutWeight(1).width('100%').scrollBar(BarState.Off)
+    }.width('100%').height('100%').constraintSize({ maxWidth: 560 })
+      .padding({ left: 16, right: 16, top: 8, bottom: 20 })
   }
 
   @Builder
   offlineNotice(compact: boolean, narrow: boolean = false) {
     Row({ space: narrow ? 6 : 10 }) {
       if (!narrow) {
-        Text('!').fontSize(20).fontWeight(FontWeight.Bold).fontColor('#1B1B1B')
-          .textAlign(TextAlign.Center).width(25).height(25).borderRadius(13).backgroundColor('#FF9518')
+        SymbolGlyph($r('sys.symbol.exclamationmark_circle')).fontSize(20)
+          .fontColor([$r('app.color.pigo_warning')])
       }
       Column({ space: 4 }) {
         Text(narrow ? '电脑离线' : compact ? '设备已离线，当前为缓存内容' : '电脑设备已离线')
-          .fontSize(compact ? 13 : 17).fontWeight(FontWeight.Medium).fontColor(compact ? $r('app.color.pigo_warning') : $r('app.color.pigo_text'))
+          .fontSize(compact ? 13 : 16).fontWeight(FontWeight.Medium).fontColor(compact ? $r('app.color.pigo_warning') : $r('app.color.pigo_text'))
         if (!compact) Text('请检查电脑与网络连接').fontSize(12).fontColor($r('app.color.pigo_muted'))
       }.layoutWeight(1).alignItems(HorizontalAlign.Start)
       if (!compact) Button('切换').chatAction().height(34).fontSize(13)
         .onClick(() => { if (!this.busy) this.openComputers(); })
-      Button(compact ? '↻' : '重试').chatAction().id(compact ? 'drawer-retry' : 'offline-retry')
-        .height(34).width(narrow ? 40 : undefined).fontSize(compact ? 23 : 13).enabled(!this.busy)
-        .accessibilityText('重试连接')
-        .onClick(() => { this.offlineDismissed = false; this.schedule(0); })
-      if (!compact) Button('×').chatAction().width(26).height(30).fontSize(21)
-        .accessibilityText('关闭离线提示').onClick(() => { this.offlineDismissed = true; })
-    }.width('100%').padding(narrow ? 6 : compact ? 12 : 16).borderRadius(compact ? 9 : 24)
+      if (compact) {
+        Button({ type: ButtonType.Normal }) {
+          SymbolGlyph($r('sys.symbol.arrow_clockwise')).fontSize(16).fontColor([$r('app.color.pigo_warning')])
+        }.id('drawer-retry').width(36).height(34).padding(0).borderRadius(10)
+          .backgroundColor(Color.Transparent).enabled(!this.busy)
+          .accessibilityText('重试连接')
+          .onClick(() => { this.offlineDismissed = false; this.schedule(0); })
+      } else {
+        Button('重试').chatAction().id('offline-retry')
+          .height(34).fontSize(13).enabled(!this.busy)
+          .accessibilityText('重试连接')
+          .onClick(() => { this.offlineDismissed = false; this.schedule(0); })
+      }
+      if (!compact) {
+        Button({ type: ButtonType.Normal }) {
+          SymbolGlyph($r('sys.symbol.xmark')).fontSize(15).fontColor([$r('app.color.pigo_muted')])
+        }.width(34).height(34).padding(0).borderRadius(10).backgroundColor(Color.Transparent)
+          .accessibilityText('关闭离线提示').onClick(() => { this.offlineDismissed = true; })
+      }
+    }.width('100%').padding(narrow ? 8 : compact ? 10 : 14).borderRadius(compact ? 12 : 16)
       .backgroundColor(compact ? $r('app.color.pigo_warning_panel') : $r('app.color.pigo_panel'))
+      .border({ width: compact ? 0 : 1, color: $r('app.color.pigo_line') })
   }
 
   private tabSymbol(tab: string, selected: boolean): Resource {
@@ -5807,6 +6007,7 @@ struct Index {
               this.minePage = '';
             }
             if (tab !== this.activeTab) {
+              this.status = '';
               this.minePage = '';
               this.addingComputer = false;
               this.pairingComputerId = '';
@@ -5825,7 +6026,7 @@ struct Index {
   welcome(inTranscript: boolean = false) {
     Column({ space: 12 }) {
       Stack() {
-        Image($r('app.media.ic_terminal')).width(33).height(33).fillColor(this.accent())
+        SymbolGlyph($r('sys.symbol.code_square')).fontSize(31).fontColor([this.accent()])
       }.width(60).height(60).borderRadius(18).backgroundColor(this.accentTint()).accessibilityLevel('no')
       Text(!this.isPaired || this.loading ? 'Pi Go' : inTranscript ? '开始新任务' : '选择一个任务')
         .fontSize(this.isPaired && !this.loading ? 24 : 36).fontWeight(FontWeight.Bold)
@@ -5887,8 +6088,8 @@ struct Index {
           else void this.requestAction('/open', { id: session.id });
         })
       Button({ type: ButtonType.Normal }) {
-        Image($r('app.media.ic_more')).width(17).height(17).fillColor($r('app.color.pigo_text')).opacity(0.5)
-      }.id(`session-more-${session.id}`).width(this.compactSessionPane() ? 36 : 30).height(40).padding(0)
+        Image($r('app.media.ic_more')).width(16).height(16).fillColor($r('app.color.pigo_muted'))
+      }.id(`session-more-${session.id}`).width(this.compactSessionPane() ? 36 : 32).height(40).padding(0)
         .backgroundColor(Color.Transparent)
         .accessibilityText('任务操作').enabled(this.reachable && !this.busy).bindMenu([
           { value: session.pinned ? '取消置顶' : '置顶', action: () => { void this.updateSessionMeta(session, true); } },
@@ -5917,7 +6118,8 @@ struct Index {
         ForEach(this.standaloneScheduleRuns(),
           (row: RunMessage) => {
             Text(`${row.run.name} · 定时任务运行中`).fontSize(15).fontColor($r('app.color.pigo_text'))
-              .width('100%').padding(12).borderRadius(12).backgroundColor($r('app.color.pigo_panel'))
+              .width('100%').padding(14).borderRadius(16).backgroundColor($r('app.color.pigo_panel'))
+              .border({ width: 1, color: $r('app.color.pigo_line') })
           }, (row: RunMessage) => row.key)
         if (this.reachable && this.allRunningRows().length) {
           ForEach(this.allRunningRows(), (row: RunningRow) => {
@@ -5935,10 +6137,11 @@ struct Index {
                   Text(`${row.id === this.currentId ? '当前 · ' : ''}${this.stateLabel(this.sessionState(row.id))}`)
                     .fontSize(12).fontColor(this.stateColor(this.sessionState(row.id)))
                 }
-                Image($r('app.media.ic_chevron')).width(14).height(14).fillColor($r('app.color.pigo_text')).rotate({ angle: -90 }).opacity(0.6)
+                SymbolGlyph($r('sys.symbol.chevron_right')).fontSize(14).fontColor([$r('app.color.pigo_muted')])
               }.width('100%').padding(14)
             }.id(`running-session-${row.id}`).width('100%').constraintSize({ minHeight: 60 }).padding(0)
-              .borderRadius(12).backgroundColor(row.id === this.currentId ? $r('app.color.pigo_control') : $r('app.color.pigo_panel'))
+              .backgroundColor(row.id === this.currentId ? this.accentTint() : $r('app.color.pigo_panel'))
+              .border({ width: 1, radius: 16, color: row.id === this.currentId ? this.accent() : $r('app.color.pigo_line') })
               .accessibilityText(`${row.name || '后台任务'}，${this.stateLabel(this.sessionState(row.id))}，点击切换查看`)
               .enabled(!this.busy && !this.openingSession && (this.reachable || row.id === this.currentId))
               .onClick(() => {
@@ -5950,14 +6153,15 @@ struct Index {
         } else if (!this.standaloneScheduleRuns().length) {
           Row({ space: 12 }) {
             Stack() {
-              Image(this.reachable ? $r('app.media.ic_pending') : $r('app.media.ic_computer'))
-                .width(22).height(22)
-            }.width(40).height(40).borderRadius(10).backgroundColor($r('app.color.pigo_control'))
+              SymbolGlyph(this.reachable ? $r('sys.symbol.clock') : $r('sys.symbol.computer'))
+                .fontSize(20).fontColor([$r('app.color.pigo_muted')])
+            }.width(40).height(40).borderRadius(12).backgroundColor($r('app.color.pigo_control'))
             Column({ space: 4 }) {
               Text(this.reachable ? '暂无运行中的任务' : '电脑未连接')
-                .fontSize(16).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
+                .fontSize(15).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
             }.layoutWeight(1).alignItems(HorizontalAlign.Start)
-          }.width('100%').padding(14).borderRadius(12).backgroundColor($r('app.color.pigo_panel'))
+          }.width('100%').padding(14).borderRadius(16).backgroundColor($r('app.color.pigo_panel'))
+            .border({ width: 1, color: $r('app.color.pigo_line') })
         }
       }.width('100%').alignItems(HorizontalAlign.Start)
   }
@@ -6009,16 +6213,16 @@ struct Index {
   librarySpace(path: string) {
     Row({ space: 4 }) {
       Row({ space: this.compactSessionPane() ? 4 : 9 }) {
-        Image($r('app.media.ic_folder')).width(18).height(18).fillColor(this.accent())
+        SymbolGlyph($r('sys.symbol.folder')).fontSize(18).fontColor([this.accent()])
         Text(this.workspaceName(path)).fontSize(14).fontWeight(FontWeight.Medium)
           .fontColor($r('app.color.pigo_text'))
           .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).layoutWeight(1)
         if (this.hasWorkspaceDetails && !this.workspaces.some((row: WorkspaceRow): boolean => row.cwd === path)) {
           Text('未登记').fontSize(10).fontColor($r('app.color.pigo_muted'))
         }
-        Image($r('app.media.ic_chevron')).width(this.compactSessionPane() ? 12 : 18)
-          .height(this.compactSessionPane() ? 12 : 18).fillColor($r('app.color.pigo_text'))
-          .rotate({ angle: this.expandedSpaces.includes(path) ? 0 : -90 }).opacity(0.6)
+        SymbolGlyph($r('sys.symbol.chevron_down'))
+          .fontSize(this.compactSessionPane() ? 12 : 14).fontColor([$r('app.color.pigo_muted')])
+          .rotate({ angle: this.expandedSpaces.includes(path) ? 0 : -90 })
       }.id(`space-${path}`).layoutWeight(1).height(44).onClick(() => { this.toggleSpace(path); })
         .bindContextMenu(this.spaceMenu(path, this.epoch), ResponseType.LongPress, { placement: Placement.BottomLeft })
       Button({ type: ButtonType.Normal }) {
@@ -6026,8 +6230,8 @@ struct Index {
       }.id(`space-new-task-${path}`).width(40).height(44).padding(0).borderRadius(10)
         .backgroundColor(Color.Transparent)
         .accessibilityText(`在${this.workspaceName(path)}空间新建任务`)
-        .visibility(this.projects.includes(path) ? Visibility.Visible : Visibility.None)
-        .enabled(!this.busy && !this.openingSession)
+        .visibility(this.projects.includes(path) ? Visibility.Visible : Visibility.Hidden)
+        .enabled(!this.busy && !this.openingSession && this.projects.includes(path))
         .onClick(() => { this.createSpaceTask(path); })
     }.width('100%').padding({ left: this.compactSessionPane() ? 4 : 8 })
   }
@@ -6062,72 +6266,57 @@ struct Index {
       Row({ space: this.compactSessionPane() ? 6 : 10 }) {
         if (this.dockedSessions()) {
           Stack() {
-            Image($r('app.media.ic_computer')).width(20).height(20).fillColor(this.accent())
+            SymbolGlyph($r('sys.symbol.computer')).fontSize(19).fontColor([this.accent()])
           }.width(34).height(34).borderRadius(10).backgroundColor(this.accentTint())
         }
         Button({ type: ButtonType.Normal }) {
           Row({ space: this.dockedSessions() ? 6 : 8 }) {
             if (!this.dockedSessions()) {
-              Image($r('app.media.ic_computer')).width(23).height(23).fillColor($r('app.color.pigo_text'))
+              SymbolGlyph($r('sys.symbol.computer')).fontSize(21).fontColor([this.accent()])
             }
-            Text(this.computerTitle()).fontSize(this.compactSessionPane() ? 14 : this.dockedSessions() ? 17 : 20)
+            Text(this.computerTitle()).fontSize(this.compactSessionPane() ? 14 : this.dockedSessions() ? 17 : 19)
               .fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
               .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
               .layoutWeight(this.dockedSessions() ? 1 : 0)
               .constraintSize({ maxWidth: this.dockedSessions() ? '100%' : '65%' })
-            Image($r('app.media.ic_chevron')).width(14).height(14).fillColor($r('app.color.pigo_muted'))
+            SymbolGlyph($r('sys.symbol.chevron_down')).fontSize(13).fontColor([$r('app.color.pigo_muted')])
           }.width('100%')
         }.id('computers').layoutWeight(1).height(48).padding(0).backgroundColor(Color.Transparent)
           .accessibilityText('切换电脑').enabled(!this.busy).onClick(() => { this.openComputers(); })
         if (!this.dockedSessions()) {
           Button({ type: ButtonType.Normal }) {
-            Image($r('app.media.ic_close')).width(20).height(20).fillColor($r('app.color.pigo_muted'))
+            SymbolGlyph($r('sys.symbol.xmark')).fontSize(18).fontColor([$r('app.color.pigo_muted')])
           }.width(44).height(44).padding(0).backgroundColor(Color.Transparent).accessibilityText('关闭会话抽屉')
             .onClick(() => { this.setDrawer(false); })
         }
       }.width('100%').padding({ left: this.dockedSessions() ? 2 : 10 })
       Button({ type: ButtonType.Normal }) {
-        Row({ space: this.compactSessionPane() ? 6 : 10 }) {
-          Image($r('app.media.ic_compose')).width(19).height(19)
-            .fillColor(this.dockedSessions() ? this.accentForeground() : $r('app.color.pigo_text'))
-          Text('新建会话').fontSize(this.dockedSessions() ? 15 : 16).fontWeight(FontWeight.Medium)
+        Row({ space: this.compactSessionPane() ? 6 : 8 }) {
+          SymbolGlyph($r('sys.symbol.square_and_pencil')).fontSize(18)
+            .fontColor([this.dockedSessions() ? this.accentForeground() : this.accent()])
+          Text('新建会话').fontSize(this.dockedSessions() ? 15 : 15).fontWeight(FontWeight.Medium)
             .fontColor(this.dockedSessions() ? this.accentForeground() : $r('app.color.pigo_text')).maxLines(1)
         }.justifyContent(FlexAlign.Center).width('100%')
-      }.id('drawer-new-task').width('100%').height(this.dockedSessions() ? 44 : 48).padding(0)
+      }.id('drawer-new-task').width('100%').height(44).padding(0)
         .backgroundColor(this.dockedSessions() ? this.accent() : $r('app.color.pigo_panel'))
-        .border({ width: this.dockedSessions() ? 0 : 1, radius: this.dockedSessions() ? 12 : 16,
-          color: $r('app.color.pigo_line') })
+        .border({ width: this.dockedSessions() ? 0 : 1, radius: 12, color: $r('app.color.pigo_line') })
         .enabled(this.reachable && !this.busy && !this.openingSession && this.hostAvailable &&
           (this.projects.length > 0 || this.canCreateWorkspace))
         .bindMenu(this.newTaskOptions())
       if (!this.reachable) this.offlineNotice(true, this.compactSessionPane())
-      if (this.dockedSessions()) {
-        Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.SpaceBetween, alignContent: FlexAlign.SpaceBetween }) {
-          ForEach(SIDEBAR_VIEWS, (view: string) => {
-            Button({ type: ButtonType.Normal }) {
-              Text(this.sessionViewLabel(view))
-                .fontSize(13).fontColor(this.sessionView === view ? this.accent() : $r('app.color.pigo_muted')).maxLines(1)
-                .fontWeight(this.sessionView === view ? FontWeight.Medium : FontWeight.Regular)
-            }.id(`session-view-${view}`).width(this.compactSessionPane() ? '49%' : '24%')
-              .height(36).padding(0).borderRadius(8)
-              .backgroundColor(this.sessionView === view ? this.accentTint() : Color.Transparent)
-              .accessibilitySelected(this.sessionView === view).enabled(!this.busy && !this.sessionLoading && this.reachable)
-              .onClick(() => { this.selectSessionView(view); })
-          }, (view: string) => view)
-        }.width('100%').height(this.compactSessionPane() ? 76 : 36)
-        Divider().color($r('app.color.pigo_line'))
-      } else {
-        Row() {
-          Text(this.sessionViewLabel(this.sessionView)).fontSize(14).fontColor($r('app.color.pigo_muted'))
-            .layoutWeight(1)
+      Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.SpaceBetween, alignContent: FlexAlign.SpaceBetween }) {
+        ForEach(SIDEBAR_VIEWS, (view: string) => {
           Button({ type: ButtonType.Normal }) {
-            Image($r('app.media.ic_menu')).width(20).height(20).fillColor($r('app.color.pigo_muted'))
-          }.id('session-view-menu').width(44).height(36).padding(0).backgroundColor(Color.Transparent)
-            .accessibilityText(`筛选任务，当前为${this.sessionViewLabel(this.sessionView)}`)
-            .enabled(!this.busy && !this.sessionLoading && this.reachable).bindMenu(this.sessionViewOptions())
-        }.width('100%').padding({ left: 12, right: 4 })
-          .margin({ top: this.windowHeight < SHORT_WINDOW_HEIGHT ? 0 : 8 })
-      }
+            Text(this.sessionViewLabel(view))
+              .fontSize(13).fontColor(this.sessionView === view ? this.accentForeground() : $r('app.color.pigo_muted')).maxLines(1)
+              .fontWeight(this.sessionView === view ? FontWeight.Medium : FontWeight.Regular)
+          }.id(`session-view-${view}`).width(this.compactSessionPane() ? '49%' : '24%')
+            .height(34).padding(0).borderRadius(9)
+            .backgroundColor(this.sessionView === view ? this.accent() : Color.Transparent)
+            .accessibilitySelected(this.sessionView === view).enabled(!this.busy && !this.sessionLoading && this.reachable)
+            .onClick(() => { this.selectSessionView(view); })
+        }, (view: string) => view)
+      }.width('100%').padding(4).borderRadius(12).backgroundColor($r('app.color.pigo_control'))
       if (this.sessionLoading && (!this.sessionCatalogLoaded || this.loadedView !== this.sessionView)) {
         Text('正在加载任务…').fontSize(13).fontColor($r('app.color.pigo_muted')).width('100%')
       } else if (this.sessionCatalogFailed) {
@@ -6135,9 +6324,12 @@ struct Index {
           .enabled(this.reachable && !this.busy && !this.openingSession).onClick(() => { void this.loadSessions(); })
       }
       this.sessionLibrary()
-      Text(this.base.split('://')[1] || '').id('active-computer').fontSize(11).fontColor($r('app.color.pigo_muted'))
-        .width('100%').padding({ left: this.compactSessionPane() ? 4 : 12 })
-        .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+      Row({ space: 6 }) {
+        Blank().width(6).height(6).borderRadius(3)
+          .backgroundColor(this.reachable ? $r('app.color.pigo_success') : $r('app.color.pigo_warning'))
+        Text(this.base.split('://')[1] || '').id('active-computer').fontSize(11).fontColor($r('app.color.pigo_muted'))
+          .layoutWeight(1).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+      }.width('100%').padding({ left: this.compactSessionPane() ? 4 : 10 })
     }.id('session-sidebar').width(this.dockedSessions() ? this.sessionPaneWidth() : this.drawerWidth()).height('100%')
       .padding({ left: this.compactSessionPane() ? 8 : 12, right: 12,
         top: this.statusBarHeight + (this.compactSessionPane() ? 8 : 12), bottom: this.bottomPad() + 18 })
@@ -6174,38 +6366,58 @@ struct Index {
       .onDisAppear(() => { this.sessionPaneDragging = false; })
   }
 
+  private showRootBottomTabs(): boolean {
+    if (this.loading) return false;
+    if (this.activeTab === 'mine' && this.minePage) return false;
+    if (this.showSettings) return false;
+    if (!this.keyboardHeight) return true;
+    return this.isPaired && this.activeTab !== 'mine' && (this.activeTab !== 'tasks' || this.showFiles);
+  }
+
   @Builder
   statusNotice() {
-    Text(this.status).fontColor($r('app.color.pigo_warning')).fontSize(13).width('100%')
-      .padding(12).backgroundColor($r('app.color.pigo_warning_panel')).borderRadius(12)
+    Row({ space: 8 }) {
+      Text(this.status).fontColor($r('app.color.pigo_warning')).fontSize(13).layoutWeight(1)
+      Button({ type: ButtonType.Normal }) {
+        SymbolGlyph($r('sys.symbol.xmark')).fontSize(14).fontColor([$r('app.color.pigo_warning')])
+      }.width(30).height(30).padding(0).borderRadius(8).backgroundColor(Color.Transparent)
+        .accessibilityText('关闭提示').onClick(() => { this.status = ''; })
+    }.width('100%').padding({ left: 12, right: 6, top: 8, bottom: 8 })
+      .backgroundColor($r('app.color.pigo_warning_panel')).borderRadius(12)
   }
 
   @Builder
   textPreviewPage(preview: ReceivedFilePreview) {
     Column({ space: 12 }) {
       Row({ space: 12 }) {
-        Text(preview.name).id('text-preview-title').layoutWeight(1)
-          .fontSize(18).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
-          .maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis })
-        Button('关闭').chatAction().id('text-preview-close').enabled(!this.savingPreview)
+        Button({ type: ButtonType.Normal }) {
+          this.headerSymbol($r('sys.symbol.chevron_left'), $r('app.color.pigo_text'), 21)
+        }.id('text-preview-close').headerAction().accessibilityText('返回').enabled(!this.savingPreview)
           .onClick(() => { this.textFilePreview = undefined; })
-      }.width('100%')
-      Row({ space: 8 }) {
-        if (preview.version && !this.editingPath) {
-          Button('编辑').chatAction().id('preview-edit').enabled(!this.busy && !this.savingPreview)
-            .onClick(() => { this.editPreview(preview); })
-        }
-        if (preview.localPath || preview.text !== undefined) {
-          Button(this.savingPreview ? '正在保存…' : '保存到本机').chatAction().id('preview-save-local')
-            .enabled(!this.savingPreview).onClick(() => { void this.savePreviewLocally(preview); })
-        }
-        if (preview.systemUri) {
-          Button('系统预览').chatAction().enabled(!this.savingPreview)
-            .onClick(() => { void this.reopenSystemPreview(preview); })
-        }
-      }.width('100%')
+        Text(preview.name).id('text-preview-title').layoutWeight(1)
+          .fontSize(19).fontWeight(FontWeight.Bold).fontColor($r('app.color.pigo_text'))
+          .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+      }.width('100%').height(this.headerHeight())
+        .border({ width: { bottom: 1 }, color: $r('app.color.pigo_line') })
+      if ((preview.version && !this.editingPath) || preview.localPath || preview.text !== undefined || preview.systemUri) {
+        Row({ space: 8 }) {
+          if (preview.version && !this.editingPath) {
+            Button('编辑').chatAction().id('preview-edit').height(38).enabled(!this.busy && !this.savingPreview)
+              .backgroundColor(this.accent()).fontColor(this.accentForeground())
+              .onClick(() => { this.editPreview(preview); })
+          }
+          if (preview.localPath || preview.text !== undefined) {
+            Button(this.savingPreview ? '正在保存…' : '保存到本机').chatAction().id('preview-save-local').height(38)
+              .enabled(!this.savingPreview).onClick(() => { void this.savePreviewLocally(preview); })
+          }
+          if (preview.systemUri) {
+            Button('系统预览').chatAction().height(38).enabled(!this.savingPreview)
+              .onClick(() => { void this.reopenSystemPreview(preview); })
+          }
+        }.width('100%')
+      }
       if (this.previewNotice) {
-        Text(this.previewNotice).id('preview-notice').fontSize(13).fontColor($r('app.color.pigo_text')).width('100%')
+        Text(this.previewNotice).id('preview-notice').fontSize(13).fontColor($r('app.color.pigo_warning')).width('100%')
       }
       if (preview.imageUri) {
         Image(preview.imageUri).id('image-preview').width('100%').layoutWeight(1).objectFit(ImageFit.Contain)
@@ -6225,7 +6437,7 @@ struct Index {
                 .width('100%').wordBreak(WordBreak.BREAK_ALL).copyOption(CopyOptions.LocalDevice)
             }
           }.width('100%').alignItems(HorizontalAlign.Start).padding({ bottom: 16 })
-        }.id('text-preview-body').scrollable(ScrollDirection.Vertical).scrollBar(BarState.Auto)
+        }.id('text-preview-body').scrollable(ScrollDirection.Vertical).scrollBar(BarState.Off)
           .layoutWeight(1).width('100%').align(Alignment.TopStart)
       }
       if (preview.nextOffset !== undefined || (preview.offset ?? 0) > 0) {
@@ -6240,16 +6452,20 @@ struct Index {
       }
     }.id('text-file-preview').width('100%').constraintSize({ maxWidth: preview.imageUri ? 1024 : 840 })
       .height('100%').alignItems(HorizontalAlign.Start)
-      .padding({ left: 16, right: 16, top: this.statusBarHeight + 12, bottom: this.bottomPad() + 4 })
+      .padding({ left: 16, right: 16, top: this.statusBarHeight + 8, bottom: this.bottomPad() + 8 })
   }
 
   @Builder
   markdownTableReaderPage(reader: MarkdownTableReader) {
     Column({ space: 8 }) {
       Row({ space: 12 }) {
-        Text('表格').fontSize(18).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text')).layoutWeight(1)
-        Button('退出横屏').chatAction().id('markdown-exit-landscape').onClick(() => { this.closeMarkdownTableReader(); })
-      }.width('100%')
+        Button({ type: ButtonType.Normal }) {
+          this.headerSymbol($r('sys.symbol.chevron_left'), $r('app.color.pigo_text'), 21)
+        }.id('markdown-exit-landscape').headerAction().accessibilityText('退出横屏')
+          .onClick(() => { this.closeMarkdownTableReader(); })
+        Text('表格').fontSize(19).fontWeight(FontWeight.Bold).fontColor($r('app.color.pigo_text')).layoutWeight(1)
+      }.width('100%').height(this.headerHeight())
+        .border({ width: { bottom: 1 }, color: $r('app.color.pigo_line') })
       if (this.markdownRotationUnavailable) {
         Text('当前窗口无法自动横屏，可左右滑动表格。').fontSize(13).fontColor($r('app.color.pigo_muted')).width('100%')
       }
@@ -6257,9 +6473,9 @@ struct Index {
         Column() {
           this.richChatText(reader.source, reader.cwd, reader.documentPath, false)
         }.width('100%')
-      }.width('100%').layoutWeight(1).align(Alignment.TopStart)
+      }.width('100%').layoutWeight(1).align(Alignment.TopStart).scrollBar(BarState.Off)
     }.width('100%').height('100%').padding({
-      left: 16, right: 16, top: this.statusBarHeight + 4, bottom: this.bottomPad()
+      left: 16, right: 16, top: this.statusBarHeight + 8, bottom: this.bottomPad() + 4
     }).backgroundColor($r('app.color.launch_background')).hitTestBehavior(HitTestMode.BLOCK_HIERARCHY)
   }
 
@@ -6278,9 +6494,7 @@ struct Index {
         }
         if (!this.loading) {
           if (this.status) this.statusNotice()
-          if (!this.keyboardHeight) this.bottomTabs()
-          else if (this.isPaired && this.activeTab !== 'mine' &&
-            (this.activeTab !== 'tasks' || this.showSettings || this.showFiles)) this.bottomTabs()
+          if (this.showRootBottomTabs()) this.bottomTabs()
         }
       }.width('100%').height('100%').alignItems(HorizontalAlign.Start)
         .padding({ top: this.loading || (!this.isPaired && this.activeTab !== 'mine') ? 0 : 8,
@@ -6301,6 +6515,7 @@ struct Index {
         Text('新空间').fontSize(19).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
         TextInput({ text: this.newSpaceName, placeholder: '空间名称' }).id('new-space-name').width('100%')
           .backgroundColor($r('app.color.pigo_control')).fontColor($r('app.color.pigo_text'))
+          .placeholderColor($r('app.color.pigo_muted'))
           .maxLength(80).enterKeyType(EnterKeyType.Done).enabled(!this.busy)
           .onChange((value: string) => { this.newSpaceName = value; this.newSpaceError = ''; })
           .onSubmit(() => { if (this.newSpaceName.trim()) void this.createWorkspaceTask(); })
@@ -6324,10 +6539,11 @@ struct Index {
   runCompletionBanner(notice: RunNotice) {
     Row() {
       Row({ space: 12 }) {
-        Text(notice.stopped ? '■' : '✓').fontSize(18).fontWeight(FontWeight.Medium)
-          .fontColor(this.stateColor(notice.stopped ? 'waiting' : 'streaming'))
-          .width(32).height(32).borderRadius(16).textAlign(TextAlign.Center)
-          .backgroundColor($r('app.color.pigo_control')).accessibilityLevel('no')
+        Stack() {
+          SymbolGlyph(notice.stopped ? $r('sys.symbol.minus_circle') : $r('sys.symbol.checkmark_circle'))
+            .fontSize(20).fontColor([this.stateColor(notice.stopped ? 'waiting' : 'streaming')])
+        }.width(32).height(32).borderRadius(16).backgroundColor($r('app.color.pigo_control'))
+          .accessibilityLevel('no')
         Column({ space: 2 }) {
           Text(notice.stopped ? '运行已停止' : '运行已结束')
             .fontSize(15).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
@@ -6335,7 +6551,7 @@ struct Index {
             .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
         }.layoutWeight(1).alignItems(HorizontalAlign.Start)
         Button({ type: ButtonType.Normal }) {
-          Image($r('app.media.ic_close')).width(16).height(16).fillColor($r('app.color.pigo_muted'))
+          SymbolGlyph($r('sys.symbol.xmark')).fontSize(15).fontColor([$r('app.color.pigo_muted')])
         }.id('run-completion-dismiss').width(44).height(44).padding(0).backgroundColor(Color.Transparent)
           .accessibilityText('关闭运行通知').onClick(() => { this.advanceRunNotice(); })
       }.id('run-completion-banner').width('100%').constraintSize({ maxWidth: 440 })
@@ -6357,8 +6573,14 @@ struct Index {
     this.getUIContext().showAlertDialog({
       title: '删除定时任务',
       message: `删除「${job.name}」？已生成的运行记录和会话会保留。`,
-      primaryButton: { value: '取消', action: () => {} },
-      secondaryButton: { value: '删除', action: () => { void this.updateSchedule('delete', job); } }
+      autoCancel: true,
+      alignment: DialogAlignment.Bottom,
+      primaryButton: { value: '取消', fontColor: $r('app.color.pigo_muted'), action: () => {} },
+      secondaryButton: {
+        value: '删除',
+        fontColor: $r('app.color.pigo_error'),
+        action: () => { void this.updateSchedule('delete', job); }
+      }
     });
   }
 
@@ -6375,13 +6597,67 @@ struct Index {
     return options;
   }
 
+  private openScheduleTimePicker(): void {
+    this.dismissKeyboard();
+    if (this.scheduleKind === 'once') {
+      const parsed = parseScheduleTime(this.scheduleWhen.trim());
+      const selected = parsed > 0 ? new Date(parsed) : new Date(Date.now() + 120_000);
+      this.getUIContext().showDatePickerDialog({
+        start: new Date(Date.now() - 86_400_000),
+        end: new Date(Date.now() + 5 * 365 * 86_400_000),
+        selected: selected,
+        showTime: true,
+        useMilitaryTime: true,
+        onDateAccept: (value: Date) => {
+          this.scheduleWhen = scheduleTime(value.getTime());
+        }
+      });
+    } else if (this.scheduleKind === 'daily') {
+      const selected = new Date();
+      const match = /^(\d{1,2}):(\d{2})$/.exec(this.scheduleWhen.trim());
+      if (match) {
+        selected.setHours(Math.min(23, Number(match[1])), Math.min(59, Number(match[2])), 0, 0);
+      } else {
+        selected.setHours(18, 0, 0, 0);
+      }
+      this.getUIContext().showTimePickerDialog({
+        selected: selected,
+        useMilitaryTime: true,
+        onAccept: (value: TimePickerResult) => {
+          const hh = String(value.hour).padStart(2, '0');
+          const mm = String(value.minute).padStart(2, '0');
+          this.scheduleWhen = `${hh}:${mm}`;
+        }
+      });
+    }
+  }
+
+  private scheduleStatusSymbol(status: string): Resource {
+    if (status === 'succeeded') return $r('sys.symbol.checkmark_circle');
+    if (status === 'failed' || status === 'interrupted') return $r('sys.symbol.exclamationmark_circle');
+    return $r('sys.symbol.clock');
+  }
+
+  private scheduleStatusColor(status: string): Resource {
+    if (status === 'succeeded') return $r('app.color.pigo_success');
+    if (status === 'failed' || status === 'interrupted') return $r('app.color.pigo_error');
+    return $r('app.color.pigo_warning');
+  }
+
+  private scheduleStatusPanel(status: string): Resource {
+    if (status === 'succeeded') return $r('app.color.pigo_control');
+    if (status === 'failed' || status === 'interrupted') return $r('app.color.pigo_error_panel');
+    return $r('app.color.pigo_warning_panel');
+  }
+
   @Builder
   scheduleInboxButton() {
     Button({ type: ButtonType.Normal }) {
       Stack({ alignContent: Alignment.TopEnd }) {
-        this.headerIcon($r('app.media.ic_inbox'), $r('app.color.pigo_text'))
+        this.headerSymbol($r('sys.symbol.inbox'), $r('app.color.pigo_text'), 19)
         if (this.scheduleMessages.some((item: RunMessage): boolean => item.unread)) {
-          Blank().width(7).height(7).borderRadius(4).backgroundColor(this.accent())
+          Blank().width(8).height(8).borderRadius(4).backgroundColor(this.accent())
+            .margin({ top: 4, right: 4 })
         }
       }
     }.id('schedule-inbox').headerAction().accessibilityText(this.scheduleMessages.some((item: RunMessage): boolean =>
@@ -6393,9 +6669,10 @@ struct Index {
   scheduledMessageRow(message: RunMessage) {
     Button({ type: ButtonType.Normal }) {
       Row({ space: 12 }) {
-        Text(message.run.status === 'succeeded' ? '✓' : '·').fontSize(20)
-          .fontColor(message.run.status === 'succeeded' ? $r('app.color.pigo_success') : $r('app.color.pigo_warning'))
-          .textAlign(TextAlign.Center).width(32).height(32).borderRadius(10).backgroundColor($r('app.color.pigo_control'))
+        Stack() {
+          SymbolGlyph(this.scheduleStatusSymbol(message.run.status)).fontSize(19)
+            .fontColor([this.scheduleStatusColor(message.run.status)])
+        }.width(36).height(36).borderRadius(10).backgroundColor(this.scheduleStatusPanel(message.run.status))
         Column({ space: 3 }) {
           Text(message.run.name).fontSize(16).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
             .maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -6404,10 +6681,11 @@ struct Index {
           Text(scheduleTime(message.run.finishedAt ?? message.run.scheduledAt)).fontSize(12).fontColor($r('app.color.pigo_muted'))
         }.layoutWeight(1).alignItems(HorizontalAlign.Start)
         if (message.unread) Blank().width(7).height(7).borderRadius(4).backgroundColor(this.accent())
-        Image($r('app.media.ic_chevron')).width(14).height(14).rotate({ angle: -90 }).fillColor($r('app.color.pigo_muted'))
+        SymbolGlyph($r('sys.symbol.chevron_right')).fontSize(14).fontColor([$r('app.color.pigo_muted')])
       }.width('100%').padding(12)
-    }.id(`schedule-message-${message.run.id}`).width('100%').padding(0).borderRadius(14)
-      .backgroundColor($r('app.color.pigo_panel')).onClick(() => { this.showScheduleDetail(message); })
+    }.id(`schedule-message-${message.run.id}`).width('100%').padding(0)
+      .backgroundColor($r('app.color.pigo_panel')).border({ width: 1, radius: 16, color: $r('app.color.pigo_line') })
+      .onClick(() => { this.showScheduleDetail(message); })
   }
 
   @Builder
@@ -6430,7 +6708,7 @@ struct Index {
         }
       } else if (!this.scheduleMessages.some((message: RunMessage): boolean => !message.dismissed)) {
         ListItem() {
-          Text('暂无定时任务消息').fontColor($r('app.color.pigo_muted'))
+          Text('暂无定时任务消息').fontSize(14).fontColor($r('app.color.pigo_muted'))
         }
       }
       ForEach(this.scheduleMessages.filter((message: RunMessage): boolean => !message.dismissed), (message: RunMessage) => {
@@ -6445,40 +6723,71 @@ struct Index {
   scheduleEditor() {
     Column({ space: 12 }) {
       Text('工作区').fontSize(13).fontColor($r('app.color.pigo_muted'))
-      Button(this.scheduleCwd ? this.workspaceName(this.scheduleCwd) : '选择已共享工作区')
-        .chatAction().enabled(!this.scheduleEditing && this.projects.length > 0)
+      Button({ type: ButtonType.Normal }) {
+        Row({ space: 8 }) {
+          SymbolGlyph($r('sys.symbol.folder')).fontSize(17).fontColor([this.accent()])
+          Text(this.scheduleCwd ? this.workspaceName(this.scheduleCwd) : '选择已共享工作区')
+            .fontSize(15).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
+            .layoutWeight(1).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+          SymbolGlyph($r('sys.symbol.chevron_down')).fontSize(14).fontColor([$r('app.color.pigo_muted')])
+        }.width('100%').padding({ left: 14, right: 14 })
+      }.width('100%').height(44).padding(0).borderRadius(12)
+        .backgroundColor($r('app.color.pigo_control'))
+        .enabled(!this.scheduleEditing && this.projects.length > 0)
         .bindMenu(this.projects.map((cwd: string): MenuElement => ({
           value: this.workspaceName(cwd), action: () => { this.scheduleCwd = cwd; }
         })))
       Text('名称').fontSize(13).fontColor($r('app.color.pigo_muted'))
       TextInput({ text: this.scheduleName, placeholder: '例如 每日汇总' }).id('schedule-name').maxLength(80)
+        .backgroundColor($r('app.color.pigo_control')).fontColor($r('app.color.pigo_text'))
+        .placeholderColor($r('app.color.pigo_muted'))
         .onChange((value: string) => { this.scheduleName = value; })
       Text('让 Pi 执行什么').fontSize(13).fontColor($r('app.color.pigo_muted'))
       TextArea({ text: this.schedulePrompt, placeholder: '汇总今天的工作区变更' }).id('schedule-prompt').maxLength(1600).height(112)
+        .backgroundColor($r('app.color.pigo_control')).fontColor($r('app.color.pigo_text'))
+        .placeholderColor($r('app.color.pigo_muted'))
         .onChange((value: string) => { this.schedulePrompt = value; })
-      Row({ space: 8 }) {
+      Row({ space: 4 }) {
         ForEach(['once', 'daily', 'interval'], (kind: string) => {
-          Button(kind === 'once' ? '指定时间' : kind === 'daily' ? '每天' : '固定间隔').chatAction()
-            .id(`schedule-kind-${kind}`).layoutWeight(1)
+          Button(kind === 'once' ? '指定时间' : kind === 'daily' ? '每天' : '固定间隔', { type: ButtonType.Normal }).chatAction()
+            .id(`schedule-kind-${kind}`).layoutWeight(1).height(38).borderRadius(10)
             .accessibilitySelected(this.scheduleKind === kind)
-            .backgroundColor(this.scheduleKind === kind ? this.accentTint() : $r('app.color.pigo_panel'))
+            .backgroundColor(this.scheduleKind === kind ? this.accent() : Color.Transparent)
+            .fontColor(this.scheduleKind === kind ? this.accentForeground() : $r('app.color.pigo_muted'))
             .onClick(() => {
               if (this.scheduleKind === kind) return;
               this.scheduleKind = kind;
               this.scheduleWhen = kind === 'once' ? scheduleTime(Date.now() + 120_000) : kind === 'daily' ? '18:00' : '60';
             })
         }, (kind: string) => kind)
-      }.width('100%')
+      }.width('100%').padding(4).borderRadius(14).backgroundColor($r('app.color.pigo_control'))
       Text(this.scheduleKind === 'once' ? '执行时间（手机时区）' : this.scheduleKind === 'daily' ?
         `每天执行时间（${this.scheduleZone || '电脑时区'}）` : '每隔多少分钟执行')
         .fontSize(13).fontColor($r('app.color.pigo_muted'))
-      TextInput({ text: this.scheduleWhen, placeholder: this.scheduleKind === 'once' ? 'YYYY-MM-DD HH:mm' :
-        this.scheduleKind === 'daily' ? 'HH:mm' : '分钟' }).maxLength(16)
-        .onChange((value: string) => { this.scheduleWhen = value; })
+      Row({ space: 8 }) {
+        TextInput({ text: this.scheduleWhen, placeholder: this.scheduleKind === 'once' ? 'YYYY-MM-DD HH:mm' :
+          this.scheduleKind === 'daily' ? 'HH:mm' : '分钟' }).maxLength(16).layoutWeight(1)
+          .backgroundColor($r('app.color.pigo_control')).fontColor($r('app.color.pigo_text'))
+          .placeholderColor($r('app.color.pigo_muted'))
+          .onChange((value: string) => { this.scheduleWhen = value; })
+        if (this.scheduleKind !== 'interval') {
+          Button({ type: ButtonType.Normal }) {
+            SymbolGlyph(this.scheduleKind === 'once' ? $r('sys.symbol.calendar') : $r('sys.symbol.clock'))
+              .fontSize(19).fontColor([this.accent()])
+          }.width(44).height(40).padding(0).borderRadius(12)
+            .backgroundColor(this.accentTint())
+            .accessibilityText(this.scheduleKind === 'once' ? '选择日期与时间' : '选择时间')
+            .onClick(() => { this.openScheduleTimePicker(); })
+        }
+      }.width('100%')
       Text('错过后可补跑的分钟数，0 表示跳过').fontSize(13).fontColor($r('app.color.pigo_muted'))
       TextInput({ text: this.scheduleCatchUp, placeholder: '0' }).type(InputType.Number).maxLength(4)
+        .backgroundColor($r('app.color.pigo_control')).fontColor($r('app.color.pigo_text'))
+        .placeholderColor($r('app.color.pigo_muted'))
         .onChange((value: string) => { this.scheduleCatchUp = value; })
-      Button(this.scheduleSaving ? '等待电脑确认…' : '保存到电脑').chatAction().id('schedule-save').width('100%')
+      Button(this.scheduleSaving ? '等待电脑确认…' : '保存到电脑').chatAction().id('schedule-save')
+        .width('100%').height(46)
+        .backgroundColor(this.accent()).fontColor(this.accentForeground())
         .enabled(!this.scheduleSaving).onClick(() => {
           void this.updateSchedule(this.scheduleEditing ? 'edit' : 'create', this.scheduleEditing);
         })
@@ -6489,13 +6798,15 @@ struct Index {
   scheduledRunDetail(message: RunMessage) {
     Column({ space: 12 }) {
       Text(message.run.name).fontSize(24).fontWeight(FontWeight.Bold).fontColor($r('app.color.pigo_text'))
-      Text(`${message.computer} · ${scheduleRunStatus(message.run.status)}`).fontSize(15).fontColor(this.accent())
+      Text(`${message.computer} · ${scheduleRunStatus(message.run.status)}`).fontSize(15)
+        .fontColor(this.scheduleStatusColor(message.run.status))
       Column({ space: 8 }) {
         Text(`工作区 · ${message.run.cwd.split('/').pop() || message.run.cwd}`).fontSize(14).fontColor($r('app.color.pigo_text'))
         Text(`计划 · ${scheduleTime(message.run.scheduledAt)}`).fontSize(14).fontColor($r('app.color.pigo_text'))
         if (message.run.startedAt) Text(`开始 · ${scheduleTime(message.run.startedAt)}`).fontSize(14).fontColor($r('app.color.pigo_text'))
         if (message.run.finishedAt) Text(`结束 · ${scheduleTime(message.run.finishedAt)}`).fontSize(14).fontColor($r('app.color.pigo_text'))
-      }.width('100%').alignItems(HorizontalAlign.Start).padding(14).borderRadius(12).backgroundColor($r('app.color.pigo_panel'))
+      }.width('100%').alignItems(HorizontalAlign.Start).padding(14).borderRadius(16)
+        .backgroundColor($r('app.color.pigo_panel')).border({ width: 1, color: $r('app.color.pigo_line') })
       if (message.run.reason) Text(scheduleRunReason(message.run.reason)).fontSize(14).fontColor($r('app.color.pigo_muted'))
       if ((message.run.coalesced ?? 0) > 0) {
         Text(`此前还有 ${message.run.coalesced} 次到期，已合并处理。`).fontSize(14).fontColor($r('app.color.pigo_muted'))
@@ -6503,7 +6814,8 @@ struct Index {
       if (message.run.summary) {
         Text('运行结果').fontSize(16).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
         Text(message.run.summary).fontSize(15).copyOption(CopyOptions.LocalDevice).fontColor($r('app.color.pigo_text'))
-          .width('100%').padding(14).borderRadius(12).backgroundColor($r('app.color.pigo_panel'))
+          .width('100%').padding(14).borderRadius(16).backgroundColor($r('app.color.pigo_panel'))
+          .border({ width: 1, color: $r('app.color.pigo_line') })
       }
     }.width('100%').alignItems(HorizontalAlign.Start)
   }
@@ -6514,22 +6826,27 @@ struct Index {
       Row({ space: 8 }) {
         Text('定时任务').layoutWeight(1).fontSize(17).fontWeight(FontWeight.Bold)
           .fontColor($r('app.color.pigo_text'))
-        Button('刷新').chatAction().id('schedule-refresh').enabled(!this.scheduleSaving && !this.scheduleLoading)
+        Button({ type: ButtonType.Normal }) {
+          SymbolGlyph($r('sys.symbol.arrow_clockwise')).fontSize(17).fontColor([$r('app.color.pigo_muted')])
+        }.id('schedule-refresh').width(36).height(36).padding(0).borderRadius(10)
+          .backgroundColor($r('app.color.pigo_control')).accessibilityText('刷新定时任务')
+          .enabled(!this.scheduleSaving && !this.scheduleLoading)
           .onClick(() => { void this.loadScheduleJobs(); })
       }.width('100%')
       Row({ space: 8 }) {
-        Button('新建定时任务').chatAction().id('schedule-create')
+        Button('新建定时任务').chatAction().id('schedule-create').height(42)
+          .backgroundColor(this.accent()).fontColor(this.accentForeground())
           .enabled(this.reachable && this.projects.length > 0 && !this.scheduleLoading &&
             !this.scheduleSaving && !this.scheduleListError).onClick(() => { this.editSchedule(); })
-        Button('运行历史').chatAction().id('schedule-history')
+        Button('运行历史').chatAction().id('schedule-history').height(42)
           .onClick(() => { this.scheduleError = ''; this.schedulePage = 'history'; })
       }.width('100%')
-      if (this.scheduleLoading) Text('正在读取电脑上的计划…').fontColor($r('app.color.pigo_muted'))
+      if (this.scheduleLoading) Text('正在读取电脑上的计划…').fontSize(14).fontColor($r('app.color.pigo_muted'))
       if (this.scheduleListError) Text(this.scheduleListError).fontSize(14).fontColor($r('app.color.pigo_error'))
       else if (!this.reachable && this.scheduleJobs.length) {
         Text('显示上次连接时的定时计划').fontSize(13).fontColor($r('app.color.pigo_muted'))
       } else if (this.reachable && !this.scheduleLoading && !this.scheduleJobs.length) {
-        Text(this.projects.length ? '还没有定时任务' : '共享工作区后可创建定时任务').fontColor($r('app.color.pigo_muted'))
+        Text(this.projects.length ? '还没有定时任务' : '共享工作区后可创建定时任务').fontSize(14).fontColor($r('app.color.pigo_muted'))
       }
       ForEach(this.scheduleJobs, (job: ScheduleJob) => {
         Row({ space: 8 }) {
@@ -6539,9 +6856,13 @@ struct Index {
               job.nextAt === null ? '已结束' : `下次 ${scheduleTime(job.nextAt)}`}`)
               .fontSize(13).fontColor($r('app.color.pigo_muted'))
           }.layoutWeight(1).alignItems(HorizontalAlign.Start)
-          Button('操作').chatAction().id(`schedule-operations-${job.id}`)
+          Button({ type: ButtonType.Normal }) {
+            Image($r('app.media.ic_more')).width(18).height(18).fillColor($r('app.color.pigo_muted'))
+          }.id(`schedule-operations-${job.id}`).width(40).height(40).padding(0).borderRadius(10)
+            .backgroundColor(Color.Transparent).accessibilityText('定时任务操作')
             .enabled(this.reachable && !this.scheduleSaving && !this.scheduleLoading).bindMenu(this.scheduleJobMenu(job))
-        }.width('100%').padding(12).borderRadius(12).backgroundColor($r('app.color.pigo_panel'))
+        }.width('100%').padding({ left: 14, right: 6, top: 12, bottom: 12 }).borderRadius(16)
+          .backgroundColor($r('app.color.pigo_panel')).border({ width: 1, color: $r('app.color.pigo_line') })
       }, (job: ScheduleJob) => `${job.id}:${job.version}:${job.nextAt}`)
     }.width('100%').alignItems(HorizontalAlign.Start)
   }
@@ -6549,39 +6870,44 @@ struct Index {
   @Builder
   scheduleOverlay() {
     Column({ space: 10 }) {
-      Row({ space: 8 }) {
-        Button('返回').chatAction().enabled(!this.scheduleSaving).onClick(() => { this.backFromSchedule(); })
+      Row({ space: 12 }) {
+        Button({ type: ButtonType.Normal }) {
+          this.headerSymbol($r('sys.symbol.chevron_left'), $r('app.color.pigo_text'), 21)
+        }.headerAction().accessibilityText('返回').enabled(!this.scheduleSaving)
+          .onClick(() => { this.backFromSchedule(); })
         Text(this.schedulePage === 'inbox' ? '收件箱' : this.schedulePage === 'detail' ? '运行详情' :
           this.schedulePage === 'editor' ? (this.scheduleEditing ? '编辑定时任务' : '新建定时任务') : '运行历史')
-          .layoutWeight(1).fontSize(19).fontWeight(FontWeight.Bold).fontColor($r('app.color.pigo_text'))
-      }.width('100%')
+          .layoutWeight(1).fontSize(20).fontWeight(FontWeight.Bold).fontColor($r('app.color.pigo_text'))
+      }.width('100%').height(this.headerHeight())
+        .border({ width: { bottom: 1 }, color: $r('app.color.pigo_line') })
       if (this.schedulePage === 'inbox') {
         this.scheduleInboxList()
       } else {
         Scroll() {
-        Column({ space: 12 }) {
-          if (this.scheduleError) Text(this.scheduleError).fontSize(14).fontColor($r('app.color.pigo_error'))
-          if (this.schedulePage === 'detail' && this.scheduleDetail) {
-            this.scheduledRunDetail(this.scheduleDetail)
-          } else if (this.schedulePage === 'editor') {
-            this.scheduleEditor()
-          } else if (this.schedulePage === 'history') {
-            Text(this.computerTitle()).fontSize(13).fontColor($r('app.color.pigo_muted'))
-            if (!this.scheduleMessages.some((item: RunMessage): boolean => this.isCurrentScheduleComputer(item))) {
-              Text('暂无运行记录').fontColor($r('app.color.pigo_muted'))
+          Column({ space: 12 }) {
+            if (this.scheduleError) Text(this.scheduleError).fontSize(14).fontColor($r('app.color.pigo_error'))
+            if (this.schedulePage === 'detail' && this.scheduleDetail) {
+              this.scheduledRunDetail(this.scheduleDetail)
+            } else if (this.schedulePage === 'editor') {
+              this.scheduleEditor()
+            } else if (this.schedulePage === 'history') {
+              Text(this.computerTitle()).fontSize(13).fontColor($r('app.color.pigo_muted'))
+              if (!this.scheduleMessages.some((item: RunMessage): boolean => this.isCurrentScheduleComputer(item))) {
+                Text('暂无运行记录').fontSize(14).fontColor($r('app.color.pigo_muted'))
+              }
+              ForEach(this.scheduleMessages.filter((item: RunMessage): boolean => this.isCurrentScheduleComputer(item)),
+                (message: RunMessage) => { this.scheduledMessageRow(message) },
+                (message: RunMessage) => `${message.key}:${message.unread}`)
             }
-            ForEach(this.scheduleMessages.filter((item: RunMessage): boolean => this.isCurrentScheduleComputer(item)),
-              (message: RunMessage) => { this.scheduledMessageRow(message) },
-              (message: RunMessage) => `${message.key}:${message.unread}`)
-          }
-        }.width('100%').alignItems(HorizontalAlign.Start).padding({ top: 6, bottom: 12 })
+          }.width('100%').alignItems(HorizontalAlign.Start).padding({ top: 6, bottom: 12 })
         }.layoutWeight(1).width('100%').align(Alignment.TopStart).scrollBar(BarState.Off)
       }
       if (this.schedulePage === 'detail' && this.scheduleDetail?.run.sessionId) {
         if (this.isPaired && !this.isCurrentScheduleComputer(this.scheduleDetail)) {
           Text(`当前聊天在 ${this.computerTitle()}`).fontSize(13).fontColor($r('app.color.pigo_muted'))
         }
-        Button(`在 ${this.scheduleDetail.computer} 打开会话`).chatAction().width('100%')
+        Button(`在 ${this.scheduleDetail.computer} 打开会话`).chatAction().width('100%').height(46)
+          .backgroundColor(this.accent()).fontColor(this.accentForeground())
           .enabled(!this.busy && !this.openingSession).onClick(() => {
             if (this.scheduleDetail) void this.openScheduledSession(this.scheduleDetail);
           })
@@ -6602,7 +6928,10 @@ struct Index {
         }.width('100%').alignItems(HorizontalAlign.Start)
       }.layoutWeight(1).height(48).padding({ left: 12 }).backgroundColor(Color.Transparent)
         .onClick(() => { this.showScheduleDetail(message); })
-      Button('关闭').chatAction().onClick(() => { this.scheduleBanner = undefined; })
+      Button({ type: ButtonType.Normal }) {
+        SymbolGlyph($r('sys.symbol.xmark')).fontSize(15).fontColor([$r('app.color.pigo_muted')])
+      }.width(40).height(40).padding(0).borderRadius(10).backgroundColor(Color.Transparent)
+        .accessibilityText('关闭定时任务通知').onClick(() => { this.scheduleBanner = undefined; })
     }.id('schedule-completion-banner').width('92%').constraintSize({ maxWidth: 440 }).padding(6).borderRadius(16)
       .backgroundColor($r('app.color.pigo_panel')).border({ width: 1, color: $r('app.color.pigo_line') })
   }
@@ -6613,7 +6942,7 @@ struct Index {
         // Reserve the sidebar's space without rebuilding the conversation or moving the session list.
         Blank().width(this.dockedSessions() ? this.sessionPaneWidth() : 0)
         Stack({ alignContent: Alignment.Bottom }) {
-          if (!this.darkMode && !this.loading && !this.keyboardHeight) {
+          if (!this.darkMode && this.showRootBottomTabs()) {
             Row().width('100%').height(this.bottomTabsHeight() + this.bottomPad() + 18)
               .linearGradient({ direction: GradientDirection.Bottom,
                 colors: [['#00FFFFFF', 0], ['#FFFFFF', 0.20], ['#FFFFFF', 1]] })
@@ -6642,19 +6971,12 @@ struct Index {
         this.sessionDrawer()
       }
       if (this.dockedSessions()) this.sessionPaneHandle()
-      if (this.showModelMenu) {
-        Button({ type: ButtonType.Normal }).chatAction().width('100%').height('100%').backgroundColor('#66000000').borderRadius(0)
-          .accessibilityText('关闭模型菜单').onClick(() => { this.showModelMenu = false; })
-        Column() {
-          this.modelSheet()
-        }.width('100%').height('100%').justifyContent(FlexAlign.End).alignItems(HorizontalAlign.Center)
-          .transition(TransitionEffect.move(TransitionEdge.BOTTOM).animation({ duration: 220, curve: Curve.EaseOut }))
-      }
       if (this.recording || this.voicePreparing || (this.voiceFinishing && !this.voiceCancelling) || this.voiceHint) {
         Column() {
           Column({ space: 16 }) {
             if (this.recording) {
-              Image(this.holdCancel ? $r('app.media.ic_close') : $r('app.media.ic_mic')).width(40).height(40).fillColor(this.holdCancel ? '#FFFFFF' : $r('app.color.pigo_text'))
+              SymbolGlyph(this.holdCancel ? $r('sys.symbol.xmark') : $r('sys.symbol.mic'))
+                .fontSize(38).fontColor([this.holdCancel ? '#FFFFFF' : $r('app.color.pigo_text')])
               Text(this.holdCancel ? '松开手指，取消发送' : '手指上滑，取消发送')
                 .fontSize(15).fontColor(this.holdCancel ? '#FFFFFF' : $r('app.color.pigo_text'))
               Text(this.recordSeconds >= 50 ? `还可说 ${60 - this.recordSeconds} 秒` : `${this.recordSeconds}″`)
