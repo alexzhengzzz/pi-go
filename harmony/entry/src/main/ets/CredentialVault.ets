@@ -15,6 +15,8 @@ export interface Companion {
   token: string;
   ca?: string;
   pin?: string;
+  computerId?: string;
+  computerName?: string;
 }
 
 export interface ComputerBook {

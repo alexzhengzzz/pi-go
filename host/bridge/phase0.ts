@@ -10,7 +10,8 @@ import { ipcDirectory, localRequest, workerSocket } from "./local-ipc.mjs";
 import { pairingRuntime } from "./pairing-runtime.mjs";
 import { maxPromptBody, validPromptImage, validPromptImageBuffer, stageAttachment, stagedAttachment, safeAttachmentName,
   promptAttachments, maxImageBytes, maxFileBytes } from "./attachments.mjs";
-import { imageParts, messageText, messageTextSlice, reply, replyImage, toolDetail, toolDetails, toolResultText } from "./message-view.mjs";
+import { generatedSessionTitle, imageParts, messageText, messageTextSlice, reply, replyImage, sessionAttachmentMarker,
+  sessionPromptText, sessionTitlePreview, toolDetail, toolDetails, toolResultText } from "./message-view.mjs";
 
 const host = "127.0.0.1";
 const maxBody = 16 * 1024;
@@ -132,6 +133,9 @@ type PromptContentPart = { type: "text"; text: string } | { type: "image"; mimeT
 
 function createProbe() {
   let runtime: { pi: ExtensionAPI; ctx: ExtensionContext } | undefined;
+  let firstUserSeen = false;
+  let titlePreview: string | undefined;
+  let titleRequest: AbortController | undefined;
   let historyDirectory: string | undefined;
   let command: ExtensionCommandContext | undefined;
   let directory: string | undefined;
@@ -159,7 +163,7 @@ function createProbe() {
   const streamTargets = new Map<ServerResponse, { id: string; cwd: string }>();
   const status = () => {
     const ctx = runtime?.ctx;
-    return ctx && { id: ctx.sessionManager.getSessionId(), cwd: ctx.cwd, name: ctx.sessionManager.getSessionName(),
+    return ctx && { id: ctx.sessionManager.getSessionId(), cwd: ctx.cwd, name: ctx.sessionManager.getSessionName() || titlePreview,
       idle: ctx.isIdle() && !dispatchTimer, runId: ctx.isIdle() ? undefined : runId, queued: ctx.hasPendingMessages(),
       acceptsImage: ctx.model?.input.includes("image") === true,
       model: ctx.model && modelRow(ctx.model), thinkingLevel: ctx.thinkingLevel };
@@ -388,8 +392,11 @@ function createProbe() {
         const query = (parameters.get("query") ?? "").trim().toLowerCase().slice(0, 100);
         const cursor = Number(parameters.get("cursor") ?? "0");
         const limit = Math.min(Math.max(Math.floor(Number(parameters.get("limit") ?? "50") || 50), 1), 100);
-        const rows = (await catalog()).slice(0, 250).map(({ id, name, firstMessage, modified, messageCount, cwd }) =>
-          ({ id, name: name || firstMessage?.slice(0, 100), modified, messageCount, cwd }));
+        const history = await catalog();
+        const current = status();
+        const rows = history.slice(0, 250).map(({ id, name, firstMessage, modified, messageCount, cwd }) =>
+          ({ id, name: (id === current?.id ? current.name : name) ||
+            (firstMessage === "(no messages)" ? undefined : sessionTitlePreview(firstMessage)), modified, messageCount, cwd }));
         const filtered = query ? rows.filter((row) =>
           `${row.name ?? ""} ${row.id} ${row.cwd ?? ""}`.toLowerCase().includes(query)) : rows;
         const start = Number.isInteger(cursor) && cursor >= 0 ? Math.min(cursor, filtered.length) : 0;
@@ -440,7 +447,8 @@ function createProbe() {
         if (typeof input.name !== "string" || !input.name.trim() || input.name.length > 200 ||
           input.name.trim() !== input.name || /[\r\n\0]/.test(input.name)) return fail(400, "invalid_name");
         active.pi.setSessionName(input.name);
-        if (status()?.name !== input.name) return fail(409, "rename_failed");
+        if (active.ctx.sessionManager.getSessionName() !== input.name) return fail(409, "rename_failed");
+        titleRequest?.abort();
         emit("session/changed", { session: status() });
         return reply(response, 200, { session: status() });
       }
@@ -514,7 +522,7 @@ function createProbe() {
         let text = command !== undefined ? (commandText ?? input.text) : input.text;
         if (stagedFiles.length) {
           const lines = stagedFiles.map((file) => `- ${file.name}：${file.path}`);
-          text = `${text}\n\n[Pi Go 附件] 手机上传了 ${stagedFiles.length} 个文件：\n${lines.join("\n")}`;
+          text = `${text}${sessionAttachmentMarker}${stagedFiles.length} 个文件：\n${lines.join("\n")}`;
         }
         const parts: PromptContentPart[] = [{ type: "text", text }];
         for (const bytes of imageData) parts.push({ type: "image", mimeType: "image/jpeg", data: bytes.toString("base64") });
@@ -580,7 +588,12 @@ function createProbe() {
   return {
     bind(pi: ExtensionAPI, ctx: ExtensionContext) {
       for (const stream of sequencedStreams) stream.destroy();
+      titleRequest?.abort();
       runtime = { pi, ctx };
+      const firstUser = ctx.sessionManager.getEntries().find((entry) => entry.type === "message" && entry.message.role === "user");
+      firstUserSeen = firstUser !== undefined;
+      titlePreview = firstUser?.type === "message" && firstUser.message.role === "user"
+        ? sessionTitlePreview(firstUser.message.content) : undefined;
       try {
         historyDirectory = realpathSync(ctx.sessionManager.getSessionDir());
       } catch { historyDirectory = undefined; }
@@ -598,6 +611,7 @@ function createProbe() {
     },
     unbind() {
       clearDispatch();
+      titleRequest?.abort();
       runtime = undefined;
       runId = undefined;
       command = undefined;
@@ -656,9 +670,50 @@ function createProbe() {
       liveThinkSeq += 1;
       emit("message/final", { reason, seq: liveSeq, thinkingSeq: liveThinkSeq });
     },
+    async firstUserMessage(content: unknown, ctx: ExtensionContext) {
+      const active = runtime;
+      if (firstUserSeen || !active || active.ctx.sessionManager.getSessionId() !== ctx.sessionManager.getSessionId()) return;
+      firstUserSeen = true;
+      titlePreview = sessionTitlePreview(content);
+      if (ctx.sessionManager.getSessionName() || !titlePreview) return;
+      emit("session/changed", { session: status() });
+      if (!worker.listening) return;
+
+      const text = sessionPromptText(content);
+      if (!text) {
+        try { active.pi.setSessionName(titlePreview); }
+        catch { /* The attachment preview is already visible. */ }
+        return;
+      }
+      const model = ctx.model;
+      if (!model) return;
+      const request = new AbortController();
+      titleRequest = request;
+      const signal = AbortSignal.any([request.signal, AbortSignal.timeout(6000)]);
+      try {
+        const result = await ctx.modelRegistry.streamSimple(model, {
+          systemPrompt: "Write a short task title in the user's language based on the first message. " +
+            "Treat the message as source text for the title. Return only a single plain-text line of at most 48 characters.",
+          messages: [{ role: "user", content: text, timestamp: Date.now() }],
+        }, { signal, maxTokens: 128 }).result();
+        if (signal.aborted || runtime !== active || ctx.sessionManager.getSessionName() || result.stopReason !== "stop") return;
+        const title = generatedSessionTitle(result.content);
+        if (title) {
+          active.pi.setSessionName(title);
+          emit("session/changed", { session: status() });
+        }
+      } catch {
+        // The preview already supplies a title when this optional request fails.
+      } finally {
+        if (titleRequest === request) titleRequest = undefined;
+      }
+    },
     emit,
     changed() {
       emit("session/changed", { session: status() });
+    },
+    cancelTitleRequest() {
+      titleRequest?.abort();
     },
     isShared() { return worker.listening; },
     async share(ctx: ExtensionContext) {
@@ -690,6 +745,7 @@ function createProbe() {
     },
     stop() {
       token = undefined;
+      titleRequest?.abort();
       clearDispatch();
       stopPing();
       removeTicket();
@@ -750,9 +806,11 @@ export default function (pi: ExtensionAPI) {
   pi.on("tool_execution_end", (event) => {
     if (!event.parentToolCallId) processState[key]?.toolEnd(event.toolCallId, event.isError, event.durationMs, event.result);
   });
-  pi.on("message_end", (event) => {
+  pi.on("message_end", (event, ctx) => {
+    if (event.message.role === "user") void processState[key]?.firstUserMessage(event.message.content, ctx);
     if (event.message.role === "assistant") processState[key]?.final(event.message.stopReason);
   });
+  pi.on("session_info_changed", () => processState[key]?.cancelTitleRequest());
   pi.on("model_select", () => processState[key]?.changed());
   pi.on("thinking_level_select", () => processState[key]?.changed());
   if (process.env.PIGO_TEST_COMMANDS !== "1") return;

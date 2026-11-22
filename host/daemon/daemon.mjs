@@ -18,30 +18,46 @@ import { desktopHosts } from '../bridge/local-ipc.mjs';
 import { stateDirectory } from '../bridge/session-metadata.mjs';
 import { WorkspaceRegistry } from './registry.mjs';
 import { RuntimePool } from './runtimes.mjs';
+import { ScheduleService } from './schedules.mjs';
 import { createDaemonHost } from './host.mjs';
 
 async function main() {
-  const registry = new WorkspaceRegistry(join(stateDirectory(), 'daemon', 'workspaces.json'));
+  const directory = join(stateDirectory(), 'daemon');
+  const registry = new WorkspaceRegistry(join(directory, 'workspaces.json'));
   const runtimes = new RuntimePool();
-  const host = createDaemonHost({ registry, runtimes });
 
   const existing = await desktopHosts();
   if (existing.length > 0) {
     process.stderr.write('pi-go daemon: another host is already serving\n');
     process.exit(1);
   }
+  let schedules;
+  try {
+    schedules = new ScheduleService(join(directory, 'schedules.json'), { registry, runtimes });
+  } catch (error) {
+    process.stderr.write(`pi-go scheduler unavailable: ${error.message}\n`);
+    schedules = undefined;
+  }
+  const host = createDaemonHost({ registry, runtimes, schedules });
 
   await new Promise((resolve, reject) => {
     host.server.once('error', reject);
     host.server.listen(host.path, () => { host.server.off('error', reject); resolve(); });
   });
   process.stderr.write(`pi-go daemon: serving ${host.path}\n`);
+  try { schedules?.start(); }
+  catch (error) {
+    try { schedules.stop(); } catch {}
+    process.stderr.write(`pi-go scheduler unavailable: ${error.message}\n`);
+  }
 
   let stopping = false;
   const stop = async () => {
     if (stopping) return;
     stopping = true;
     host.shutdown();
+    try { schedules?.stop(); }
+    catch (error) { process.stderr.write(`pi-go scheduler: ${error.message}\n`); }
     await runtimes.stopAll();
     try { unlinkSync(host.path); } catch {}
     process.exit(0);

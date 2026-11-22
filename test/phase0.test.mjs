@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdir, mkdtemp, readFile, realpath, rm, stat, truncate, utimes, writeFile, symlink, link } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, truncate, utimes, writeFile, symlink, link } from "node:fs/promises";
 import { createServer as createHttpServer } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { checkServerIdentity } from "node:tls";
@@ -20,12 +20,24 @@ import { localLanAddress } from "../host/bridge/lan-tls.mjs";
 import { startDiscovery } from "../host/bridge/lan-discovery.mjs";
 import { listFiles, previewFile, saveFile, openWorkspaceDownload, maxTextBytes, maxDownloadBytes } from "../host/bridge/workspace-files.mjs";
 import { SessionMetadata } from "../host/bridge/session-metadata.mjs";
+import { generatedSessionTitle, sessionAttachmentMarker, sessionPromptText, sessionTitlePreview } from "../host/bridge/message-view.mjs";
 import { validPromptImage, stageAttachment, stagedAttachment, stagingDir, maxFileBytes } from "../host/bridge/attachments.mjs";
 
 const project = fileURLToPath(new URL("../", import.meta.url));
 const provider = fileURLToPath(new URL("./offline-provider.ts", import.meta.url));
 const pi = process.env.PI_BIN ?? "pi";
 const lanHost = Object.values(networkInterfaces()).flat().find(({ address }) => localLanAddress(address))?.address;
+
+test("session titles strip attachment paths and truncate at visible character boundaries", () => {
+  const attachment = `${sessionAttachmentMarker}1 个文件：\n- note.txt：/project/.pi-go/attachments/note.txt`;
+  assert.equal(sessionPromptText(` 检查笔记\n找出恢复步骤 ${attachment}`), "检查笔记\n找出恢复步骤");
+  assert.equal(sessionTitlePreview(` 检查笔记\n找出恢复步骤 ${attachment}`), "检查笔记 找出恢复步骤");
+  assert.equal(sessionTitlePreview(attachment), "附件会话");
+  const glyph = "👩🏽‍💻";
+  assert.equal(sessionTitlePreview(glyph.repeat(48)), glyph.repeat(48));
+  assert.equal(generatedSessionTitle(`“${glyph.repeat(49)}”`), glyph.repeat(47) + "…");
+  assert.equal(generatedSessionTitle("first line\nsecond line"), undefined);
+});
 
 test("workspace files enforce scope, text limits and conflict-safe atomic saves", async () => {
   const root = await mkdtemp(join(tmpdir(), "pigo-files-"));
@@ -437,6 +449,121 @@ async function* events(response) {
     }
   }
 }
+
+test("shared desktop sessions generate one title and keep previews on failure", { timeout: 25000 }, async (context) => {
+  const root = await mkdtemp("/private/tmp/pigo-title-");
+  const agent = join(root, "agent");
+  const ipc = join(root, "ipc");
+  const titleLog = join(root, "titles.jsonl");
+  await mkdir(agent);
+  const env = { PIGO_IPC_DIR: ipc, PIGO_TITLE_FIXTURE_LOG: titleLog, PI_CODING_AGENT_DIR: agent };
+  const runtimes = [];
+  context.after(async () => {
+    for (const runtime of runtimes) runtime.child.stdin.end();
+    const fallback = setTimeout(() => { for (const runtime of runtimes) runtime.child.kill(); }, 1500);
+    await Promise.allSettled(runtimes.map(({ exit }) => exit));
+    clearTimeout(fallback);
+    await rm(root, { recursive: true, force: true });
+  });
+  await promisify(execFile)(pi, ["install", project], { cwd: root, env: { ...process.env, ...env, PI_OFFLINE: "1" } });
+  const startRuntime = () => {
+    const runtime = start(agent, root, env);
+    runtimes.push(runtime);
+    return runtime;
+  };
+  const share = async (runtime) => {
+    await runtime.rpc("prompt", { message: "/pi-go-share desktop-host" });
+    const name = (await readdir(ipc)).find((file) => file.startsWith(`w-${runtime.child.pid}-`));
+    assert.ok(name);
+    return join(ipc, name);
+  };
+  const prompt = async (runtime, message, images) => {
+    const since = runtime.messages.length;
+    await runtime.rpc("prompt", { message, images });
+    return since;
+  };
+  const settled = (runtime, since) => runtime.wait((event) => event.type === "agent_settled", since);
+  const name = async (worker) => (await localRequest(worker, "GET", "/session")).data.session.name;
+  const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  const successful = async () => {
+    const runtime = startRuntime();
+    const worker = await share(runtime);
+    const text = "排查桌面连接\n检查状态同步";
+    await settled(runtime, await prompt(runtime, text));
+    assert.equal(await name(worker), "标题 排查桌面连接");
+    await settled(runtime, await prompt(runtime, "Follow-up keeps the first title"));
+    assert.equal(await name(worker), "标题 排查桌面连接");
+    const { sessionFile } = await runtime.rpc("get_state");
+    const entries = (await readFile(sessionFile, "utf8")).trim().split("\n").map(JSON.parse);
+    assert.deepEqual(entries.filter((row) => row.type === "session_info").map((row) => row.name), ["标题 排查桌面连接"]);
+  };
+  const manuallyRenamed = async () => {
+    const runtime = startRuntime();
+    const worker = await share(runtime);
+    const { sessionId } = await runtime.rpc("get_state");
+    const since = await prompt(runtime, "slow title before rename");
+    await runtime.wait((event) => event.type === "message_update", since);
+    assert.equal(await name(worker), "slow title before rename");
+    assert.equal((await localRequest(worker, "POST", "/rename", { id: sessionId, name: "手动标题" })).status, 200);
+    await pause(2500);
+    assert.equal(await name(worker), "手动标题");
+  };
+  const switched = async () => {
+    const runtime = startRuntime();
+    await share(runtime);
+    await settled(runtime, await prompt(runtime, "slow title before switching"));
+    const { sessionFile, sessionId } = await runtime.rpc("get_state");
+    await runtime.rpc("new_session");
+    const worker = await share(runtime);
+    assert.notEqual((await runtime.rpc("get_state")).sessionId, sessionId);
+    await pause(2500);
+    assert.equal(await name(worker), undefined);
+    assert.doesNotMatch(await readFile(sessionFile, "utf8"), /"type":"session_info"/);
+  };
+  const fallback = async (text, images, expected) => {
+    const runtime = startRuntime();
+    const worker = await share(runtime);
+    await settled(runtime, await prompt(runtime, text, images));
+    assert.equal(await name(worker), expected);
+  };
+  const nonblocking = async () => {
+    const runtime = startRuntime();
+    const worker = await share(runtime);
+    const { sessionId } = await runtime.rpc("get_state");
+    const text = "timeout title fixture";
+    const started = performance.now();
+    await settled(runtime, await prompt(runtime, text));
+    assert.equal(await name(worker), text);
+    const since = runtime.messages.length;
+    const sent = await localRequest(worker, "POST", "/prompt", {
+      id: sessionId, requestId: "while-title-pending", text: "Continue while the title is pending",
+    });
+    assert.equal(sent.status, 202);
+    await settled(runtime, since);
+    assert.ok(performance.now() - started < 6000, "both chat turns must finish before the title request times out");
+    const chat = (await localRequest(worker, "GET", "/chat")).data;
+    assert.equal(chat.session.id, sessionId);
+    assert.deepEqual(chat.messages.map(({ text }) => text), [text, "fixture delta", "Continue while the title is pending", "fixture delta"]);
+    await pause(6200);
+    assert.equal(await name(worker), text);
+  };
+  const historic = async () => {
+    const runtime = startRuntime();
+    await settled(runtime, await prompt(runtime, "First message before sharing"));
+    const worker = await share(runtime);
+    await settled(runtime, await prompt(runtime, "Second message after sharing"));
+    assert.equal(await name(worker), "First message before sharing");
+  };
+  const image = (await readFile(join(project, "test/prompt-image.base64"), "utf8")).trim();
+  await Promise.all([successful(), manuallyRenamed(), switched(), historic(), nonblocking(),
+    fallback("empty title fixture", undefined, "empty title fixture"),
+    fallback("", [{ type: "image", mimeType: "image/jpeg", data: image }], "附件会话")]);
+  const requests = (await readFile(titleLog, "utf8")).trim().split("\n").map(JSON.parse);
+  assert.deepEqual(requests.map(({ text }) => text).sort(), [
+    "empty title fixture", "slow title before rename", "slow title before switching", "timeout title fixture", "排查桌面连接\n检查状态同步",
+  ]);
+});
 
 test("phase 0 against Pi RPC, using an offline provider and disposable projects", { timeout: 30000 }, async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pi-go-test-"));

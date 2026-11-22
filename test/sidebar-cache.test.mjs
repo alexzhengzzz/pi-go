@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { stripTypeScriptTypes } from 'node:module';
 import { test } from 'node:test';
@@ -6,6 +7,10 @@ import { test } from 'node:test';
 // Exercise the actual page methods without requiring an ArkUI device runtime.
 const syncSource = readFileSync(new URL('../harmony/entry/src/main/ets/SessionSync.ets', import.meta.url), 'utf8');
 const { SessionSync } = await import(`data:text/javascript;base64,${Buffer.from(stripTypeScriptTypes(syncSource)).toString('base64')}`);
+const computerGroupSource = readFileSync(new URL('../harmony/entry/src/main/ets/ComputerGroups.ets', import.meta.url), 'utf8')
+  .replace(/^import [^\n]*\n/, '');
+const { computerGroups, computerGroupTitle, moveComputerConnection, renameComputerGroup } =
+  await import(`data:text/javascript;base64,${Buffer.from(stripTypeScriptTypes(computerGroupSource)).toString('base64')}`);
 class BridgeFailure extends Error {
   constructor(status, message) { super(message); this.status = status; }
 }
@@ -26,7 +31,7 @@ methods.push('chooseComputer', 'leaveComputer', 'persistComputers', 'pair', 'res
 methods.push('appendFileTreeRows', 'updateFileTree', 'toggleFileDirectory', 'loadFileDirectory');
 methods.push('workspaceName', 'newTaskOptions', 'closeNewSpace', 'createWorkspaceTask', 'createSpaceTask', 'confirmCloseSpace', 'closeWorkspace', 'armTranscriptFollow', 'onKeyboardChange');
 methods.push('dockedSessions', 'sessionPaneWidth', 'compactSessionPane', 'onWindowWidthChange');
-methods.push('chatTitle', 'observeSessionRun', 'observeRun', 'advanceRunNotice', 'clearRunNotices');
+methods.push('chatTitle', 'updateCachedSessionTitle', 'observeSessionRun', 'observeRun', 'advanceRunNotice', 'clearRunNotices');
 methods.push('restoreSettings', 'saveSetting', 'setRunNoticesEnabled', 'setLiveViewsEnabled');
 methods.push('backgroundLiveActivity', 'syncLiveActivity');
 const dataSource = page.slice(page.indexOf('class SidebarRows '), page.indexOf('interface ChatMessage'));
@@ -36,7 +41,7 @@ const liveViewSetting = page.match(/^const LIVE_VIEW_SETTING = .*;$/m)[0];
 const liveViewCalls = [];
 const liveActivity = { sync: snapshot => liveViewCalls.push(snapshot) };
 const Page = new Function('Curve', 'BridgeFailure', 'validUsb', 'MAX_COMPUTERS', 'Edge', '$r', 'DialogAlignment',
-  'openSettings', 'themeStyle', 'appearanceMode', 'liveActivity',
+  'openSettings', 'themeStyle', 'appearanceMode', 'liveActivity', 'util',
   stripTypeScriptTypes(`${splitWidth}\n${runNoticeSetting}\n${liveViewSetting}\nconst STREAM_PAINT_INTERVAL_MS = 32;\nconst MAX_LIVE_TEXT_LENGTH = 16000;\n${dataSource}\nclass Harness {\nsidebarRows = new SidebarRows();\n${methods.map(method).join('\n')}\n}`) + '; return Harness;')(
   { EaseOut: 0 },
   BridgeFailure,
@@ -48,7 +53,8 @@ const Page = new Function('Curve', 'BridgeFailure', 'validUsb', 'MAX_COMPUTERS',
   (context) => context.settings,
   (id) => ({ id }),
   (id) => ({ id }),
-  liveActivity
+  liveActivity,
+  { generateRandomUUID: randomUUID }
 );
 function fixture() {
   const state = new Page();
@@ -150,6 +156,42 @@ test('selecting a saved computer while connected switches once and retains both 
   assert.equal(state.base, lan.address);
   assert.deepEqual(remembered, [[remote.address, 'remote-session']]);
   assert.deepEqual(saves, [{ version: 2, active: lan.address, computers: [remote, lan] }]);
+});
+
+test('grouping connections keeps computers on the same public IP distinct', () => {
+  const laptop = { address: 'https://93.184.216.34:8443', token: 'laptop', computerId: 'a' };
+  const mini = { address: 'https://93.184.216.34:8444', token: 'mini', computerId: 'b', computerName: 'Mac mini' };
+  const usb = { address: 'http://127.0.0.1:18977', token: 'usb', computerId: 'c' };
+  assert.deepEqual(computerGroups([laptop, mini, usb]).map(computerGroupTitle),
+    ['93.184.216.34:8443', 'Mac mini', 'USB 电脑']);
+  const grouped = moveComputerConnection([laptop, mini, usb], usb.address, 'a', '');
+  const renamed = renameComputerGroup(grouped, 'a', ' 本机 ');
+  assert.deepEqual(computerGroups(renamed).map(group => [computerGroupTitle(group), group.connections.map(row => row.token)]),
+    [['本机', ['laptop', 'usb']], ['Mac mini', ['mini']]]);
+  const separated = moveComputerConnection(renamed, laptop.address, 'd', '');
+  assert.deepEqual(computerGroups(separated).map(group => [computerGroupTitle(group), group.connections.map(row => row.token)]),
+    [['93.184.216.34:8443', ['laptop']], ['Mac mini', ['mini']], ['本机', ['usb']]]);
+});
+
+test('pairing a new connection uses the chosen group and re-pairing preserves its existing group', async () => {
+  const state = fixture();
+  const laptop = { address: 'https://93.184.216.34:8443', token: 'laptop', computerId: 'a', computerName: '本机' };
+  const usb = 'http://127.0.0.1:18977';
+  const saved = [];
+  Object.assign(state, {
+    computers: [laptop], address: usb, pairingComputerId: 'a', pairingMode: 'usb', ticket: '12345678',
+    request: async () => ({ token: 'a'.repeat(64) }), forgetDrafts: () => {},
+    activateComputer: record => { state.base = record.address; state.isPaired = true; },
+    vault: { save: async book => { saved.push(book); } }
+  });
+  await state.pair();
+  assert.equal(state.computers[0].computerId, 'a');
+  assert.equal(state.computers[0].computerName, '本机');
+  assert.equal(saved[0].computers.length, 2);
+  state.isPaired = false;
+  state.pairingComputerId = 'different';
+  await state.pair();
+  assert.deepEqual(computerGroups(state.computers).map(group => group.id), ['a']);
 });
 
 test('reopening the sidebar uses the fresh catalog without another request', () => {
@@ -869,6 +911,7 @@ test('running status carries session names for header capsules and merges legacy
   ], runningSessionIds: ['one', 'two', 'three'] });
   assert.deepEqual(state.runningSessions.map(row => row.id), ['one', 'two']);
   assert.deepEqual(state.runningSessionIds, ['one', 'two', 'three']);
+  assert.equal(state.sessions[0].name, 'Refactor tests');
   // Only legacy bridge without runningSessions: rows stay empty but ids still feed list badges.
   state.applyRunningStatus({ runningSessionIds: ['legacy'] });
   assert.deepEqual(state.runningSessions, []);

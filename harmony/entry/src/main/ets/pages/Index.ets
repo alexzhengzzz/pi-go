@@ -24,7 +24,10 @@ import { HISTORY_IMAGE_EXTENSIONS, isImageFile, markdownWorkspacePath, messageFi
 import { decodePairingBundle, validSecureAddress, validUsb } from '../PairingCode';
 import { SequencedFrame, SessionSync, SyncCursor } from '../SessionSync';
 import { connectionLabel, validCompanion } from '../CompanionCheck';
+import { ComputerGroup, computerGroupId, computerGroups, computerGroupTitle, moveComputerConnection, renameComputerGroup, withComputerAssignment } from '../ComputerGroups';
 import { liveActivity } from '../LiveActivity';
+import { ScheduleJob, ScheduleRun, ScheduleWatch, RunMessage, scheduleTime, parseScheduleTime,
+  scheduleRunStatus, scheduleRunReason } from '../ScheduledRuns';
 
 interface ModelOption {
   provider: string;
@@ -239,6 +242,12 @@ interface WorkspaceRow {
 }
 
 interface BridgeReply {
+  source?: string;
+  watching?: boolean;
+  jobs?: ScheduleJob[];
+  runs?: ScheduleRun[];
+  activeRuns?: ScheduleRun[];
+  timezone?: string;
   cursor?: SyncCursor;
   historyLeaf?: string | null;
   attachment?: UploadedAttachment;
@@ -286,6 +295,16 @@ interface HistoryImage {
 }
 
 interface Payload {
+  includeJobs?: boolean;
+  knownRuns?: string[];
+  operation?: string;
+  scheduleVersion?: number;
+  prompt?: string;
+  kind?: string;
+  time?: string;
+  at?: number;
+  interval?: number;
+  catchUp?: number;
   history?: boolean;
   path?: string;
   lookup?: string;
@@ -399,7 +418,42 @@ struct Index {
   @State private isPaired: boolean = false;
   @State private loading: boolean = true;
   @State private computers: Companion[] = [];
+  @State private schedulePage: string = '';
+  @State private scheduleMessages: RunMessage[] = [];
+  @State private scheduleActive: RunMessage[] = [];
+  @State private scheduleOffline: string[] = [];
+  @State private scheduleDetail?: RunMessage = undefined;
+  @State private scheduleBanner?: RunMessage = undefined;
+  @State private scheduleJobs: ScheduleJob[] = [];
+  @State private scheduleZone: string = '';
+  @State private scheduleError: string = '';
+  @State private scheduleListError: string = '';
+  @State private scheduleSaving: boolean = false;
+  @State private scheduleLoading: boolean = false;
+  @State private scheduleEditing?: ScheduleJob = undefined;
+  @State private scheduleName: string = '';
+  @State private schedulePrompt: string = '';
+  @State private scheduleCwd: string = '';
+  @State private scheduleKind: string = 'once';
+  @State private scheduleWhen: string = '';
+  @State private scheduleCatchUp: string = '0';
+  private schedulePrevious: string = '';
+  private scheduleRead: Map<string, string[]> = new Map<string, string[]>();
+  private scheduleDismissed: Map<string, string[]> = new Map<string, string[]>();
+  private scheduleWatches: ScheduleWatch[] = [];
+  private scheduleRetries: Map<string, number> = new Map<string, number>();
+  private scheduleDue: Map<string, number> = new Map<string, number>();
+  private scheduleTimer: number = -1;
+  private scheduleBannerTimer: number = -1;
+  private schedulePolling: boolean = false;
+  private scheduleDiscovery: boolean = false;
+  private scheduleMutation: number = 0;
+  private scheduleComputerGeneration: number = 0;
   @State private removeTarget: string = '';
+  @State private renameComputerId: string = '';
+  @State private computerNameDraft: string = '';
+  @State private moveConnectionAddress: string = '';
+  @State private pairingComputerId: string = '';
   @State private busy: boolean = false;
   @State private reachable: boolean = false;
   @State private idle: boolean = true;
@@ -595,6 +649,7 @@ struct Index {
       return true;
     }
     if (this.recording || this.voicePreparing || this.voiceFinishing) { this.resetVoice(); return true; }
+    if (this.schedulePage) { this.backFromSchedule(); return true; }
     if (this.showToolDetails) { this.closeToolDetails(); return true; }
     if (this.showModelMenu) { this.showModelMenu = false; return true; }
     if (this.showNewSpace) { this.closeNewSpace(); return true; }
@@ -625,6 +680,7 @@ struct Index {
   }
   onPageShow(): void {
     this.visible = true;
+    void this.restoreChain.then(() => { this.queueScheduleSync(true); });
     this.schedule(0);
     this.startStream();
     this.syncLiveActivity();
@@ -633,6 +689,7 @@ struct Index {
   }
   onPageHide(): void {
     this.visible = false;
+    this.stopScheduleSync();
     this.clearRunNotices();
     if (this.backgroundLiveActivity()) {
       // Best effort only: HarmonyOS may still freeze the process without a continuous-task grant.
@@ -648,6 +705,7 @@ struct Index {
   aboutToDisappear(): void {
     if (this.markdownTableReader) this.closeMarkdownTableReader();
     this.visible = false;
+    this.stopScheduleSync();
     this.clearRunNotices();
     this.cancelSchedule();
     this.stopStream();
@@ -671,7 +729,8 @@ struct Index {
         if (!validCompanion(record) || seen.has(record.address)) return false;
         seen.add(record.address);
         return true;
-      }).slice(0, MAX_COMPUTERS);
+      }).slice(0, MAX_COMPUTERS).map((record: Companion): Companion => record.computerId ? record :
+        withComputerAssignment(record, util.generateRandomUUID(), record.computerName));
       const active = this.computers.find((record: Companion): boolean => record.address === saved.active);
       if (active) this.activateComputer(active);
     } catch { this.status = '无法读取已有配对，请重新连接。'; }
@@ -695,6 +754,7 @@ struct Index {
       if (this.launchTicket !== ticket) return;
       if (!this.busy && !this.openingSession) {
         this.launchTicket = '';
+        if (!this.addingComputer) this.pairingComputerId = '';
         this.pairingMode = 'usb';
         this.pairingBundle = '';
         this.ticket = ticket;
@@ -752,6 +812,7 @@ struct Index {
 
   private activateComputer(record: Companion): void {
     const usb = validUsb(record.address);
+    this.resetScheduleJobs();
     this.epoch += 1;
     this.syncMode = 'probe';
     this.historyStream = '';
@@ -765,6 +826,8 @@ struct Index {
     this.ticket = '';
     this.pairingBundle = '';
     this.removeTarget = '';
+    this.closeComputerEditors();
+    this.pairingComputerId = '';
     this.addingComputer = false;
     this.restoringComputer = undefined;
     this.activeTab = 'tasks';
@@ -776,6 +839,7 @@ struct Index {
     this.applySidebar(record.address);
     this.reachable = false;
     this.isPaired = true;
+    this.queueScheduleSync(true);
     this.schedule(0);
     this.stopStream();
   }
@@ -795,6 +859,351 @@ struct Index {
     this.timer = -1;
   }
 
+  private stopScheduleSync(): void {
+    if (this.scheduleTimer !== -1) clearTimeout(this.scheduleTimer);
+    if (this.scheduleBannerTimer !== -1) clearTimeout(this.scheduleBannerTimer);
+    this.scheduleTimer = -1;
+    this.scheduleBannerTimer = -1;
+    this.scheduleBanner = undefined;
+  }
+
+  private queueScheduleSync(discover: boolean = false, delay: number = 0): void {
+    if (discover) {
+      this.scheduleDiscovery = true;
+      this.scheduleDue.clear();
+    }
+    if (!this.visible || this.schedulePolling) return;
+    if (this.scheduleTimer !== -1) clearTimeout(this.scheduleTimer);
+    this.scheduleTimer = setTimeout(() => { void this.syncSchedules(); }, delay);
+  }
+
+  private setScheduleWatch(address: string, source: string, watching: boolean): void {
+    const current = this.scheduleWatches.find((watch: ScheduleWatch): boolean => watch.address === address);
+    if (watching && current?.source === source) return;
+    if (!watching && !current) return;
+    this.scheduleWatches = this.scheduleWatches.filter((watch: ScheduleWatch): boolean => watch.address !== address);
+    if (watching) {
+      const watch: ScheduleWatch = { address: address, source: source };
+      this.scheduleWatches = this.scheduleWatches.concat([watch]);
+    }
+    void this.saveSetting('schedule_watches', JSON.stringify(this.scheduleWatches)).catch(() => {});
+  }
+
+  private async syncSchedules(): Promise<void> {
+    if (!this.visible || this.schedulePolling) return;
+    this.scheduleTimer = -1;
+    const discover = this.scheduleDiscovery;
+    this.scheduleDiscovery = false;
+    const now = Date.now();
+    const computers = this.computers.slice();
+    this.scheduleMessages = this.scheduleMessages.filter((message: RunMessage): boolean =>
+      computers.some((computer: Companion): boolean => computer.address === message.address));
+    this.scheduleActive = this.scheduleActive.filter((message: RunMessage): boolean =>
+      computers.some((computer: Companion): boolean => computer.address === message.address));
+    this.scheduleOffline = this.scheduleOffline.filter((address: string): boolean =>
+      computers.some((computer: Companion): boolean => computer.address === address));
+    const targets = computers.filter((computer: Companion): boolean => discover ||
+      (this.scheduleWatches.some((watch: ScheduleWatch): boolean => watch.address === computer.address) &&
+        now >= (this.scheduleDue.get(computer.address) ?? 0)));
+    this.schedulePolling = true;
+    try {
+      await Promise.all(targets.map((computer: Companion): Promise<void> => this.syncScheduleComputer(computer)));
+    } finally {
+      this.schedulePolling = false;
+      if (this.scheduleDiscovery) this.queueScheduleSync();
+      else {
+        const due = this.scheduleWatches.filter((watch: ScheduleWatch): boolean =>
+          this.computers.some((computer: Companion): boolean => computer.address === watch.address))
+          .map((watch: ScheduleWatch): number => this.scheduleDue.get(watch.address) ?? Date.now());
+        if (due.length) this.queueScheduleSync(false, Math.max(0, Math.min(...due) - Date.now()));
+      }
+    }
+  }
+
+  private scheduleComputerName(computer: Companion): string {
+    const group = computerGroups(this.computers).find((item: ComputerGroup): boolean => item.id === computerGroupId(computer));
+    return group ? computerGroupTitle(group) : connectionLabel(computer);
+  }
+
+  private scheduleEndpoint(computer: Companion): BridgeEndpoint {
+    return { address: computer.address, token: computer.token, ca: computer.ca, pin: computer.pin };
+  }
+
+  private async syncScheduleComputer(computer: Companion): Promise<void> {
+    const mutation = this.scheduleMutation;
+    const generation = this.scheduleComputerGeneration;
+    const watch = this.scheduleWatches.find((item: ScheduleWatch): boolean => item.address === computer.address);
+    const knownRuns = this.scheduleMessages.filter((message: RunMessage): boolean =>
+      message.address === computer.address || (!!watch?.source && message.source === watch.source))
+      .map((message: RunMessage): string => message.run.id).slice(0, 80);
+    try {
+      const includeJobs = this.activeTab === 'pending' && this.base === computer.address;
+      const result = await this.request('/schedules/sync', { knownRuns: knownRuns, includeJobs: includeJobs },
+        this.scheduleEndpoint(computer));
+      if (!this.visible || mutation !== this.scheduleMutation || !this.computers.some((item: Companion): boolean =>
+        item.address === computer.address && item.token === computer.token)) return;
+      this.acceptScheduleSync(computer, result);
+      this.setScheduleOffline(computer.address, false);
+      if (includeJobs && generation === this.scheduleComputerGeneration && this.activeTab === 'pending' &&
+        !this.scheduleSaving && !this.scheduleLoading) this.applyScheduleJobs(result);
+      this.scheduleRetries.delete(computer.address);
+      this.scheduleDue.set(computer.address, Date.now() + 12_000);
+    } catch (error) {
+      if (mutation !== this.scheduleMutation || !this.computers.some((item: Companion): boolean =>
+        item.address === computer.address && item.token === computer.token)) return;
+      if (error instanceof BridgeFailure && (error.status === 401 || error.status === 404)) {
+        this.setScheduleWatch(computer.address, '', false);
+        this.setScheduleOffline(computer.address, false);
+        this.scheduleMessages = this.scheduleMessages.filter((message: RunMessage): boolean => message.address !== computer.address);
+        this.scheduleActive = this.scheduleActive.filter((message: RunMessage): boolean => message.address !== computer.address);
+        return;
+      }
+      const retries = Math.min(5, (this.scheduleRetries.get(computer.address) ?? 0) + 1);
+      this.scheduleRetries.set(computer.address, retries);
+      this.scheduleDue.set(computer.address, Date.now() + 6000 * Math.pow(2, retries));
+      this.setScheduleOffline(computer.address, true);
+      if (watch?.source) {
+        const alternatives = this.computers.filter((item: Companion): boolean =>
+          item.address !== computer.address && computerGroupId(item) === computerGroupId(computer));
+        for (const alternate of alternatives) {
+          try {
+            const result = await this.request('/schedules/sync', { knownRuns: knownRuns }, this.scheduleEndpoint(alternate));
+            if (result.source !== watch.source || !this.visible || mutation !== this.scheduleMutation ||
+              !this.computers.some((item: Companion): boolean =>
+              item.address === alternate.address && item.token === alternate.token)) continue;
+            this.acceptScheduleSync(alternate, result);
+            this.setScheduleOffline(computer.address, false);
+            this.setScheduleOffline(alternate.address, false);
+            // Keep the original connection under backoff so either transport can recover.
+            break;
+          } catch { }
+        }
+      }
+    }
+  }
+
+  private setScheduleOffline(address: string, offline: boolean): void {
+    if (this.scheduleOffline.includes(address) === offline) return;
+    this.scheduleOffline = offline ? this.scheduleOffline.concat([address]) :
+      this.scheduleOffline.filter((item: string): boolean => item !== address);
+  }
+
+  private acceptScheduleSync(computer: Companion, result: BridgeReply): void {
+    const source = result.source;
+    if (!source) return;
+    this.setScheduleWatch(computer.address, source, result.watching === true);
+    const name = this.scheduleComputerName(computer);
+    const readRuns = this.readScheduleRuns(source);
+    const dismissedRuns = this.readScheduleRuns(source, true);
+    const incoming = (result.runs ?? []).map((run: ScheduleRun): RunMessage => {
+      const dismissed = dismissedRuns.includes(run.id);
+      return { key: `${source}:${run.id}`, source: source, address: computer.address, computer: name, run: run,
+        unread: !dismissed && !readRuns.includes(run.id), dismissed: dismissed };
+    });
+    const old = this.scheduleMessages;
+    const newMessage = incoming.find((message: RunMessage): boolean => message.unread &&
+      !old.some((previous: RunMessage): boolean => previous.key === message.key));
+    this.scheduleMessages = old.filter((message: RunMessage): boolean => message.address !== computer.address &&
+      !incoming.some((item: RunMessage): boolean => item.key === message.key)).concat(incoming)
+      .sort((left: RunMessage, right: RunMessage): number => (right.run.finishedAt ?? 0) - (left.run.finishedAt ?? 0));
+    const active = (result.activeRuns ?? []).map((run: ScheduleRun): RunMessage => ({
+      key: `${source}:${run.id}`, source: source, address: computer.address, computer: name, run: run, unread: false
+    }));
+    this.scheduleActive = this.scheduleActive.filter((message: RunMessage): boolean => message.address !== computer.address &&
+      !active.some((item: RunMessage): boolean => item.key === message.key) &&
+      !incoming.some((item: RunMessage): boolean => item.key === message.key)).concat(active);
+    if (newMessage && !this.schedulePage && this.runNoticesEnabled) {
+      this.scheduleBanner = newMessage;
+      if (this.scheduleBannerTimer !== -1) clearTimeout(this.scheduleBannerTimer);
+      this.scheduleBannerTimer = setTimeout(() => { this.scheduleBanner = undefined; }, 6500);
+    }
+  }
+
+  private readScheduleRuns(source: string, dismissed: boolean = false): string[] {
+    const cache = dismissed ? this.scheduleDismissed : this.scheduleRead;
+    const key = dismissed ? `schedule_dismissed_${source}` : `schedule_read_${source}`;
+    const cached = cache.get(source);
+    if (cached) return cached;
+    let read: string[] = [];
+    try {
+      const raw = this.settings?.getSync(key, '[]') as string;
+      if (raw) read = JSON.parse(raw) as string[];
+    } catch { }
+    cache.set(source, read);
+    return read;
+  }
+
+  private dismissScheduleMessage(message: RunMessage): void {
+    const previous = this.readScheduleRuns(message.source, true);
+    if (previous.includes(message.run.id)) return;
+    const dismissed = [message.run.id].concat(previous).slice(0, 80);
+    this.scheduleDismissed.set(message.source, dismissed);
+    this.scheduleMessages = this.scheduleMessages.map((item: RunMessage): RunMessage => item.key === message.key
+      ? { key: item.key, source: item.source, address: item.address, computer: item.computer, run: item.run,
+        unread: false, dismissed: true } : item);
+    void this.saveSetting(`schedule_dismissed_${message.source}`, JSON.stringify(dismissed)).catch(() => {
+      this.getUIContext().getPromptAction().showToast({ message: '暂时无法保存删除记录。' });
+    });
+  }
+
+  private showScheduleInbox(): void {
+    this.dismissKeyboard();
+    this.scheduleBanner = undefined;
+    this.schedulePage = 'inbox';
+    this.queueScheduleSync(true);
+  }
+
+  private showScheduleDetail(message: RunMessage): void {
+    this.dismissKeyboard();
+    this.schedulePrevious = this.schedulePage;
+    this.scheduleDetail = message;
+    this.schedulePage = 'detail';
+    this.scheduleBanner = undefined;
+    if (!message.unread) return;
+    const read = [message.run.id].concat(this.readScheduleRuns(message.source)
+      .filter((id: string): boolean => id !== message.run.id)).slice(0, 80);
+    this.scheduleRead.set(message.source, read);
+    this.scheduleMessages = this.scheduleMessages.map((item: RunMessage): RunMessage => item.key === message.key
+      ? { key: item.key, source: item.source, address: item.address, computer: item.computer, run: item.run, unread: false } : item);
+    void this.saveSetting(`schedule_read_${message.source}`, JSON.stringify(read)).catch(() => {});
+  }
+
+  private backFromSchedule(): void {
+    if (this.scheduleSaving) return;
+    if (this.schedulePage === 'detail') this.schedulePage = this.schedulePrevious;
+    else this.schedulePage = '';
+    this.scheduleError = '';
+  }
+
+  private async openScheduledSession(message: RunMessage): Promise<void> {
+    if (!message.run.sessionId || this.busy || this.openingSession) return;
+    const computer = this.computers.find((item: Companion): boolean => item.address === message.address);
+    if (!computer) { this.scheduleError = '请先配对来源电脑。'; return; }
+    this.scheduleError = '';
+    if (this.base !== computer.address) this.chooseComputer(computer);
+    if (this.base !== computer.address) { this.scheduleError = '无法切换到来源电脑。'; return; }
+    if (await this.requestAction('/open', { id: message.run.sessionId })) {
+      this.activeTab = 'tasks';
+      this.schedulePage = '';
+    } else this.scheduleError = this.status || '暂时无法打开会话，请检查来源电脑的连接。';
+  }
+
+  private async loadScheduleJobs(): Promise<void> {
+    const computer = this.computers.find((item: Companion): boolean => item.address === this.base);
+    if (!computer || this.scheduleLoading) return;
+    const generation = this.scheduleComputerGeneration;
+    this.scheduleLoading = true;
+    this.scheduleListError = '';
+    try {
+      const result = await this.request('/schedules/sync', { includeJobs: true }, this.scheduleEndpoint(computer));
+      if (generation !== this.scheduleComputerGeneration) return;
+      this.applyScheduleJobs(result);
+      this.acceptScheduleSync(computer, result);
+    } catch (error) {
+      if (generation === this.scheduleComputerGeneration) this.scheduleListError = this.scheduleFailure(error as Error);
+    } finally {
+      if (generation === this.scheduleComputerGeneration) this.scheduleLoading = false;
+    }
+  }
+
+  private applyScheduleJobs(result: BridgeReply): void {
+    this.scheduleJobs = (result.jobs ?? []).sort((left: ScheduleJob, right: ScheduleJob): number =>
+      (left.nextAt ?? Number.MAX_SAFE_INTEGER) - (right.nextAt ?? Number.MAX_SAFE_INTEGER));
+    this.scheduleZone = result.timezone ?? '';
+    this.scheduleListError = '';
+  }
+
+  private resetScheduleJobs(): void {
+    this.scheduleComputerGeneration += 1;
+    this.scheduleJobs = [];
+    this.scheduleZone = '';
+    this.scheduleListError = '';
+    this.scheduleLoading = false;
+    this.scheduleSaving = false;
+    if (this.schedulePage === 'editor' || this.schedulePage === 'history') this.schedulePage = '';
+    if (this.schedulePrevious === 'history') this.schedulePrevious = '';
+  }
+
+  private editSchedule(job?: ScheduleJob): void {
+    this.scheduleEditing = job;
+    this.scheduleName = job?.name ?? '';
+    this.schedulePrompt = job?.prompt ?? '';
+    this.scheduleCwd = job?.cwd ?? (this.projects.includes(this.workspaceCwd) ? this.workspaceCwd : this.projects[0] ?? '');
+    this.scheduleKind = job?.kind ?? 'once';
+    this.scheduleWhen = job?.kind === 'daily' ? job.time ?? '' : job?.kind === 'interval' ? String(job.interval ?? 60) :
+      scheduleTime(job?.at ?? Date.now() + 120_000);
+    this.scheduleCatchUp = String(job?.catchUp ?? 0);
+    this.scheduleError = '';
+    this.schedulePage = 'editor';
+  }
+
+  private scheduleFailure(error: Error): string {
+    const code = error.message;
+    if (code === 'not_found' || code === 'schedules_unsupported') return '请先更新电脑端 Pi Go。';
+    if (code === 'desktop_workspace_unshared') return '请先在电脑端共享所选工作区。';
+    if (code === 'schedule_changed') return '定时任务已被修改，请返回列表刷新。';
+    if (code === 'schedule_busy') return '任务已在运行，或电脑已达并发上限。';
+    if (code === 'schedule_expired') return '请编辑并选择新的执行时间。';
+    if (code === 'invalid_schedule') return '请检查时间、补跑窗口和提示词。';
+    return '电脑端未确认操作结果，请检查连接后刷新。';
+  }
+
+  private async updateSchedule(operation: string, job?: ScheduleJob): Promise<void> {
+    if (this.scheduleSaving || this.scheduleLoading) return;
+    const computer = this.computers.find((item: Companion): boolean => item.address === this.base);
+    if (!computer) { this.scheduleError = '请先连接电脑。'; return; }
+    const payload: Payload = { operation: operation, cwd: job?.cwd ?? this.scheduleCwd, id: job?.id,
+      scheduleVersion: job?.version, requestId: util.generateRandomUUID() };
+    if (operation === 'create' || operation === 'edit') {
+      const when = this.scheduleWhen.trim();
+      const catchUp = this.scheduleCatchUp.trim();
+      if (!payload.cwd || !this.scheduleName.trim() || !this.schedulePrompt.trim() ||
+        this.schedulePrompt.trim().startsWith('/') || !/^\d{1,4}$/.test(catchUp) || Number(catchUp) > 1440) {
+        this.scheduleError = '请选择工作区并填写名称、提示词和有效的补跑分钟数。';
+        return;
+      }
+      payload.name = this.scheduleName;
+      payload.prompt = this.schedulePrompt;
+      payload.kind = this.scheduleKind;
+      payload.catchUp = Number(catchUp);
+      if (this.scheduleKind === 'once') {
+        payload.at = parseScheduleTime(when);
+        if (payload.at <= Date.now()) { this.scheduleError = '请输入未来时间，格式为 YYYY-MM-DD HH:mm。'; return; }
+      } else if (this.scheduleKind === 'daily') {
+        if (!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(when)) { this.scheduleError = '请输入 24 小时时间，格式为 HH:mm。'; return; }
+        payload.time = when;
+      } else {
+        if (!/^\d{1,5}$/.test(when) || Number(when) < 1 || Number(when) > 10080) {
+          this.scheduleError = '间隔须为 1 至 10080 分钟。'; return;
+        }
+        payload.interval = Number(when);
+      }
+    }
+    const generation = this.scheduleComputerGeneration;
+    const editing = operation === 'create' || operation === 'edit';
+    this.scheduleSaving = true;
+    this.scheduleError = '';
+    try {
+      await this.request('/schedules/update', payload, this.scheduleEndpoint(computer));
+      this.scheduleMutation += 1;
+      const current = this.scheduleWatches.find((watch: ScheduleWatch): boolean => watch.address === computer.address);
+      this.setScheduleWatch(computer.address, current?.source ?? '', true);
+      this.queueScheduleSync(true);
+      if (generation !== this.scheduleComputerGeneration) return;
+      if (editing) this.schedulePage = '';
+      if (operation === 'run') this.getUIContext().getPromptAction().showToast({ message: '已提交到电脑运行' });
+      await this.loadScheduleJobs();
+    } catch (error) {
+      if (generation === this.scheduleComputerGeneration) {
+        const message = this.scheduleFailure(error as Error);
+        if (editing) this.scheduleError = message;
+        else this.getUIContext().getPromptAction().showToast({ message: message });
+      }
+    } finally {
+      if (generation === this.scheduleComputerGeneration) this.scheduleSaving = false;
+    }
+  }
+
   private schedule(delay: number): void {
     this.cancelSchedule();
     if (!this.isPaired || (!this.visible && !this.backgroundLiveActivity())) return;
@@ -808,6 +1217,9 @@ struct Index {
     const ca = endpoint ? endpoint.ca : this.ca;
     const pin = endpoint ? endpoint.pin : this.pin;
     const imageRequest = path.startsWith('/message-image?');
+    const remoteCatalog = path.startsWith('/sessions?') && ca !== undefined && pin !== undefined &&
+      validSecureAddress(address, ca, pin, true);
+    const slowRequest = path === '/open' || path === '/new' || path === '/create-workspace' || path === '/close-workspace';
     const headers: Record<string, string> = {};
     if (token) headers['Authorization'] = `Bearer ${token}`;
     if (input) headers['Content-Type'] = 'application/json';
@@ -819,8 +1231,8 @@ struct Index {
         usingCache: false,
         usingProxy: false,
         maxRedirects: 0,
-        connectTimeout: 2500,
-        readTimeout: path === '/open' || path === '/new' || path === '/create-workspace' || path === '/close-workspace' ? 16000 : 6500
+        connectTimeout: remoteCatalog ? 6000 : 2500,
+        readTimeout: remoteCatalog ? 20000 : (slowRequest ? 16000 : 6500)
       };
       if (ca && pin) {
         opts.caData = ca;
@@ -1094,7 +1506,7 @@ struct Index {
       return;
     }
     if (this.computers.length >= MAX_COMPUTERS && !this.computers.some((record: Companion): boolean => record.address === base)) {
-      this.status = '已保存 12 台电脑。请先移除不再使用的配对。';
+      this.status = '已保存 12 条连接。请先移除不再使用的连接。';
       return;
     }
     this.busy = true;
@@ -1102,7 +1514,11 @@ struct Index {
     try {
       const result = await this.request('/pair', { ticket: ticket }, { address: base, token: '', ca: ca, pin: pin });
       if (!result.token || !/^[a-f0-9]{64}$/.test(result.token)) throw new Error('invalid_token');
-      const record: Companion = { address: base, token: result.token, ca: ca, pin: pin };
+      const previous = this.computers.find((item: Companion): boolean => item.address === base);
+      const target = this.computers.find((item: Companion): boolean => item.computerId === this.pairingComputerId);
+      const computer = previous ?? target;
+      const record: Companion = { address: base, token: result.token, ca: ca, pin: pin,
+        computerId: computer?.computerId ?? util.generateRandomUUID(), computerName: computer?.computerName };
       if (!this.isPaired || this.base !== base) this.forgetDrafts(base);
       this.computers = [record, ...this.computers.filter((item: Companion): boolean => item.address !== base)];
       if (this.isPaired) this.leaveComputer(false, record);
@@ -1168,6 +1584,7 @@ struct Index {
     const address = this.base;
     if (this.currentId) this.rememberDraft(this.currentId);
     this.epoch += 1;
+    if (!next) this.resetScheduleJobs();
     this.cancelSchedule();
     this.stopStream();
     this.base = '';
@@ -1187,6 +1604,7 @@ struct Index {
       this.minePage = 'computers';
     }
     this.addingComputer = false;
+    this.pairingComputerId = '';
     this.offlineDismissed = false;
     this.closeFileEditor();
     this.resetFileTree();
@@ -1324,6 +1742,7 @@ struct Index {
     this.workspaceCwd = session.cwd;
     this.project = session.cwd.split('/').pop() ?? session.cwd;
     this.sessionName = session.name ?? '';
+    this.updateCachedSessionTitle(session.id, session.name);
     this.modelLabel = session.model ? `${session.model.name} · ${session.thinkingLevel ?? 'off'}` : '';
     this.currentModel = session.model;
     this.currentLevel = session.thinkingLevel ?? 'off';
@@ -1348,7 +1767,8 @@ struct Index {
       this.reachable = true;
       this.offlineDismissed = false;
       const libraryVisible = this.showSessions || this.dockedSessions();
-      if (libraryVisible && (connected || (!this.sessionCatalogLoaded && !this.sessionCatalogFailed)) && !this.busy) {
+      const catalogStale = Date.now() - this.sessionCatalogUpdatedAt >= 30000;
+      if (libraryVisible && (connected || (!this.sessionCatalogFailed && (!this.sessionCatalogLoaded || catalogStale))) && !this.busy) {
         void this.loadSessions();
       }
       if (libraryVisible) {
@@ -1648,6 +2068,9 @@ struct Index {
   private applyRunningStatus(result?: BridgeReply, selected: string = this.currentId): void {
     const rows = (result?.runningSessions ?? []).filter((row: RunningRow): boolean => !!row?.id);
     this.runningSessions = rows;
+    for (const row of rows) {
+      if (row.id !== this.currentId) this.updateCachedSessionTitle(row.id, row.name);
+    }
     const ids = rows.map((row: RunningRow): string => row.id).concat(result?.runningSessionIds ?? []);
     this.runningSessionIds = ids.filter((id: string, index: number): boolean => ids.indexOf(id) === index);
     if (result?.idleSessionIds) {
@@ -1749,7 +2172,7 @@ struct Index {
     return this.reachable && (id === this.currentId ? !this.idle || this.queued : this.runningSessionIds.includes(id));
   }
 
-  // Tab 2 ("运行中") lists every running session: the current one first, then background rows.
+  // Keep the current session first, followed by background sessions.
   private allRunningRows(): RunningRow[] {
     const current: RunningRow[] = [];
     if (this.currentId && this.sessionRunning(this.currentId)) {
@@ -1760,6 +2183,17 @@ struct Index {
       });
     }
     return current.concat(this.backgroundRunning());
+  }
+
+  private standaloneScheduleRuns(): RunMessage[] {
+    if (!this.reachable) return [];
+    const sessions = this.allRunningRows();
+    return this.scheduleActive.filter((row: RunMessage): boolean => this.isCurrentScheduleComputer(row) &&
+      !sessions.some((session: RunningRow): boolean => session.id === row.run.sessionId));
+  }
+
+  private runningTaskCount(): number {
+    return this.reachable ? this.allRunningRows().length + this.standaloneScheduleRuns().length : 0;
   }
 
   // Fine-grained state for pills and badges: streaming / waiting / queued.
@@ -3674,6 +4108,8 @@ struct Index {
       this.modeId = appearanceMode(settings.getSync('appearance_mode', 'system') as string).id;
       this.runNoticesEnabled = settings.getSync(RUN_NOTICE_SETTING, true) !== false;
       this.liveViewsEnabled = settings.getSync(LIVE_VIEW_SETTING, true) !== false;
+      const scheduleWatches = settings.getSync('schedule_watches', '[]') as string;
+      this.scheduleWatches = JSON.parse(scheduleWatches) as ScheduleWatch[];
       const raw = settings.getSync('huawei_profile', '') as string;
       if (!raw) return;
       const profile = JSON.parse(raw) as HuaweiProfile;
@@ -3916,6 +4352,7 @@ struct Index {
   }
 
   private restoreCloudComputer(computer: CloudComputer): void {
+    this.pairingComputerId = '';
     this.selectPairingMode(computer.mode);
     if (computer.mode === 'usb') this.address = computer.address;
     this.ticket = '';
@@ -3983,8 +4420,10 @@ struct Index {
 
   private mineBack(): void {
     this.dismissKeyboard();
+    this.closeComputerEditors();
     if (this.addingComputer) {
       this.addingComputer = false;
+      this.pairingComputerId = '';
       this.restoringComputer = undefined;
       this.ticket = '';
       this.pairingBundle = '';
@@ -3995,40 +4434,133 @@ struct Index {
     this.status = '';
   }
 
+  private closeComputerEditors(): void {
+    this.renameComputerId = '';
+    this.computerNameDraft = '';
+    this.moveConnectionAddress = '';
+  }
+
+  private addComputerConnection(id: string = ''): void {
+    this.closeComputerEditors();
+    this.status = '';
+    this.ticket = '';
+    this.pairingBundle = '';
+    this.lanCandidates = [];
+    this.restoringComputer = undefined;
+    this.pairingComputerId = id;
+    this.addingComputer = true;
+  }
+
+  private saveComputerName(id: string): void {
+    if (this.renameComputerId !== id || this.busy) return;
+    this.computers = renameComputerGroup(this.computers, id, this.computerNameDraft);
+    this.closeComputerEditors();
+    this.dismissKeyboard();
+    void this.persistComputers().catch(() => { this.status = '未能保存电脑备注。'; });
+  }
+
+  private assignComputerConnection(address: string, group?: ComputerGroup): void {
+    if (this.moveConnectionAddress !== address || this.busy) return;
+    this.computers = moveComputerConnection(this.computers, address, group?.id ?? util.generateRandomUUID(), group?.name ?? '');
+    this.closeComputerEditors();
+    void this.persistComputers().catch(() => { this.status = '未能保存连接归属。'; });
+  }
+
+  private pairingComputerTitle(): string {
+    const group = computerGroups(this.computers).find((item: ComputerGroup): boolean => item.id === this.pairingComputerId);
+    return group ? computerGroupTitle(group) : '';
+  }
+
+  @Builder
+  computerConnection(record: Companion, group: ComputerGroup) {
+    Column({ space: 6 }) {
+      Row({ space: 6 }) {
+        Button({ type: ButtonType.Normal }) {
+          Column({ space: 3 }) {
+            Text(`${connectionLabel(record)}${this.isPaired && this.base === record.address ? ' · 当前' : ''}`)
+              .fontSize(14).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
+            Text(record.address.split('://')[1]).fontSize(12).fontColor($r('app.color.pigo_muted'))
+          }.width('100%').alignItems(HorizontalAlign.Start)
+        }.id(`computer-${record.address}`).accessibilityText(`${connectionLabel(record)} ${record.address.split('://')[1]}`)
+          .layoutWeight(1).padding(10).borderRadius(12)
+          .backgroundColor(this.isPaired && this.base === record.address ? this.accentTint() : $r('app.color.pigo_control'))
+          .enabled(!this.busy && !this.openingSession && !this.removeTarget && (!this.isPaired || this.base !== record.address))
+          .onClick(() => { this.chooseComputer(record); })
+        if (this.removeTarget === record.address) {
+          Button('确认移除').chatAction().id('confirm-remove').enabled(!this.busy)
+            .onClick(() => { this.removeComputer(record.address); })
+          Button('取消').chatAction().enabled(!this.busy).onClick(() => { this.removeTarget = ''; })
+        } else {
+          if (this.computers.length > 1) {
+            Button('归组').chatAction().id(`group-${record.address}`).accessibilityText('更改连接归属')
+              .enabled(!this.busy && !this.openingSession && !this.removeTarget)
+              .onClick(() => {
+                this.closeComputerEditors();
+                this.moveConnectionAddress = record.address;
+              })
+          }
+          Button('移除').chatAction().id(`remove-${record.address}`).enabled(!this.busy && !this.openingSession && !this.removeTarget)
+            .onClick(() => { this.closeComputerEditors(); this.removeTarget = record.address; })
+        }
+      }.width('100%')
+      if (this.moveConnectionAddress === record.address) {
+        Text('将此连接归到哪台电脑？').fontSize(13).fontColor($r('app.color.pigo_muted')).width('100%')
+        ForEach(computerGroups(this.computers).filter((other: ComputerGroup): boolean => other.id !== group.id),
+          (other: ComputerGroup) => {
+            Button(computerGroupTitle(other)).chatAction().id(`move-to-${other.id}`).width('100%')
+              .onClick(() => { this.assignComputerConnection(record.address, other); })
+          }, (other: ComputerGroup) => `${other.id}|${other.name}`)
+        if (group.connections.length > 1) {
+          Button('设为独立电脑').chatAction().id('separate-connection').width('100%')
+            .onClick(() => { this.assignComputerConnection(record.address); })
+        }
+        Button('取消').chatAction().onClick(() => { this.closeComputerEditors(); })
+      }
+    }.width('100%').alignItems(HorizontalAlign.Start)
+  }
+
   @Builder
   computerList() {
-    if (this.computers.length) {
-      Text('已配对的电脑').fontSize(16).fontWeight(FontWeight.Bold).width('100%')
-      Scroll() {
-        Column({ space: 7 }) {
-          ForEach(this.computers, (record: Companion) => {
-            Row({ space: 6 }) {
-              Button(`${connectionLabel(record)} · ${record.address.split('://')[1]}${this.isPaired && this.base === record.address ? ' · 当前' : ''}`).chatAction()
-                .id(`computer-${record.address}`).layoutWeight(1)
-                .enabled(!this.busy && !this.openingSession && !this.removeTarget && (!this.isPaired || this.base !== record.address))
-                .onClick(() => { this.chooseComputer(record); })
-              if (this.removeTarget === record.address) {
-                Button('确认移除').chatAction().id('confirm-remove').enabled(!this.busy)
-                  .onClick(() => { this.removeComputer(record.address); })
-                Button('取消').chatAction().enabled(!this.busy).onClick(() => { this.removeTarget = ''; })
-              } else {
-                Button('移除').chatAction().id(`remove-${record.address}`).enabled(!this.busy && !this.openingSession && !this.removeTarget)
-                  .onClick(() => { this.removeTarget = record.address; })
-              }
-            }.width('100%')
-          }, (record: Companion) => record.address)
+    ForEach(computerGroups(this.computers), (group: ComputerGroup) => {
+      Column({ space: 9 }) {
+        Row({ space: 8 }) {
+          Image($r('app.media.ic_computer')).width(21).height(21).fillColor(this.accent())
+          Text(computerGroupTitle(group)).fontSize(17).fontWeight(FontWeight.Bold).fontColor($r('app.color.pigo_text'))
+            .layoutWeight(1).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+          Button('备注').chatAction().id(`rename-computer-${group.id}`).enabled(!this.busy && !this.removeTarget)
+            .onClick(() => {
+              this.closeComputerEditors();
+              this.computerNameDraft = group.name;
+              this.renameComputerId = group.id;
+            })
         }.width('100%')
-      }.constraintSize({ maxHeight: 144 }).width('100%')
-      if (this.removeTarget) Text(this.huaweiProfile ?
-        '移除本机配对和账号列表中的记录。可在电脑端吊销其他手机的访问。' :
-        '移除本机配对。可在电脑端吊销手机的访问。').fontSize(12).width('100%')
+        if (this.renameComputerId === group.id) {
+          TextInput({ placeholder: '电脑备注名', text: this.computerNameDraft }).id('computer-name-input')
+            .maxLength(40).onChange((value: string) => { this.computerNameDraft = value; }).width('100%')
+          Row({ space: 8 }) {
+            Button('保存').chatAction().id('save-computer-name')
+              .onClick(() => { this.saveComputerName(group.id); })
+            Button('取消').chatAction().onClick(() => { this.closeComputerEditors(); this.dismissKeyboard(); })
+          }.width('100%')
+        }
+        ForEach(group.connections, (record: Companion) => {
+          this.computerConnection(record, group)
+        }, (record: Companion) => record.address)
+        Button('添加连接').chatAction().id(`add-connection-${group.id}`).width('100%')
+          .enabled(!this.busy && !this.openingSession && !this.removeTarget)
+          .onClick(() => { this.addComputerConnection(group.id); })
+      }.width('100%').padding(14).borderRadius(16).backgroundColor($r('app.color.pigo_panel'))
+    }, (group: ComputerGroup) => `${group.id}|${group.name}|${group.connections.map((record: Companion): string => record.address).join('|')}`)
+    if (this.removeTarget) {
+      Text(this.huaweiProfile ? '移除手机上的配对和账号列表中的连接记录。' : '移除手机上的这条配对记录。')
+        .fontSize(12).fontColor($r('app.color.pigo_muted')).width('100%')
     }
   }
 
   @Builder
   cloudComputerList() {
     if (this.cloudOnlyComputers().length) {
-      Text('从账号恢复的电脑').fontSize(16).fontWeight(FontWeight.Bold).width('100%')
+      Text('从账号恢复的连接').fontSize(16).fontWeight(FontWeight.Bold).width('100%')
       ForEach(this.cloudOnlyComputers(), (computer: CloudComputer) => {
         Column({ space: 8 }) {
           Text(`${computer.mode === 'usb' ? 'USB' : computer.mode === 'lan' ? '局域网' : '公网'} · ${computer.address.split('://')[1]}`)
@@ -4054,6 +4586,9 @@ struct Index {
   @Builder
   pairingForm() {
     Column({ space: 14 }) {
+      if (this.pairingComputerId) {
+        Text(this.pairingComputerTitle()).fontSize(16).fontWeight(FontWeight.Medium).width('100%')
+      }
       if (this.restoringComputer) {
         Text('请从这台电脑获取新的配对码或配对包。')
           .fontSize(14).fontColor($r('app.color.pigo_text')).width('100%')
@@ -4273,8 +4808,9 @@ struct Index {
           .accessibilityText('返回').enabled(!this.busy).onClick(() => { this.mineBack(); })
       }
       Text(this.minePage === 'theme' ? '系统主题' : this.minePage === 'computers' ?
-        (this.addingComputer ? '添加电脑' : '我的电脑') : '我的')
-        .fontSize(this.minePage ? 21 : 26).fontWeight(FontWeight.Bold).fontColor($r('app.color.pigo_text'))
+        (this.addingComputer ? (this.pairingComputerId ? '添加连接' : '添加电脑') : '电脑管理') : '我的')
+        .fontSize(this.minePage ? 21 : 26).fontWeight(FontWeight.Bold).fontColor($r('app.color.pigo_text')).layoutWeight(1)
+      if (this.computers.length) this.scheduleInboxButton()
     }.width('100%').height(this.headerHeight())
       .border({ width: { bottom: 1 }, color: $r('app.color.pigo_line') })
   }
@@ -4291,7 +4827,7 @@ struct Index {
                 Column({ space: 4 }) {
                   Text(this.computerTitle()).fontSize(17).fontWeight(FontWeight.Medium)
                     .fontColor($r('app.color.pigo_text')).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
-                  Text(this.reachable ? '已连接' : '离线，正在尝试重连').fontSize(13)
+                  Text(`${this.base.split('://')[1]} · ${this.reachable ? '已连接' : '离线，正在尝试重连'}`).fontSize(13)
                     .fontColor(this.reachable ? $r('app.color.pigo_success') : $r('app.color.pigo_warning'))
                 }.layoutWeight(1).alignItems(HorizontalAlign.Start)
               }.width('100%').padding(16).borderRadius(16).backgroundColor($r('app.color.pigo_panel'))
@@ -4299,22 +4835,21 @@ struct Index {
             this.computerList()
             this.cloudComputerList()
           }
-          if (this.addingComputer || !this.isPaired) {
+          if (this.addingComputer || !this.computers.length) {
             this.pairingForm()
           } else {
             Button('添加电脑').chatAction().id('add-computer').width('100%').height(44)
               .backgroundColor(this.accent()).fontColor(this.accentForeground())
               .enabled(!this.busy && !this.openingSession && !this.removeTarget)
-              .onClick(() => { this.status = ''; this.addingComputer = true; })
+              .onClick(() => { this.addComputerConnection(); })
           }
         } else if (this.minePage === 'theme') {
           this.themeSettings()
         } else {
           this.profileCard()
-          this.mineEntry('computers', '我的电脑', this.isPaired ?
+          this.mineEntry('computers', '电脑管理', this.isPaired ?
             `${this.computerTitle()} · ${this.reachable ? '已连接' : '离线'}` :
-            (this.computers.length || this.cloudComputers.length ?
-              `${this.computers.length + this.cloudOnlyComputers().length} 台电脑` : '配对并连接电脑'))
+            (this.computers.length ? `${computerGroups(this.computers).length} 台电脑` : '配对并连接电脑'))
           this.mineEntry('theme', '系统主题', `${themeStyle(this.themeId).label} · ${appearanceMode(this.modeId).label}`)
           this.runNoticeSettings()
           this.liveViewSettings()
@@ -4478,11 +5013,11 @@ struct Index {
         Button({ type: ButtonType.Normal }) {
           this.headerIcon($r('app.media.ic_menu'), $r('app.color.pigo_text'))
         }.id('history').headerAction()
-          .accessibilityText('打开任务抽屉').enabled(!this.busy && !this.showFiles)
+          .accessibilityText('打开会话抽屉').enabled(!this.busy && !this.showFiles)
           .onClick(() => { this.setDrawer(true); })
       }
       Column({ space: 3 }) {
-        Text(this.showFiles ? '工作区文件' : this.showSettings ? '会话设置' : this.activeTab === 'pending' ? '运行中' : this.chatTitle())
+        Text(this.showFiles ? '工作区文件' : this.showSettings ? '会话设置' : this.activeTab === 'pending' ? '任务' : this.chatTitle())
           .fontSize(18).fontWeight(FontWeight.Bold).fontColor($r('app.color.pigo_text')).maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis }).width('100%')
         Row({ space: 6 }) {
@@ -4495,6 +5030,7 @@ struct Index {
         }.width('100%').onClick(() => { if (!this.dockedSessions()) this.setDrawer(true); })
       }.layoutWeight(1).alignItems(HorizontalAlign.Start)
       Row({ space: 6 }) {
+        this.scheduleInboxButton()
         Button({ type: ButtonType.Normal }) {
           this.headerIcon($r('app.media.ic_compose'), this.accent())
         }.id('new-task').headerAction().accessibilityText('在当前工作区新建会话')
@@ -4533,7 +5069,7 @@ struct Index {
     } else if (this.showSettings) {
       this.sessionSettings()
     } else if (this.activeTab === 'pending') {
-      this.runningView()
+      this.taskView()
     } else if (this.noSession) {
       this.welcome()
     } else {
@@ -5058,12 +5594,29 @@ struct Index {
 
   private chatTitle(): string {
     const listed = this.sessions.find((session: SessionRow): boolean => session.id === this.currentId);
+    const listedName = listed?.name === '(no messages)' ? '' : listed?.name;
+    if (this.sessionName || listedName) return this.sessionName || listedName || '新任务';
     const firstPrompt = this.messages.find((message: ChatMessage): boolean => message.role === 'user');
-    return this.sessionName || listed?.name || firstPrompt?.text || '新任务';
+    if (!firstPrompt) return '新任务';
+    const attachmentStart = firstPrompt.text.lastIndexOf('\n\n[Pi Go 附件] 手机上传了 ');
+    const text = (attachmentStart < 0 ? firstPrompt.text : firstPrompt.text.slice(0, attachmentStart)).replace(/\s+/g, ' ').trim();
+    const characters = Array.from(text);
+    if (characters.length > 48) return characters.slice(0, 47).join('').trimEnd() + '…';
+    return text || (attachmentStart >= 0 || (firstPrompt.imageCount ?? 0) > 0 ? '附件会话' : '新任务');
+  }
+
+  private updateCachedSessionTitle(id: string, name?: string): void {
+    if (!name) return;
+    const index = this.sessions.findIndex((row: SessionRow): boolean => row.id === id && row.name !== name);
+    if (index < 0) return;
+    const rows = this.sessions.slice();
+    rows[index].name = name;
+    this.sessions = rows;
   }
 
   private computerTitle(): string {
-    return validUsb(this.base) ? 'USB 电脑' : (this.base.split('://')[1] || '我的电脑');
+    const record = this.computers.find((item: Companion): boolean => item.address === this.base);
+    return record?.computerName || (validUsb(this.base) ? 'USB 电脑' : (this.base.split('://')[1] || '我的电脑'));
   }
 
   private toggleSpace(path: string): void {
@@ -5217,14 +5770,14 @@ struct Index {
                   .fontColor([this.activeTab === tab ? this.accent() : $r('app.color.pigo_muted')])
                   .accessibilityLevel('no')
               }.width('100%').height('100%').justifyContent(FlexAlign.Center)
-              if (tab === 'pending' && this.reachable && this.allRunningRows().length) {
-                Text(this.allRunningRows().length > 9 ? '9+' : `${this.allRunningRows().length}`)
+              if (tab === 'pending' && this.runningTaskCount()) {
+                Text(this.runningTaskCount() > 9 ? '9+' : `${this.runningTaskCount()}`)
                   .fontSize(9).fontWeight(FontWeight.Medium).fontColor(this.accentForeground())
                   .textAlign(TextAlign.Center).constraintSize({ minWidth: 14 }).height(14)
                   .padding({ left: 2, right: 2 }).backgroundColor(this.accent()).borderRadius(7)
               }
             }.width(48).height(25)
-            Text(tab === 'tasks' ? '任务' : tab === 'pending' ? '运行中' : tab === 'files' ? '工作区' : '我的')
+            Text(tab === 'tasks' ? '会话' : tab === 'pending' ? '任务' : tab === 'files' ? '工作区' : '我的')
               .fontSize(11).fontWeight(this.activeTab === tab ? FontWeight.Bold : FontWeight.Medium)
               .fontColor(this.activeTab === tab ? this.accent() : $r('app.color.pigo_muted'))
           }
@@ -5256,10 +5809,13 @@ struct Index {
             if (tab !== this.activeTab) {
               this.minePage = '';
               this.addingComputer = false;
+              this.pairingComputerId = '';
+              this.closeComputerEditors();
               this.restoringComputer = undefined;
               this.removeTarget = '';
             }
             this.activeTab = tab;
+            if (tab === 'pending') void this.loadScheduleJobs();
           })
       }, (tab: string) => tab)
     }.width('100%').height('100%').padding({ left: 6, right: 6 })
@@ -5344,12 +5900,26 @@ struct Index {
   }
 
   @Builder
-  runningView() {
+  taskView() {
     Scroll() {
+      Column({ space: 24 }) {
+        this.runningTasksSection()
+        this.scheduledTasksSection()
+      }.width('100%').alignItems(HorizontalAlign.Start).padding({ top: 12, bottom: 16 })
+    }.scrollable(ScrollDirection.Vertical).scrollBar(BarState.Off).width('100%').layoutWeight(1)
+      .align(Alignment.TopStart).edgeEffect(EdgeEffect.Spring)
+  }
+
+  @Builder
+  runningTasksSection() {
       Column({ space: 10 }) {
-        if (this.allRunningRows().length) {
-          Text(`${this.allRunningRows().length} 个会话在运行`).fontSize(13).fontColor($r('app.color.pigo_muted'))
-            .width('100%').textAlign(TextAlign.Start)
+        Text('运行中').fontSize(17).fontWeight(FontWeight.Bold).fontColor($r('app.color.pigo_text'))
+        ForEach(this.standaloneScheduleRuns(),
+          (row: RunMessage) => {
+            Text(`${row.run.name} · 定时任务运行中`).fontSize(15).fontColor($r('app.color.pigo_text'))
+              .width('100%').padding(12).borderRadius(12).backgroundColor($r('app.color.pigo_panel'))
+          }, (row: RunMessage) => row.key)
+        if (this.reachable && this.allRunningRows().length) {
           ForEach(this.allRunningRows(), (row: RunningRow) => {
             Button({ type: ButtonType.Normal }) {
               Row({ space: 10 }) {
@@ -5377,23 +5947,19 @@ struct Index {
                 this.activeTab = 'tasks';
               })
           }, (row: RunningRow) => row.id)
-        } else {
+        } else if (!this.standaloneScheduleRuns().length) {
           Row({ space: 12 }) {
             Stack() {
               Image(this.reachable ? $r('app.media.ic_pending') : $r('app.media.ic_computer'))
                 .width(22).height(22)
             }.width(40).height(40).borderRadius(10).backgroundColor($r('app.color.pigo_control'))
             Column({ space: 4 }) {
-              Text(this.reachable ? '暂无运行中的会话' : '电脑未连接')
+              Text(this.reachable ? '暂无运行中的任务' : '电脑未连接')
                 .fontSize(16).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
-              Text(this.reachable ? '会话在电脑上执行时，会显示在这里' : '连接电脑后可查看运行中的会话')
-                .fontSize(13).lineHeight(19).fontColor($r('app.color.pigo_muted'))
             }.layoutWeight(1).alignItems(HorizontalAlign.Start)
           }.width('100%').padding(14).borderRadius(12).backgroundColor($r('app.color.pigo_panel'))
         }
-      }.width('100%').alignItems(HorizontalAlign.Start).padding({ top: 12, bottom: 16 })
-    }.scrollable(ScrollDirection.Vertical).scrollBar(BarState.Off).width('100%').layoutWeight(1)
-      .align(Alignment.TopStart).edgeEffect(EdgeEffect.Spring)
+      }.width('100%').alignItems(HorizontalAlign.Start)
   }
 
   @Builder
@@ -5516,7 +6082,7 @@ struct Index {
         if (!this.dockedSessions()) {
           Button({ type: ButtonType.Normal }) {
             Image($r('app.media.ic_close')).width(20).height(20).fillColor($r('app.color.pigo_muted'))
-          }.width(44).height(44).padding(0).backgroundColor(Color.Transparent).accessibilityText('关闭任务抽屉')
+          }.width(44).height(44).padding(0).backgroundColor(Color.Transparent).accessibilityText('关闭会话抽屉')
             .onClick(() => { this.setDrawer(false); })
         }
       }.width('100%').padding({ left: this.dockedSessions() ? 2 : 10 })
@@ -5524,7 +6090,7 @@ struct Index {
         Row({ space: this.compactSessionPane() ? 6 : 10 }) {
           Image($r('app.media.ic_compose')).width(19).height(19)
             .fillColor(this.dockedSessions() ? this.accentForeground() : $r('app.color.pigo_text'))
-          Text('新建任务').fontSize(this.dockedSessions() ? 15 : 16).fontWeight(FontWeight.Medium)
+          Text('新建会话').fontSize(this.dockedSessions() ? 15 : 16).fontWeight(FontWeight.Medium)
             .fontColor(this.dockedSessions() ? this.accentForeground() : $r('app.color.pigo_text')).maxLines(1)
         }.justifyContent(FlexAlign.Center).width('100%')
       }.id('drawer-new-task').width('100%').height(this.dockedSessions() ? 44 : 48).padding(0)
@@ -5781,6 +6347,266 @@ struct Index {
       .transition(TransitionEffect.OPACITY.animation({ duration: 180, curve: Curve.EaseOut }))
   }
 
+  private isCurrentScheduleComputer(message: RunMessage): boolean {
+    const current = this.computers.find((item: Companion): boolean => item.address === this.base);
+    const origin = this.computers.find((item: Companion): boolean => item.address === message.address);
+    return !!current && !!origin && computerGroupId(current) === computerGroupId(origin);
+  }
+
+  private confirmDeleteSchedule(job: ScheduleJob): void {
+    this.getUIContext().showAlertDialog({
+      title: '删除定时任务',
+      message: `删除「${job.name}」？已生成的运行记录和会话会保留。`,
+      primaryButton: { value: '取消', action: () => {} },
+      secondaryButton: { value: '删除', action: () => { void this.updateSchedule('delete', job); } }
+    });
+  }
+
+  private scheduleJobMenu(job: ScheduleJob): MenuElement[] {
+    const options: MenuElement[] = [
+      { value: '编辑', action: () => { this.editSchedule(job); } },
+      { value: '立即运行', action: () => { void this.updateSchedule('run', job); } },
+      { value: '删除', action: () => { this.confirmDeleteSchedule(job); } }
+    ];
+    if (job.nextAt !== null || !job.enabled) options.splice(1, 0, {
+      value: job.enabled ? '暂停' : '启用',
+      action: () => { void this.updateSchedule(job.enabled ? 'pause' : 'resume', job); }
+    });
+    return options;
+  }
+
+  @Builder
+  scheduleInboxButton() {
+    Button({ type: ButtonType.Normal }) {
+      Stack({ alignContent: Alignment.TopEnd }) {
+        this.headerIcon($r('app.media.ic_inbox'), $r('app.color.pigo_text'))
+        if (this.scheduleMessages.some((item: RunMessage): boolean => item.unread)) {
+          Blank().width(7).height(7).borderRadius(4).backgroundColor(this.accent())
+        }
+      }
+    }.id('schedule-inbox').headerAction().accessibilityText(this.scheduleMessages.some((item: RunMessage): boolean =>
+      item.unread) ? '收件箱，有未读消息' : '收件箱')
+      .onClick(() => { this.showScheduleInbox(); })
+  }
+
+  @Builder
+  scheduledMessageRow(message: RunMessage) {
+    Button({ type: ButtonType.Normal }) {
+      Row({ space: 12 }) {
+        Text(message.run.status === 'succeeded' ? '✓' : '·').fontSize(20)
+          .fontColor(message.run.status === 'succeeded' ? $r('app.color.pigo_success') : $r('app.color.pigo_warning'))
+          .textAlign(TextAlign.Center).width(32).height(32).borderRadius(10).backgroundColor($r('app.color.pigo_control'))
+        Column({ space: 3 }) {
+          Text(message.run.name).fontSize(16).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
+            .maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis })
+          Text(`${message.computer} · ${scheduleRunStatus(message.run.status)}`).fontSize(13)
+            .fontColor($r('app.color.pigo_muted')).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+          Text(scheduleTime(message.run.finishedAt ?? message.run.scheduledAt)).fontSize(12).fontColor($r('app.color.pigo_muted'))
+        }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+        if (message.unread) Blank().width(7).height(7).borderRadius(4).backgroundColor(this.accent())
+        Image($r('app.media.ic_chevron')).width(14).height(14).rotate({ angle: -90 }).fillColor($r('app.color.pigo_muted'))
+      }.width('100%').padding(12)
+    }.id(`schedule-message-${message.run.id}`).width('100%').padding(0).borderRadius(14)
+      .backgroundColor($r('app.color.pigo_panel')).onClick(() => { this.showScheduleDetail(message); })
+  }
+
+  @Builder
+  scheduleInboxDelete(message: RunMessage) {
+    Button('删除').id(`schedule-dismiss-${message.run.id}`).width(72).height('100%').padding(0)
+      .fontColor(Color.White).backgroundColor($r('app.color.pigo_error')).borderRadius(14)
+      .accessibilityText(`删除收件箱消息 ${message.run.name}`)
+      .onClick(() => { this.dismissScheduleMessage(message); })
+  }
+
+  @Builder
+  scheduleInboxList() {
+    List({ space: 12 }) {
+      ListItem() {
+        Text('所有电脑').fontSize(13).fontColor($r('app.color.pigo_muted'))
+      }
+      if (this.scheduleOffline.length) {
+        ListItem() {
+          Text('部分电脑暂时无法连接，恢复连接后可补收结果。').fontSize(13).fontColor($r('app.color.pigo_muted'))
+        }
+      } else if (!this.scheduleMessages.some((message: RunMessage): boolean => !message.dismissed)) {
+        ListItem() {
+          Text('暂无定时任务消息').fontColor($r('app.color.pigo_muted'))
+        }
+      }
+      ForEach(this.scheduleMessages.filter((message: RunMessage): boolean => !message.dismissed), (message: RunMessage) => {
+        ListItem() {
+          this.scheduledMessageRow(message)
+        }.swipeAction({ end: this.scheduleInboxDelete.bind(this, message), edgeEffect: SwipeEdgeEffect.None })
+      }, (message: RunMessage) => `${message.key}:${message.unread}`)
+    }.layoutWeight(1).width('100%').scrollBar(BarState.Off).padding({ top: 6, bottom: 12 })
+  }
+
+  @Builder
+  scheduleEditor() {
+    Column({ space: 12 }) {
+      Text('工作区').fontSize(13).fontColor($r('app.color.pigo_muted'))
+      Button(this.scheduleCwd ? this.workspaceName(this.scheduleCwd) : '选择已共享工作区')
+        .chatAction().enabled(!this.scheduleEditing && this.projects.length > 0)
+        .bindMenu(this.projects.map((cwd: string): MenuElement => ({
+          value: this.workspaceName(cwd), action: () => { this.scheduleCwd = cwd; }
+        })))
+      Text('名称').fontSize(13).fontColor($r('app.color.pigo_muted'))
+      TextInput({ text: this.scheduleName, placeholder: '例如 每日汇总' }).id('schedule-name').maxLength(80)
+        .onChange((value: string) => { this.scheduleName = value; })
+      Text('让 Pi 执行什么').fontSize(13).fontColor($r('app.color.pigo_muted'))
+      TextArea({ text: this.schedulePrompt, placeholder: '汇总今天的工作区变更' }).id('schedule-prompt').maxLength(1600).height(112)
+        .onChange((value: string) => { this.schedulePrompt = value; })
+      Row({ space: 8 }) {
+        ForEach(['once', 'daily', 'interval'], (kind: string) => {
+          Button(kind === 'once' ? '指定时间' : kind === 'daily' ? '每天' : '固定间隔').chatAction()
+            .id(`schedule-kind-${kind}`).layoutWeight(1)
+            .accessibilitySelected(this.scheduleKind === kind)
+            .backgroundColor(this.scheduleKind === kind ? this.accentTint() : $r('app.color.pigo_panel'))
+            .onClick(() => {
+              if (this.scheduleKind === kind) return;
+              this.scheduleKind = kind;
+              this.scheduleWhen = kind === 'once' ? scheduleTime(Date.now() + 120_000) : kind === 'daily' ? '18:00' : '60';
+            })
+        }, (kind: string) => kind)
+      }.width('100%')
+      Text(this.scheduleKind === 'once' ? '执行时间（手机时区）' : this.scheduleKind === 'daily' ?
+        `每天执行时间（${this.scheduleZone || '电脑时区'}）` : '每隔多少分钟执行')
+        .fontSize(13).fontColor($r('app.color.pigo_muted'))
+      TextInput({ text: this.scheduleWhen, placeholder: this.scheduleKind === 'once' ? 'YYYY-MM-DD HH:mm' :
+        this.scheduleKind === 'daily' ? 'HH:mm' : '分钟' }).maxLength(16)
+        .onChange((value: string) => { this.scheduleWhen = value; })
+      Text('错过后可补跑的分钟数，0 表示跳过').fontSize(13).fontColor($r('app.color.pigo_muted'))
+      TextInput({ text: this.scheduleCatchUp, placeholder: '0' }).type(InputType.Number).maxLength(4)
+        .onChange((value: string) => { this.scheduleCatchUp = value; })
+      Button(this.scheduleSaving ? '等待电脑确认…' : '保存到电脑').chatAction().id('schedule-save').width('100%')
+        .enabled(!this.scheduleSaving).onClick(() => {
+          void this.updateSchedule(this.scheduleEditing ? 'edit' : 'create', this.scheduleEditing);
+        })
+    }.width('100%').alignItems(HorizontalAlign.Start)
+  }
+
+  @Builder
+  scheduledRunDetail(message: RunMessage) {
+    Column({ space: 12 }) {
+      Text(message.run.name).fontSize(24).fontWeight(FontWeight.Bold).fontColor($r('app.color.pigo_text'))
+      Text(`${message.computer} · ${scheduleRunStatus(message.run.status)}`).fontSize(15).fontColor(this.accent())
+      Column({ space: 8 }) {
+        Text(`工作区 · ${message.run.cwd.split('/').pop() || message.run.cwd}`).fontSize(14).fontColor($r('app.color.pigo_text'))
+        Text(`计划 · ${scheduleTime(message.run.scheduledAt)}`).fontSize(14).fontColor($r('app.color.pigo_text'))
+        if (message.run.startedAt) Text(`开始 · ${scheduleTime(message.run.startedAt)}`).fontSize(14).fontColor($r('app.color.pigo_text'))
+        if (message.run.finishedAt) Text(`结束 · ${scheduleTime(message.run.finishedAt)}`).fontSize(14).fontColor($r('app.color.pigo_text'))
+      }.width('100%').alignItems(HorizontalAlign.Start).padding(14).borderRadius(12).backgroundColor($r('app.color.pigo_panel'))
+      if (message.run.reason) Text(scheduleRunReason(message.run.reason)).fontSize(14).fontColor($r('app.color.pigo_muted'))
+      if ((message.run.coalesced ?? 0) > 0) {
+        Text(`此前还有 ${message.run.coalesced} 次到期，已合并处理。`).fontSize(14).fontColor($r('app.color.pigo_muted'))
+      }
+      if (message.run.summary) {
+        Text('运行结果').fontSize(16).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
+        Text(message.run.summary).fontSize(15).copyOption(CopyOptions.LocalDevice).fontColor($r('app.color.pigo_text'))
+          .width('100%').padding(14).borderRadius(12).backgroundColor($r('app.color.pigo_panel'))
+      }
+    }.width('100%').alignItems(HorizontalAlign.Start)
+  }
+
+  @Builder
+  scheduledTasksSection() {
+    Column({ space: 12 }) {
+      Row({ space: 8 }) {
+        Text('定时任务').layoutWeight(1).fontSize(17).fontWeight(FontWeight.Bold)
+          .fontColor($r('app.color.pigo_text'))
+        Button('刷新').chatAction().id('schedule-refresh').enabled(!this.scheduleSaving && !this.scheduleLoading)
+          .onClick(() => { void this.loadScheduleJobs(); })
+      }.width('100%')
+      Row({ space: 8 }) {
+        Button('新建定时任务').chatAction().id('schedule-create')
+          .enabled(this.reachable && this.projects.length > 0 && !this.scheduleLoading &&
+            !this.scheduleSaving && !this.scheduleListError).onClick(() => { this.editSchedule(); })
+        Button('运行历史').chatAction().id('schedule-history')
+          .onClick(() => { this.scheduleError = ''; this.schedulePage = 'history'; })
+      }.width('100%')
+      if (this.scheduleLoading) Text('正在读取电脑上的计划…').fontColor($r('app.color.pigo_muted'))
+      if (this.scheduleListError) Text(this.scheduleListError).fontSize(14).fontColor($r('app.color.pigo_error'))
+      else if (!this.reachable && this.scheduleJobs.length) {
+        Text('显示上次连接时的定时计划').fontSize(13).fontColor($r('app.color.pigo_muted'))
+      } else if (this.reachable && !this.scheduleLoading && !this.scheduleJobs.length) {
+        Text(this.projects.length ? '还没有定时任务' : '共享工作区后可创建定时任务').fontColor($r('app.color.pigo_muted'))
+      }
+      ForEach(this.scheduleJobs, (job: ScheduleJob) => {
+        Row({ space: 8 }) {
+          Column({ space: 4 }) {
+            Text(job.name).fontSize(16).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
+            Text(`${this.workspaceName(job.cwd)} · ${!job.enabled ? '已暂停' :
+              job.nextAt === null ? '已结束' : `下次 ${scheduleTime(job.nextAt)}`}`)
+              .fontSize(13).fontColor($r('app.color.pigo_muted'))
+          }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+          Button('操作').chatAction().id(`schedule-operations-${job.id}`)
+            .enabled(this.reachable && !this.scheduleSaving && !this.scheduleLoading).bindMenu(this.scheduleJobMenu(job))
+        }.width('100%').padding(12).borderRadius(12).backgroundColor($r('app.color.pigo_panel'))
+      }, (job: ScheduleJob) => `${job.id}:${job.version}:${job.nextAt}`)
+    }.width('100%').alignItems(HorizontalAlign.Start)
+  }
+
+  @Builder
+  scheduleOverlay() {
+    Column({ space: 10 }) {
+      Row({ space: 8 }) {
+        Button('返回').chatAction().enabled(!this.scheduleSaving).onClick(() => { this.backFromSchedule(); })
+        Text(this.schedulePage === 'inbox' ? '收件箱' : this.schedulePage === 'detail' ? '运行详情' :
+          this.schedulePage === 'editor' ? (this.scheduleEditing ? '编辑定时任务' : '新建定时任务') : '运行历史')
+          .layoutWeight(1).fontSize(19).fontWeight(FontWeight.Bold).fontColor($r('app.color.pigo_text'))
+      }.width('100%')
+      if (this.schedulePage === 'inbox') {
+        this.scheduleInboxList()
+      } else {
+        Scroll() {
+        Column({ space: 12 }) {
+          if (this.scheduleError) Text(this.scheduleError).fontSize(14).fontColor($r('app.color.pigo_error'))
+          if (this.schedulePage === 'detail' && this.scheduleDetail) {
+            this.scheduledRunDetail(this.scheduleDetail)
+          } else if (this.schedulePage === 'editor') {
+            this.scheduleEditor()
+          } else if (this.schedulePage === 'history') {
+            Text(this.computerTitle()).fontSize(13).fontColor($r('app.color.pigo_muted'))
+            if (!this.scheduleMessages.some((item: RunMessage): boolean => this.isCurrentScheduleComputer(item))) {
+              Text('暂无运行记录').fontColor($r('app.color.pigo_muted'))
+            }
+            ForEach(this.scheduleMessages.filter((item: RunMessage): boolean => this.isCurrentScheduleComputer(item)),
+              (message: RunMessage) => { this.scheduledMessageRow(message) },
+              (message: RunMessage) => `${message.key}:${message.unread}`)
+          }
+        }.width('100%').alignItems(HorizontalAlign.Start).padding({ top: 6, bottom: 12 })
+        }.layoutWeight(1).width('100%').align(Alignment.TopStart).scrollBar(BarState.Off)
+      }
+      if (this.schedulePage === 'detail' && this.scheduleDetail?.run.sessionId) {
+        if (this.isPaired && !this.isCurrentScheduleComputer(this.scheduleDetail)) {
+          Text(`当前聊天在 ${this.computerTitle()}`).fontSize(13).fontColor($r('app.color.pigo_muted'))
+        }
+        Button(`在 ${this.scheduleDetail.computer} 打开会话`).chatAction().width('100%')
+          .enabled(!this.busy && !this.openingSession).onClick(() => {
+            if (this.scheduleDetail) void this.openScheduledSession(this.scheduleDetail);
+          })
+      }
+    }.id('schedule-overlay').width('100%').height('100%').padding({
+      left: 16, right: 16, top: this.statusBarHeight + 8, bottom: this.bottomPad() + 8
+    }).backgroundColor($r('app.color.launch_background')).hitTestBehavior(HitTestMode.BLOCK_HIERARCHY)
+  }
+
+  @Builder
+  scheduledRunBanner(message: RunMessage) {
+    Row({ space: 6 }) {
+      Button({ type: ButtonType.Normal }) {
+        Column({ space: 2 }) {
+          Text(`${message.run.name} · ${scheduleRunStatus(message.run.status)}`).fontSize(15)
+            .fontColor($r('app.color.pigo_text')).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+          Text(message.computer).fontSize(13).fontColor($r('app.color.pigo_muted'))
+        }.width('100%').alignItems(HorizontalAlign.Start)
+      }.layoutWeight(1).height(48).padding({ left: 12 }).backgroundColor(Color.Transparent)
+        .onClick(() => { this.showScheduleDetail(message); })
+      Button('关闭').chatAction().onClick(() => { this.scheduleBanner = undefined; })
+    }.id('schedule-completion-banner').width('92%').constraintSize({ maxWidth: 440 }).padding(6).borderRadius(16)
+      .backgroundColor($r('app.color.pigo_panel')).border({ width: 1, color: $r('app.color.pigo_line') })
+  }
+
   build() {
     Stack({ alignContent: Alignment.TopStart }) {
       Row() {
@@ -5805,7 +6631,7 @@ struct Index {
         .shadow({ radius: 24, offsetX: -5,
           color: this.drawerOpen() ? (this.darkMode ? '#A0000000' : '#50627085') : Color.Transparent })
         .opacity(this.drawerOpen() ? (this.darkMode ? 0.48 : 0.38) : 1)
-        .accessibilityLevel(this.drawerOpen() ? 'no-hide-descendants' : 'auto')
+        .accessibilityLevel(this.drawerOpen() || this.schedulePage ? 'no-hide-descendants' : 'auto')
       if (this.drawerOpen()) {
         Button({ type: ButtonType.Normal }).width('100%').height('100%').padding(0)
           .backgroundColor(Color.Transparent).borderRadius(0)
@@ -5863,6 +6689,13 @@ struct Index {
       if (this.markdownTableReader) this.markdownTableReaderPage(this.markdownTableReader)
       if (this.showNewSpace) this.newSpaceDialog()
       if (this.runNotice) this.runCompletionBanner(this.runNotice)
+      if (this.scheduleBanner && !this.schedulePage && !this.runNotice) {
+        Row() {
+          this.scheduledRunBanner(this.scheduleBanner)
+        }.width('100%').justifyContent(FlexAlign.Center)
+          .margin({ top: this.statusBarHeight + this.headerHeight() + 10 }).hitTestBehavior(HitTestMode.Transparent)
+      }
+      if (this.schedulePage) this.scheduleOverlay()
     }.width('100%').height('100%').padding({ left: this.leftInset, right: this.rightInset })
       .backgroundColor(this.drawerOpen() ? $r('app.color.pigo_sidebar') : $r('app.color.launch_background'))
       .clip(true)

@@ -28,6 +28,39 @@ export function messageText(content) {
     part?.type === 'text' && typeof part.text === 'string' ? [part.text] : []).join('\n') : '';
 }
 
+export const sessionAttachmentMarker = '\n\n[Pi Go 附件] 手机上传了 ';
+const titleLength = 48;
+const titleSegments = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+
+export function sessionPromptText(content) {
+  const text = messageText(content);
+  const attachmentStart = text.lastIndexOf(sessionAttachmentMarker);
+  return (attachmentStart < 0 ? text : text.slice(0, attachmentStart)).trim();
+}
+
+function shortSessionTitle(text) {
+  const line = text.replace(/[\s\p{Cc}]+/gu, ' ').trim();
+  let count = 0;
+  let end = 0;
+  for (const { index } of titleSegments.segment(line)) {
+    if (count === titleLength) return line.slice(0, end).trimEnd() + '…';
+    count += 1;
+    end = index;
+  }
+  return line || undefined;
+}
+
+export function sessionTitlePreview(content) {
+  return shortSessionTitle(sessionPromptText(content)) ??
+    (imageParts(content).length || messageText(content).includes(sessionAttachmentMarker) ? '附件会话' : undefined);
+}
+
+export function generatedSessionTitle(content) {
+  const text = messageText(content).trim();
+  if (/[\r\n\u2028\u2029]/.test(text)) return undefined;
+  return shortSessionTitle(text.replace(/^#{1,6}\s+/, '').replace(/^["“`]+|["”`]+$/g, ''));
+}
+
 export function messageTextSlice(text, offset, length) {
   const end = offset + length;
   const chunk = text.slice(offset, end);

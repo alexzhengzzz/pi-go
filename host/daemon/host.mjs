@@ -14,9 +14,10 @@ import { computerSessions } from '../bridge/computer-sessions.mjs';
 import { listSessions, findSession, invalidateSessionCatalog } from './catalog.mjs';
 
 const sessionIdPattern = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
-const mutatingRoutes = new Set(['/open', '/new', '/authorize', '/create-workspace', '/close-workspace', '/rename-workspace', '/remove-workspace', '/delete-session']);
+const mutatingRoutes = new Set(['/open', '/new', '/authorize', '/create-workspace', '/close-workspace', '/rename-workspace', '/remove-workspace', '/delete-session', '/schedules/update']);
 const routes = new Set(['/open', '/new', '/catalog', '/projects', '/authorize', '/pending', '/answer',
-  '/create-workspace', '/close-workspace', '/rename-workspace', '/remove-workspace', '/delete-session', '/workspaces', '/workspace-library', '/session-deleted']);
+  '/create-workspace', '/close-workspace', '/rename-workspace', '/remove-workspace', '/delete-session', '/workspaces', '/workspace-library', '/session-deleted',
+  '/schedules/sync', '/schedules/update']);
 const bodyLimit = 8192;
 
 export function daemonProfile() {
@@ -74,7 +75,7 @@ async function trashSession(path) {
   await run('/usr/bin/osascript', ['-l', 'JavaScript', '-e', script, path], { timeout: 8000 });
 }
 
-export function createDaemonHost({ registry, runtimes, profile = daemonProfile(), trash = trashSession, hasExternalPi = externalPiRunning }) {
+export function createDaemonHost({ registry, runtimes, schedules, profile = daemonProfile(), trash = trashSession, hasExternalPi = externalPiRunning }) {
   let revision = randomUUID();
   const deletedSessions = new Map();
   let busy = false;
@@ -96,7 +97,7 @@ export function createDaemonHost({ registry, runtimes, profile = daemonProfile()
     let length = 0;
     for await (const chunk of request) {
       length += chunk.length;
-      if (length > bodyLimit) throw new Error('invalid_target');
+      if (length > (request.url === '/schedules/sync' ? 256 * 1024 : bodyLimit)) throw new Error('invalid_target');
       chunks.push(chunk);
     }
     return JSON.parse(Buffer.concat(chunks).toString('utf8'));
@@ -145,7 +146,7 @@ export function createDaemonHost({ registry, runtimes, profile = daemonProfile()
 
   async function handle(request, response) {
     if (request.method === 'GET' && request.url === '/health') {
-      return reply(response, 200, { protocol: 'pi-go-desktop-host/1', profile, canCreateWorkspace: true, workspaceLibrary: true });
+      return reply(response, 200, { protocol: 'pi-go-desktop-host/1', profile, canCreateWorkspace: true, workspaceLibrary: true, schedules: schedules?.closing === false });
     }
     if (request.method !== 'POST' || !routes.has(request.url) || request.headers.origin !== undefined) {
       return reply(response, 404, { error: 'not_found' });
@@ -155,6 +156,15 @@ export function createDaemonHost({ registry, runtimes, profile = daemonProfile()
     if (mutating) busy = true;
     try {
       const input = await readInput(request);
+      if (request.url === '/schedules/sync') {
+        if (!schedules || schedules.closing) return reply(response, 404, { error: 'schedules_unsupported' });
+        return reply(response, 200, schedules.snapshot(input.paths, input.includeJobs, input.knownRuns));
+      }
+      if (request.url === '/schedules/update') {
+        if (!schedules || schedules.closing) return reply(response, 404, { error: 'schedules_unsupported' });
+        const [status, data] = schedules.update(input);
+        return reply(response, status, data);
+      }
       if (request.url === '/pending' || request.url === '/answer') {
         const runtime = runtimes.find(input.pid, input.id);
         if (!runtime) return reply(response, 409, { error: 'session_changed' });
@@ -300,6 +310,7 @@ export function createDaemonHost({ registry, runtimes, profile = daemonProfile()
         const registered = byId ? (workspace ? [workspace] : []) : await registry.findByRealpath(cwd);
         if (registered.length === 0) return reply(response, 404, { error: 'desktop_workspace_not_registered' });
         if (registered.length > 1) return reply(response, 409, { error: 'desktop_workspace_ambiguous' });
+        if (schedules && !schedules.closing) schedules.pauseWorkspace(cwd ?? registered[0].path);
         await runtimes.killFor(cwd ?? registered[0].path);
         registry.remove(registered[0].path);
         revision = randomUUID();

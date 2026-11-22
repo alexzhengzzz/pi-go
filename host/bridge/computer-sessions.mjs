@@ -3,16 +3,16 @@ import { createReadStream } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { homedir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
+import { sessionTitlePreview } from './message-view.mjs';
 
 const idPattern = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
 let cached;
 let pending;
-const textOf = (content) => typeof content === 'string' ? content : Array.isArray(content) ? content.filter((p) => p.type === 'text').map((p) => p.text).join('\n') : '';
 
 async function inspect(file, targetId, info) {
   const stream = createReadStream(file, { encoding: 'utf8' });
   const lines = createInterface({ input: stream, crlfDelay: Infinity });
-  let header, name, firstMessage = '', messageCount = 0;
+  let header, name, firstTitle, messageCount = 0;
   try {
     for await (const line of lines) {
       let row; try { row = JSON.parse(line); } catch { continue; }
@@ -21,15 +21,15 @@ async function inspect(file, targetId, info) {
           (targetId !== undefined && row.id !== targetId)) return;
         header = row;
       }
-      if (row.type === 'session_info' && typeof row.name === 'string') name = row.name;
+      if (row.type === 'session_info' && typeof row.name === 'string') name = row.name.trim();
       if (row.type === 'message') {
         if (targetId !== undefined) return { id: header.id, cwd: header.cwd };
         messageCount++;
-        if (!firstMessage && row.message?.role === 'user') firstMessage = textOf(row.message.content).slice(0, 100);
+        if (firstTitle === undefined && row.message?.role === 'user') firstTitle = sessionTitlePreview(row.message.content) ?? '';
       }
     }
     if (!header || !messageCount) return;
-    return { id: header.id, cwd: header.cwd, name: (name || firstMessage || '未命名会话').slice(0, 100),
+    return { id: header.id, cwd: header.cwd, name: name || firstTitle || '未命名会话',
       modified: info.mtime.toISOString(), messageCount, active: false };
   } finally { lines.close(); stream.destroy(); }
 }

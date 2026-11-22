@@ -9,6 +9,7 @@
     "host/daemon/host.mjs",
     "host/daemon/runtimes.mjs",
     "host/daemon/registry.mjs",
+    "host/daemon/schedules.mjs",
     "host/daemon/catalog.mjs",
     "host/bridge/phase0.ts",
     "host/bridge/local-ipc.mjs",

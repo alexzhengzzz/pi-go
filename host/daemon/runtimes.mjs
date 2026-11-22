@@ -64,6 +64,7 @@ export class RpcRuntime {
     if (this.exited) return;
     this.exited = true;
     this.exitCode = code;
+    this.scheduledPrompt?.complete({ reason: 'runtime_exited' });
     for (const { reject } of this.commands.values()) reject(new Error('runtime_exited'));
     this.commands.clear();
     this.uiQueue = [];
@@ -74,6 +75,7 @@ export class RpcRuntime {
     let event;
     try { event = JSON.parse(line); } catch { return; }
     if (!event || typeof event !== 'object') return;
+    this.scheduledPrompt?.event(event);
     if (event.type === 'response' && typeof event.id === 'string') {
       const pending = this.commands.get(event.id);
       if (!pending) return;
@@ -108,6 +110,41 @@ export class RpcRuntime {
         clearTimeout(timer);
         reject(error);
       }
+    });
+  }
+
+  runScheduledPrompt(prompt, timeout) {
+    return new Promise((resolve) => {
+      let assistant;
+      let final;
+      const complete = (outcome) => {
+        clearTimeout(timer);
+        this.scheduledPrompt = undefined;
+        resolve(outcome);
+      };
+      const timer = setTimeout(() => complete({ reason: 'run_timeout' }), timeout);
+      this.scheduledPrompt = {
+        complete,
+        event: (event) => {
+          if (event.type === 'message_end' && event.message?.role === 'assistant') assistant = event.message;
+          if (event.type === 'extension_ui_request' && blockingMethods.has(event.method)) {
+            complete({ reason: 'interaction_required' });
+          }
+          if (event.type === 'agent_end') {
+            final = event.messages?.filter(({ role }) => role === 'assistant').at(-1) ?? assistant;
+          }
+          if (event.type === 'agent_settled') {
+            const message = final ?? assistant;
+            const summary = message?.content?.filter(({ type }) => type === 'text').map(({ text }) => text).join('\n').trim().slice(0, 500);
+            const reason = !event.aborted && (message?.stopReason === 'stop' || message?.stopReason === 'length')
+              ? undefined : 'model_failed';
+            complete({ summary, reason });
+          }
+        }
+      };
+      this.sendCommand('prompt', { message: prompt }).catch(() => {
+        this.scheduledPrompt?.complete({ reason: 'prompt_failed' });
+      });
     });
   }
 
@@ -201,26 +238,25 @@ export class RuntimePool {
 
   list() { return [...this.runtimes.values()].filter((runtime) => !runtime.exited); }
 
+  stop(runtime) {
+    if (runtime.exited) return Promise.resolve();
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        try { runtime.child.kill('SIGKILL'); } catch {}
+        resolve();
+      }, 4000);
+      runtime.child.once('exit', () => { clearTimeout(timer); resolve(); });
+      runtime.kill();
+    });
+  }
+
   async killFor(cwd) {
     const victims = this.list().filter((runtime) => runtime.cwd === cwd);
-    for (const runtime of victims) runtime.kill();
-    await Promise.all(victims.map((runtime) =>
-      new Promise((resolve) => {
-        if (runtime.exited) return resolve();
-        const timer = setTimeout(() => { try { runtime.child.kill('SIGKILL'); } catch {} resolve(); }, 4000);
-        runtime.child.once('exit', () => { clearTimeout(timer); resolve(); });
-      })));
+    await Promise.all(victims.map((runtime) => this.stop(runtime)));
     return victims.length;
   }
 
   async stopAll() {
-    const victims = this.list();
-    for (const runtime of victims) runtime.kill();
-    await Promise.all(victims.map((runtime) =>
-      new Promise((resolve) => {
-        if (runtime.exited) return resolve();
-        const timer = setTimeout(() => { try { runtime.child.kill('SIGKILL'); } catch {} resolve(); }, 4000);
-        runtime.child.once('exit', () => { clearTimeout(timer); resolve(); });
-      })));
+    await Promise.all(this.list().map((runtime) => this.stop(runtime)));
   }
 }

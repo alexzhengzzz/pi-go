@@ -328,7 +328,34 @@ async function hostContext() {
   }
   const workspaces = registered?.filter(({ cwd }) => granted.includes(cwd)).map(({ cwd, name }) => ({ cwd, name }));
   return { socket, profile, granted: [...new Set(granted)], workspaces, revision: workspaceReply?.data?.revision,
-    canCreateWorkspace: computerAccess && result?.data.canCreateWorkspace === true };
+    canCreateWorkspace: computerAccess && result?.data.canCreateWorkspace === true,
+    schedules: result?.data.schedules === true };
+}
+
+async function scheduleRequest(request, response, path) {
+  const input = await body(request);
+  if (!input || typeof input !== 'object') return error(response, 400, 'invalid_schedule');
+  const context = await hostContext();
+  if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
+  if (!context.socket) return error(response, 409, 'desktop_handoff_required');
+  if (!context.schedules) return error(response, 404, 'schedules_unsupported');
+  let payload;
+  if (path === '/schedules/sync') {
+    const knownRuns = Array.isArray(input.knownRuns)
+      ? input.knownRuns.filter((id) => typeof id === 'string' && /^[\w:-]{1,117}$/.test(id)).slice(0, 80) : [];
+    payload = { paths: context.granted, knownRuns, includeJobs: input.includeJobs === true };
+  } else {
+    if (typeof input.cwd !== 'string' || !context.granted.includes(input.cwd)) {
+      return error(response, 403, 'desktop_workspace_unshared');
+    }
+    const { cwd, operation, id, name, prompt, kind, time, at, interval, catchUp, scheduleVersion, requestId } = input;
+    payload = { cwd, operation, id, name, prompt, kind, time, at, interval, catchUp, version: scheduleVersion, requestId };
+    if (Buffer.byteLength(JSON.stringify(payload)) > 7900) return error(response, 400, 'invalid_schedule');
+  }
+  const result = await localRequest(context.socket, 'POST', path, payload).catch(() => undefined);
+  if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
+  if (!result) return error(response, 409, 'desktop_handoff_unconfirmed');
+  return reply(response, result.status, result.data);
 }
 
 const workerIdentity = ({ socket, session }) => ({ id: session.id, pid: Number(/(?:^|\/)w-(\d+)-/.exec(socket)?.[1]) });
@@ -420,6 +447,9 @@ const publicHandler = async (request, response) => {
     if (remote && !acceptRemoteRequest(response)) return;
     lastSeen = Date.now();
     if (route === 'GET /health') return reply(response, 200, { protocol: 'pi-go-bridge/1' });
+    if (route === 'POST /schedules/sync' || route === 'POST /schedules/update') {
+      return await scheduleRequest(request, response, path);
+    }
     if (!['GET /session', 'GET /session/snapshot', 'GET /chat', 'GET /history', 'GET /tool-detail', 'GET /message-image', 'GET /message-text', 'GET /sessions', 'GET /sessions/status', 'GET /models', 'GET /commands', 'GET /events', 'GET /files/download', 'POST /open', 'POST /new', 'POST /prompt', 'POST /upload', 'POST /abort', 'POST /answer', 'POST /receipt', 'POST /model', 'POST /rename', 'POST /session-meta', 'POST /create-workspace', 'POST /close-workspace', 'POST /files/list', 'POST /files/read', 'POST /files/save'].includes(route)) return error(response, 404, 'not_found');
     if (route === 'GET /events') {
       if (streams.size >= 4) return error(response, 429, 'too_many_streams');

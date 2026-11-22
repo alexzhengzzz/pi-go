@@ -8,14 +8,11 @@ import { readdir, realpath, stat } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { sessionTitlePreview } from '../bridge/message-view.mjs';
 
 const idPattern = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
 const maxSessions = 250;
 const cacheMs = 5000;
-
-const textOf = (content) =>
-  typeof content === 'string' ? content : Array.isArray(content)
-    ? content.filter((part) => part.type === 'text').map((part) => part.text).join('\n') : '';
 
 export function sessionsRoot() {
   return resolve(process.env.PI_CODING_AGENT_DIR || join(homedir(), '.pi', 'agent'), 'sessions');
@@ -26,7 +23,7 @@ async function inspect(file, targetId) {
   const lines = createInterface({ input: stream, crlfDelay: Infinity });
   let header;
   let name;
-  let firstMessage = '';
+  let firstTitle;
   let messageCount = 0;
   try {
     for await (const line of lines) {
@@ -37,17 +34,17 @@ async function inspect(file, targetId) {
           (targetId !== undefined && row.id !== targetId)) return;
         header = row;
       }
-      if (row.type === 'session_info' && typeof row.name === 'string') name = row.name;
+      if (row.type === 'session_info' && typeof row.name === 'string') name = row.name.trim();
       if (row.type === 'message') {
         if (targetId !== undefined) return { id: header.id, cwd: header.cwd, path: file };
         messageCount += 1;
-        if (!firstMessage && row.message?.role === 'user') firstMessage = textOf(row.message.content).slice(0, 100);
+        if (firstTitle === undefined && row.message?.role === 'user') firstTitle = sessionTitlePreview(row.message.content) ?? '';
       }
     }
     if (!header || !messageCount) return;
     const info = await stat(file);
     return { id: header.id, cwd: header.cwd, path: file,
-      name: (name || firstMessage || '未命名会话').slice(0, 100),
+      name: name || firstTitle || '未命名会话',
       modified: new Date(info.mtimeMs).toISOString() };
   } finally { lines.close(); stream.destroy(); }
 }

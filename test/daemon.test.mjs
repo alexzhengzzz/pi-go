@@ -52,7 +52,8 @@ test('daemon host serves native open, new, interactions and close', { timeout: 3
   const agent = join(root, 'agent'), ipc = join(root, 'ipc');
   const first = join(root, 'project-a'), second = join(root, 'project-b');
   await Promise.all([agent, ipc, first, second].map((path) => mkdir(path, { mode: 0o700 })));
-  const env = { ...process.env, PI_CODING_AGENT_DIR: agent, PIGO_IPC_DIR: ipc, PI_OFFLINE: '1' };
+  const titleLog = join(root, 'title-requests.jsonl');
+  const env = { ...process.env, PI_CODING_AGENT_DIR: agent, PIGO_IPC_DIR: ipc, PI_OFFLINE: '1', PIGO_TITLE_FIXTURE_LOG: titleLog };
   await promisify(execFile)(pi, ['install', project], { cwd: first, env });
   let settings = {};
   for (let attempt = 0; attempt < 30; attempt++) {
@@ -277,6 +278,56 @@ test('daemon host serves native open, new, interactions and close', { timeout: 3
       assert.equal(earlier.data.historyCursor, undefined);
     }
   }
+
+  const scheduledAt = Date.now() + 2200;
+  assert.equal((await phone('/schedules/update', {
+    cwd: root, operation: 'create', kind: 'once', name: 'Unshared schedule', prompt: 'Summarize', at: scheduledAt, catchUp: 0
+  })).status, 403);
+  const scheduled = await phone('/schedules/update', {
+    cwd: first, operation: 'create', kind: 'once', name: 'Daily digest', prompt: 'Summarize the workspace',
+    at: scheduledAt, catchUp: 0
+  });
+  assert.equal(scheduled.status, 200, JSON.stringify(scheduled));
+  let scheduleSnapshot;
+  for (let i = 0; i < 80; i++) {
+    scheduleSnapshot = (await phone('/schedules/sync', { includeJobs: true })).data;
+    if (scheduleSnapshot.runs?.length) break;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  const [scheduledRun] = scheduleSnapshot.runs;
+  assert.equal(scheduledRun.status, 'succeeded', JSON.stringify(scheduledRun));
+  assert.equal(scheduledRun.summary, 'fixture delta');
+  assert.equal(scheduleSnapshot.jobs[0].nextAt, null);
+  assert.equal(scheduleSnapshot.watching, true);
+  assert.equal((await phone('/schedules/sync', { knownRuns: [scheduledRun.id] })).data.watching, false);
+  assert.equal((await phone('/chat')).data.session.id, a.sessionId);
+  const scheduledChat = await phone('/open', { id: scheduledRun.sessionId, history: true });
+  assert.equal(scheduledChat.status, 200, JSON.stringify(scheduledChat));
+  assert.ok(scheduledChat.data.messages.some(({ text }) => text === 'Summarize the workspace'));
+
+  const newChat = await phone('/new', { cwd: first });
+  assert.equal(newChat.status, 200, JSON.stringify(newChat));
+  const { id: titledId } = newChat.data.session;
+  const promptText = '排查手机切到后台后收不到消息';
+  assert.equal((await phone('/prompt', { id: titledId, requestId: 'title-first', text: promptText })).status, 202);
+  let titledChat;
+  for (let i = 0; i < 60; i++) {
+    titledChat = (await phone('/chat')).data;
+    if (titledChat.session.idle && titledChat.messages.length === 2) break;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  assert.equal(titledChat.session.id, titledId);
+  assert.equal(titledChat.session.name, `标题 ${promptText}`);
+  assert.deepEqual(titledChat.messages.map(({ role, text }) => [role, text]), [['user', promptText], ['assistant', 'fixture delta']]);
+  assert.deepEqual((await readFile(titleLog, 'utf8')).trim().split('\n').map(JSON.parse),
+    [{ text: promptText, messages: 1, tools: 0, model: 'fixture' }]);
+  const afterTitle = (await phone('/sessions')).data.sessions;
+  assert.equal(afterTitle.find(({ id }) => id === titledId)?.name, `标题 ${promptText}`);
+  assert.deepEqual(new Set(afterTitle.map(({ id }) => id)),
+    new Set([...directory.data.sessions.map(({ id }) => id), scheduledRun.sessionId, titledId]));
+  await phone('/open', { id: a.sessionId });
+  const reopened = await phone('/open', { id: titledId, history: true });
+  assert.equal(reopened.data.session.name, `标题 ${promptText}`);
 
   const space = { name: '测试 空间' };
   const spacePath = join(root, 'Pi Go', 'Spaces', space.name);

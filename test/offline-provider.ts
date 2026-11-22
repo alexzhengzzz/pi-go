@@ -1,3 +1,4 @@
+import { appendFileSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createAssistantMessageEventStream, type AssistantMessage } from "@earendil-works/pi-ai";
 
@@ -23,6 +24,14 @@ export default function (pi: ExtensionAPI) {
     streamSimple: (model, context, options) => {
       const stream = createAssistantMessageEventStream();
       const last = context.messages.at(-1);
+      const system = context.messages[0];
+      const titleRequest = system?.role === "system" && typeof system.content === "string" &&
+        system.content.startsWith("Write a short task title");
+      const titleInput = titleRequest && last?.role === "user" && typeof last.content === "string" ? last.content : "";
+      const titleLog = process.env.PIGO_TITLE_FIXTURE_LOG;
+      if (titleRequest && titleLog) appendFileSync(titleLog, JSON.stringify({ text: titleInput,
+        messages: context.messages.filter(({ role }) => role !== "system").length,
+        tools: system.toolsAdded?.length ?? 0, model: model.id }) + "\n");
       const approvalProbe = last?.role === "user" && Array.isArray(last.content) &&
         last.content.some((item) => item.type === "text" && item.text === "Pi Go fixture: check native tool approval");
       const imageToolProbe = last?.role === "user" && Array.isArray(last.content) &&
@@ -34,7 +43,8 @@ export default function (pi: ExtensionAPI) {
       const markdownProbe = last?.role === "user" && Array.isArray(last.content) &&
         last.content.some((item) => item.type === "text" && item.text === "Pi Go fixture: long Markdown");
       const markdown = "# 长回复\n\n```txt\n" + "a".repeat(131057) + "🚀\n```\n\n最后一段";
-      const answer = markdownProbe ? markdown : receivedImage ? "fixture image received" : "fixture delta";
+      const answer = titleRequest ? (titleInput.includes("empty title") ? " " : `标题 ${titleInput.split("\n", 1)[0]}`)
+        : markdownProbe ? markdown : receivedImage ? "fixture image received" : "fixture delta";
       const reasoning = model.reasoning === true;
       const thought = "fixture thinking before answering";
       const message: AssistantMessage = {
@@ -69,7 +79,8 @@ export default function (pi: ExtensionAPI) {
         stream.push({ type: "done", reason: "stop", message });
         stream.end();
       };
-      const timer = setTimeout(finish, longAnswer ? 22_000 : 1200);
+      const titleDelay = titleInput.includes("slow title") ? 2200 : titleInput.includes("timeout title") ? 7000 : 450;
+      const timer = setTimeout(finish, titleRequest ? titleDelay : longAnswer ? 22_000 : 1200);
       const abort = () => {
         clearTimeout(timer);
         stream.push({ type: "error", reason: "aborted", error: { ...message, stopReason: "aborted" } });
