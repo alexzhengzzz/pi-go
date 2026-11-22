@@ -67,7 +67,8 @@ export interface DiffLine {
 
 export function diffLines(patch: string): DiffLine[] {
   let line = 0;
-  return patch.trimEnd().split('\n').map((text: string, key: number): DiffLine => {
+  const content = patch.endsWith('\n') ? patch.slice(0, -1) : patch;
+  return content.split('\n').map((text: string, key: number): DiffLine => {
     const hunk = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(text);
     if (hunk) {
       line = Number(hunk[1]);

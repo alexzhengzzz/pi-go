@@ -14,7 +14,7 @@ import { maxPromptBody, validPromptImage, validPromptImageBuffer, stageAttachmen
 import { generatedSessionTitle, imageParts, messageText, messageTextSlice, reply, replyImage, sessionAttachmentMarker,
   sessionPromptText, sessionTitlePreview, toolDetail, toolDetails, toolResultText } from "./message-view.mjs";
 
-import { captureWorkspace, describeChanges, saveRunResult } from "./run-results.mjs";
+import { captureWorkspace, describeChanges, referencedArtifacts, saveRunResult } from "./run-results.mjs";
 
 const profile = resolve(process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent"));
 const host = "127.0.0.1";
@@ -707,6 +707,20 @@ function createProbe() {
           try { changes = describeChanges(current.cwd, baseline); }
           catch { changes = { files: [], patches: {}, partial: true }; }
           const { files, patches, partial } = changes;
+          const resultText: string = anchor?.role === "assistant" ? anchor.text : "";
+          const references = [...resultText.matchAll(/`([^`\r\n]{1,1024})`|\]\(([^)\r\n]{1,1024})\)/g)]
+            .map((match) => match[1] ?? match[2]);
+          for (const { summary, args } of toolLog.values()) {
+            const path = (args as { path?: unknown })?.path;
+            if (summary.state === "ok" && (summary.name === "write" || summary.name === "edit") && typeof path === "string") {
+              references.push(path);
+            }
+          }
+          for (const path of referencedArtifacts(current.cwd, references)) {
+            if (!files.some((file: { path: string }) => file.path === path)) {
+              files.push({ path, change: "artifact", diff: false, artifact: true });
+            }
+          }
           saveRunResult(profile, { id: settledRunId, sessionId: current.id, cwd: current.cwd,
             title: current.name, messageId: anchor?.id, finishedAt, files, checks, screenshots, partial, scheduled,
             status: aborted || lastStopReason === "aborted" ? "stopped" : lastStopReason === "error" ? "failed" : "completed" }, patches);

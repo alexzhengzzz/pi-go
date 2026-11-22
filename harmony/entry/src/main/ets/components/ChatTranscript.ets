@@ -1,5 +1,5 @@
 import { unboundAction } from './ComponentAction';
-import { glassButtonSurface } from '../Immersive';
+import { glassButtonSurface, themedCardSurface } from '../Immersive';
 import { ChatContent } from '../ChatContent';
 import { ChatImage } from '../ChatImage';
 import { markdownWorkspacePath, messageFileChips, normalizeWorkspacePath } from '../ChatPaths';
@@ -15,6 +15,7 @@ import {
   TranscriptTurn
 } from '../TranscriptTurns';
 import { headerSymbol } from './HeaderSymbol';
+import { runStatusInk, runStatusMark } from './RunStatusMark';
 import { ThemePalette, ThemeStyle, themePalette, themeStyle } from '../Appearance';
 
 @Extend(Button)
@@ -149,8 +150,7 @@ export struct ChatTranscript {
                 this.assistantTurn(turn)
               }
               ForEach(this.resultsForTurn(turn), (run: RunEvent) => {
-                Button(`本轮结果 · ${runStatus(run.status)} · ${run.files?.length ?? 0} 个文件`).chatAction()
-                  .id(`turn-result-${run.id}`).onClick(() => { this.openRunResult(run); })
+                this.runResultCard(run)
               }, (run: RunEvent) => run.id)
             }, (turn: TranscriptTurn) => this.turnKey(turn))
             if (this.needsWaitingPulse()) {
@@ -266,6 +266,37 @@ export struct ChatTranscript {
           ? { radius: 12, offsetY: 3, color: this.darkMode ? '#33FF7EB3' : '#2CE86A98' }
           : undefined)
     }.width('100%').justifyContent(FlexAlign.End).padding({ top: 14, bottom: 4 })
+  }
+
+  private runResultSummary(run: RunEvent): string {
+    const facts: string[] = [];
+    if (run.files?.length) facts.push(`${run.files.length} 个文件`);
+    if (run.checks?.length) facts.push(`${run.checks.length} 项验证`);
+    if (run.screenshots?.length) facts.push(`${run.screenshots.length} 张图片`);
+    return facts.join(' · ');
+  }
+
+  @Builder
+  runResultCard(run: RunEvent) {
+    Row() {
+      Button({ type: ButtonType.Normal }) {
+        Row({ space: 11 }) {
+          runStatusMark(run.status, this.accent, this.accentTint, 34)
+          Column({ space: 3 }) {
+            Text('本轮结果').fontSize(14).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
+            if (this.runResultSummary(run)) {
+              Text(this.runResultSummary(run)).fontSize(12).fontColor($r('app.color.pigo_muted'))
+                .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+            }
+          }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+          Text(runStatus(run.status)).fontSize(12).fontColor(runStatusInk(run.status, this.accent))
+          headerSymbol($r('sys.symbol.chevron_right'), $r('app.color.pigo_muted'), 13)
+        }.width('100%').padding({ left: 11, right: 13, top: 10, bottom: 10 })
+      }.id(`turn-result-${run.id}`).width('100%').constraintSize({ maxWidth: 400 }).padding(0)
+        .attributeModifier(themedCardSurface(this.darkMode, this.themeId))
+        .accessibilityText(`本轮结果，${runStatus(run.status)}，${this.runResultSummary(run)}`)
+        .onClick(() => { this.openRunResult(run); })
+    }.width('100%').justifyContent(FlexAlign.Start).padding({ bottom: 5 })
   }
 
   @Builder

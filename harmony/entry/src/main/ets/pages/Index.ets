@@ -11,7 +11,7 @@ import { WorkspaceFiles } from '../components/WorkspaceFiles';
 import { SessionSidebar } from '../components/SessionSidebar';
 import { ChatComposer } from '../components/ChatComposer';
 import { ChatTranscript } from '../components/ChatTranscript';
-import { SakuraPetals } from '../components/SakuraPetals';
+import { SakuraPetals, SakuraScene } from '../components/SakuraPetals';
 import { RunResultView } from '../components/RunResultView';
 import { DiffLine, InboxRun, pushDeviceId, RunEvent, RunFile, RunScreenshot } from '../RunResults';
 import { notificationManager } from '@kit.NotificationKit';
@@ -111,6 +111,8 @@ struct Index {
   @State private pushSaving: boolean = false;
   @State private pushStatus: string = '';
   private pushToken: string = '';
+  private pushTokenRequest?: Promise<string>;
+  private nextPushTokenAttempt: number = 0;
   private runRead: string[] = [];
   private runSyncTimer: number = -1;
   private runSyncing: boolean = false;
@@ -234,6 +236,14 @@ struct Index {
   @State private runningSessionIds: string[] = [];
   @State private runningSessions: RunningRow[] = [];
   private readonly observedRuns: Map<string, string> = new Map<string, string>();
+  @State private sakuraBurstSeq: number = 0;
+  @State private sakuraBurstKind: string = 'send';
+  @State private sakuraBloomSeq: number = 0;
+  @State private sakuraBloomX: number = 0;
+  @State private sakuraBloomY: number = 0;
+  @State private sakuraWhisperIndex: number = -1;
+  @State private sakuraWhisperBounce: boolean = false;
+  private sakuraBounceTimer: number = -1;
   @State private runNotice?: RunNotice = undefined;
   private pendingRunNotices: RunNotice[] = [];
   private runNoticeTimer: number = -1;
@@ -701,11 +711,16 @@ struct Index {
     const registered = this.pushEnabled ? computer.token + ':' + this.pushToken : computer.token;
     if (this.pushRegistrations.get(computer.address) === registered) return;
     if (this.pushEnabled && !this.pushToken) {
-      try { this.pushToken = await pushService.getToken(); }
+      if (!this.pushTokenRequest && Date.now() >= this.nextPushTokenAttempt) {
+        this.nextPushTokenAttempt = Date.now() + 60_000;
+        this.pushTokenRequest = pushService.getToken().finally(() => { this.pushTokenRequest = undefined; });
+      }
+      try { this.pushToken = await this.pushTokenRequest ?? ''; }
       catch {
         if (computer.address === this.base) this.pushStatus = '未能获取推送令牌，请检查应用的 Push Kit 权益';
         return;
       }
+      if (!this.pushToken) return;
     }
     const enabled = this.pushEnabled;
     const response = await this.request('/runs/push', enabled ?
@@ -728,6 +743,7 @@ struct Index {
       }
       await this.saveSetting('run_push_enabled', enabled);
       this.pushEnabled = enabled;
+      this.nextPushTokenAttempt = 0;
       this.pushStatus = enabled ? '正在连接电脑以启用后台通知…' : '';
       this.pushRegistrations.clear();
       this.queueRunSync(0);
@@ -1966,7 +1982,12 @@ struct Index {
       return;
     }
     const previousTitle = this.observedRuns.get(id);
-    if (!this.observedRuns.delete(id) || !this.visible || !this.runNoticesEnabled) return;
+    if (!this.observedRuns.delete(id) || !this.visible) return;
+    if (!stopped && this.themeId === 'sakura') {
+      this.sakuraBurstKind = 'celebrate';
+      this.sakuraBurstSeq += 1;
+    }
+    if (!this.runNoticesEnabled) return;
     this.pendingRunNotices.push({ title: title || previousTitle || '任务', stopped: stopped });
     if (!this.runNotice) this.advanceRunNotice();
   }
@@ -3407,6 +3428,10 @@ struct Index {
     this.pendingSend = pending;
     this.busy = true;
     this.status = '';
+    if (this.themeId === 'sakura') {
+      this.sakuraBurstKind = 'send';
+      this.sakuraBurstSeq += 1;
+    }
     try {
       const refs: AttachmentRef[] = [];
       for (let index = 0; index < pending.attachments.length; index += 1) {
@@ -5087,6 +5112,9 @@ struct Index {
     }.width('100%').padding({ top: inTranscript && this.windowHeight >= SHORT_WINDOW_HEIGHT ? 36 : 8,
       bottom: inTranscript && this.windowHeight >= SHORT_WINDOW_HEIGHT ? 24 : 8, left: 16, right: 16 })
       .layoutWeight(inTranscript ? 0 : 1).justifyContent(FlexAlign.Center)
+      .onClick((event: ClickEvent) => {
+        if (this.themeId === 'sakura') this.triggerSakuraBloom(event.windowX, event.windowY);
+      })
   }
 
   @Builder
@@ -5585,6 +5613,7 @@ struct Index {
       accentForeground: this.accentForeground(),
       accentTint: this.accentTint(),
       canvasBg: this.themeCanvas(),
+      themeId: this.themeId,
       headerHeight: this.headerHeight(),
       bottomPad: this.bottomPad(),
       computerTitle: this.computerTitle()
@@ -5610,6 +5639,78 @@ struct Index {
       .attributeModifier(glassCardSurface(this.darkMode, 16, true))
   }
 
+  private sakuraConversationFocus(): boolean {
+    return this.activeTab !== 'mine' &&
+      (this.messages.length > 0 || !!this.liveText || !!this.liveThinking || this.liveTools.length > 0);
+  }
+
+  private sakuraWhisperVisible(): boolean {
+    return this.themeId === 'sakura' && this.activeTab === 'chat' && !this.showFiles && !this.showSettings &&
+      !this.sakuraConversationFocus() && !this.drawerOpen() && this.keyboardHeight <= 0;
+  }
+
+  private triggerSakuraBloom(x: number, y: number): void {
+    this.sakuraBloomX = x;
+    this.sakuraBloomY = y;
+    this.sakuraBloomSeq += 1;
+  }
+
+  private sakuraWhisperText(): string {
+    const lines: string[] = [
+      '樱花飘落的速度，是每秒五厘米哦',
+      '接住一片花瓣，今天会有好运气',
+      '有我在，bug 都会乖乖听话的',
+      '写完这一段，记得喝口水休息一下',
+      '点一下空白处，也会有樱花绽开哦',
+      '今天也要元气满满地一起写代码呀'
+    ];
+    if (this.sakuraWhisperIndex >= 0) {
+      return lines[this.sakuraWhisperIndex % lines.length];
+    }
+    if (!this.isPaired) return '连上电脑后，我陪你一起出发哦';
+    if (!this.reachable) return '等电脑连回来，我们再继续吧';
+    const hour = new Date().getHours();
+    if (hour >= 5 && hour < 11) return '早安，今天也要一起写代码吗';
+    if (hour >= 11 && hour < 14) return '午安，吃过午饭再慢慢忙吧';
+    if (hour >= 14 && hour < 19) return '下午好，微风里有樱花的味道';
+    if (hour >= 19 && hour < 23) return '晚上好，今晚想完成什么小目标呢';
+    return '夜深啦，早点休息不要太累哦';
+  }
+
+  private tapSakuraWhisper(event: ClickEvent): void {
+    this.sakuraWhisperIndex = (this.sakuraWhisperIndex + 1) % 6;
+    this.triggerSakuraBloom(event.windowX, event.windowY - 26);
+    this.sakuraWhisperBounce = true;
+    if (this.sakuraBounceTimer !== -1) clearTimeout(this.sakuraBounceTimer);
+    this.sakuraBounceTimer = setTimeout(() => {
+      this.sakuraBounceTimer = -1;
+      this.sakuraWhisperBounce = false;
+    }, 180);
+  }
+
+  @Builder
+  sakuraWhisperBubble() {
+    Row({ space: 6 }) {
+      Text('✿').fontSize(12).fontColor(this.accent())
+      Text(this.sakuraWhisperText())
+        .fontSize(12.5)
+        .fontColor($r('app.color.pigo_text'))
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+    }
+    .padding({ left: 12, right: 13, top: 7, bottom: 7 })
+    .backdropBlur(18)
+    .backgroundColor(this.darkMode ? '#D62B1923' : '#EBFFF7FA')
+    .borderRadius({ topLeft: 16, topRight: 16, bottomLeft: 16, bottomRight: 5 })
+    .border({ width: 1, radius: { topLeft: 16, topRight: 16, bottomLeft: 16, bottomRight: 5 }, color: this.palette().bubbleBorder })
+    .shadow({ radius: 12, offsetY: 3, color: this.darkMode ? '#33FF7EB3' : '#26E86A98' })
+    .scale({ x: this.sakuraWhisperBounce ? 1.05 : 1, y: this.sakuraWhisperBounce ? 1.05 : 1 })
+    .animation({ duration: 180, curve: Curve.EaseOut })
+    .constraintSize({ maxWidth: 256 })
+    .margin({ right: 16, bottom: this.noSession ? this.bottomContentClearance() + 14 : this.chatBottomClearance() + 10 })
+    .onClick((event: ClickEvent) => { this.tapSakuraWhisper(event); })
+  }
+
   @Builder
   themeBackdrop() {
     Stack() {
@@ -5628,7 +5729,31 @@ struct Index {
           colors: [[this.palette().auraBottom, 0], ['#00000000', 1]]
         })
       if (this.themeId === 'sakura') {
-        SakuraPetals({ darkMode: this.darkMode })
+        SakuraScene({
+          darkMode: this.darkMode,
+          sceneOpacity: this.sakuraConversationFocus()
+            ? (this.darkMode ? 0.56 : 0.60)
+            : (this.darkMode ? 0.88 : 0.92)
+        })
+        if (this.sakuraConversationFocus()) {
+          Column()
+            .width('100%').height('100%')
+            .linearGradient({
+              angle: 90,
+              colors: this.darkMode
+                ? [['#B81C1217', 0], ['#8A1C1217', 0.62], ['#261C1217', 1]]
+                : [['#C4FFF6F9', 0], ['#96FFF6F9', 0.62], ['#28FFF6F9', 1]]
+            })
+        }
+        SakuraPetals({
+          darkMode: this.darkMode,
+          dimmed: this.sakuraConversationFocus(),
+          burstSeq: this.sakuraBurstSeq,
+          burstKind: this.sakuraBurstKind,
+          bloomSeq: this.sakuraBloomSeq,
+          bloomX: this.sakuraBloomX,
+          bloomY: this.sakuraBloomY
+        })
       }
     }.width('100%').height('100%').hitTestBehavior(HitTestMode.None)
   }
@@ -5641,6 +5766,11 @@ struct Index {
         Stack({ alignContent: Alignment.Bottom }) {
           this.themeBackdrop()
           this.mainNavigation()
+          if (this.sakuraWhisperVisible()) {
+            Row() {
+              this.sakuraWhisperBubble()
+            }.width('100%').justifyContent(FlexAlign.End).hitTestBehavior(HitTestMode.Transparent)
+          }
         }.height('100%').layoutWeight(1)
           .onGestureJudgeBegin(() => this.dockedSessions() || this.showSessions || this.holdActive || this.recording ||
             this.voicePreparing || this.voiceFinishing || !this.isPaired || this.activeTab === 'mine'
@@ -5712,7 +5842,7 @@ struct Index {
         RunResultView({
           result: this.reviewedRun, file: this.reviewedFile, patch: this.reviewPatch,
           loading: this.reviewLoading, error: this.reviewError,
-          canvas: this.themeCanvas(), top: this.statusBarHeight, bottom: this.bottomPad(),
+          themeId: this.themeId, darkMode: this.darkMode, top: this.statusBarHeight, bottom: this.bottomPad(),
           back: (): void => this.backFromRunResult(),
           openDiff: (file: RunFile): void => { void this.openRunDiff(file); },
           openArtifact: (file: RunFile): void => { void this.openRunArtifact(file); },

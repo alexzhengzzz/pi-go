@@ -1,0 +1,18 @@
+# 任务收件箱和结果
+
+手机顶部收件箱聚合已配对电脑上的普通会话事件和定时任务消息。完成、失败和停止会留在收件箱，待回答或确认的请求在处理后从列表消失。点击消息可返回对应会话。普通会话的待处理卡使用 Pi daemon 暴露的扩展交互，终端内的原生交互仍由电脑处理。
+
+会话结束后可在对应消息下打开「本轮结果」。结果包含运行前后观察到的工作区文件变化、识别出的验证命令及其状态、工具图片和可打开的产物。点选 Diff 中新版本的行会把文件、行号和片段加入会话草稿。提交由用户在输入框完成。
+
+Diff 使用运行前后的工作区快照。此前已有且本轮期间保持不变的编辑不会出现在 Diff 中。同一工作区同时被其他程序写入时，快照无法判断每处变更的作者。结果和 Diff 在电脑上保留最近 120 次，超出快照范围时界面提示。Diff 仅显示已采集的小型文本文件，产物预览读取工作区当前文件。
+
+## 开通后台系统通知
+
+收件箱和结果卡可直接使用。后台系统通知使用 HarmonyOS Push Kit，由 Mac 的 Pi Go 桥在手机退后台后投递。
+
+1. 在 AppGallery Connect 为 `com.alex.pigo` 开通 Push Kit。将 DevEco Studio 的签名关联到该应用，重新生成启用 Push Kit 的签名配置。正式服务提醒需要符合 Huawei `WORK` 消息分类要求。[开通 Push Kit](https://developer.huawei.com/consumer/cn/doc/HarmonyOS-guides/push-config-setting/) · [通知分类](https://developer.huawei.com/consumer/en/doc/harmonyos-guides/push-apply-right/)
+2. 从同一项目下载有 Push Kit 权限的服务账号 JSON。将该文件以 `0600` 权限放到电脑的 Pi Go 状态目录，默认路径为 `~/.pi-go/push-service-account.json`。无界面启动时也可通过 `PIGO_PUSH_ACCOUNT_FILE` 指定路径。联调可在账号 JSON 中添加布尔字段 `testMessage` 并设置为 `true`。服务账号只由 Mac 读取。[服务账号鉴权](https://developer.huawei.com/consumer/en/doc/harmonyos-guides/push-jwt-token/)
+3. 更新手机和 Mac 两端，并重新加载已在运行的 Pi CLI 扩展。重启 Mac 桥以载入服务账号，在手机「收件箱」开启「后台系统通知」，然后允许系统通知。已配对且桥可达时手机会登记 Push Token。
+4. 通过蜂窝网验证锁屏、冻结及系统清理进程后的通知到达，分别点开完成和待处理通知。再在 Mac 答复一个已发送通知的请求，确认手机点开后显示该请求已结束。验证前保持 Mac 在线，并确保点击时手机能通过至少一种已配对入口访问 Mac。
+
+通知只包含通用状态、设备定位标识和不透明记录 ID。会话正文、项目路径、命令、Diff 和文件通过现有已配对连接读取。关闭后台通知后，手机会在连接到对应桥时撤销登记。电脑撤销配对后，该连接的推送登记立即失效。

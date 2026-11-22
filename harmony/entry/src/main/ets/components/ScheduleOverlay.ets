@@ -1,11 +1,12 @@
 import { unboundAction } from './ComponentAction';
 import { workspaceName } from '../model/SessionStore';
-import { immersiveSurface } from '../Immersive';
+import { immersiveSurface, themedCardSurface } from '../Immersive';
 import { Companion } from '../CredentialVault';
 import { ScheduleJob, RunMessage, scheduleTime, scheduleRunStatus, scheduleRunReason, isCurrentScheduleComputer } from '../ScheduledRuns';
 import { InboxRun, runStatus } from '../RunResults';
 import { WorkspaceRow } from '../model/PiGoTypes';
 import { headerSymbol } from './HeaderSymbol';
+import { runStatusInk, runStatusMark } from './RunStatusMark';
 import { canvasFadeStops } from '../Appearance';
 
 @Extend(Button)
@@ -64,6 +65,7 @@ export struct ScheduleOverlay {
   @Prop accentForeground: string;
   @Prop accentTint: string;
   @Prop canvasBg: string;
+  @Prop themeId: string = 'mint';
   @Prop headerHeight: number;
   @Prop bottomPad: number;
   @Prop computerTitle: string;
@@ -129,56 +131,97 @@ export struct ScheduleOverlay {
   }
   @Builder
   scheduleInboxList() {
-    List({ space: 12 }) {
+    List({ space: 9 }) {
       ListItem() {
-        Text('所有电脑').fontSize(13).fontColor($r('app.color.pigo_muted'))
+        Row({ space: 12 }) {
+          Stack() {
+            headerSymbol($r('sys.symbol.inbox'), this.accent, 18)
+          }.width(36).height(36).borderRadius(11).backgroundColor(this.accentTint)
+          Column({ space: 3 }) {
+            Text('后台通知').fontSize(15).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
+            if (this.pushStatus) {
+              Text(this.pushStatus).fontSize(12).fontColor($r('app.color.pigo_muted'))
+            }
+          }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+          if (this.pushSaving) LoadingProgress().width(16).height(16).color(this.accent)
+          Toggle({ type: ToggleType.Switch, isOn: this.pushEnabled }).id('inbox-push-toggle')
+            .accessibilityText('后台通知').enabled(!this.pushSaving)
+            .selectedColor(this.accent).onChange((enabled: boolean) => { void this.setPushEnabled(enabled); })
+        }.width('100%').padding(12).attributeModifier(themedCardSurface(this.darkMode, this.themeId))
       }
-      ListItem() {
-        Column({ space: 4 }) {
-          Row() {
-            Text('后台系统通知').fontSize(14).fontColor($r('app.color.pigo_text')).layoutWeight(1)
-            Toggle({ type: ToggleType.Switch, isOn: this.pushEnabled }).enabled(!this.pushSaving)
-              .selectedColor(this.accent).onChange((enabled: boolean) => { void this.setPushEnabled(enabled); })
-          }.width('100%')
-          if (this.pushStatus) Text(this.pushStatus).fontSize(12).fontColor($r('app.color.pigo_muted'))
-        }.width('100%').alignItems(HorizontalAlign.Start)
-      }
-      ForEach(this.inboxRuns, (row: InboxRun) => {
+      if (this.scheduleError || this.scheduleOffline.length) {
         ListItem() {
-          Button({ type: ButtonType.Normal }) {
-            Row({ space: 8 }) {
-              if (row.unread) Blank().width(7).height(7).borderRadius(4).backgroundColor(this.accent)
-              Column({ space: 4 }) {
-                Text(row.run.title || 'Pi 会话').fontSize(15).fontWeight(FontWeight.Medium)
-                  .fontColor($r('app.color.pigo_text')).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
-                Text(`${row.computer} · ${runStatus(row.run.status)} · ${scheduleTime(row.run.finishedAt)}`)
-                  .fontSize(12).fontColor($r('app.color.pigo_muted')).maxLines(2)
-              }.alignItems(HorizontalAlign.Start).layoutWeight(1)
-              SymbolGlyph($r('sys.symbol.chevron_right')).fontSize(14).fontColor([$r('app.color.pigo_muted')])
-            }.width('100%').padding(10)
-          }.width('100%').chatAction().enabled(!this.busy && !this.openingSession)
-            .onClick(() => { void this.openInboxRun(row); })
-        }
-      }, (row: InboxRun) => `${row.run.id}:${row.address}:${row.unread}`)
-      if (this.scheduleOffline.length) {
-        ListItem() {
-          Text('部分电脑暂时无法连接，恢复连接后可补收结果。').fontSize(13).fontColor($r('app.color.pigo_muted'))
-        }
-      } else if (!this.inboxRuns.length && !this.scheduleMessages.some((message: RunMessage): boolean => !message.dismissed)) {
-        ListItem() {
-          Text('暂无任务消息').fontSize(14).fontColor($r('app.color.pigo_muted'))
+          Row({ space: 8 }) {
+            headerSymbol($r('sys.symbol.exclamationmark_circle'), $r('app.color.pigo_warning'), 15)
+            Text(this.scheduleError || '部分电脑离线，重新连接后会补收结果。').layoutWeight(1)
+              .fontSize(12).fontColor($r('app.color.pigo_muted'))
+          }.padding({ left: 4, top: 4, bottom: 4 })
         }
       }
-      ForEach(this.scheduleMessages.filter((message: RunMessage): boolean => !message.dismissed), (message: RunMessage) => {
+      if (this.inboxRuns.some((row: InboxRun): boolean => row.run.status === 'waiting')) {
+        ListItem() { this.inboxSection('待处理') }
+        ForEach(this.inboxRuns.filter((row: InboxRun): boolean => row.run.status === 'waiting'), (row: InboxRun) => {
+          ListItem() { this.inboxRunRow(row) }
+        }, (row: InboxRun) => `${row.run.id}:${row.address}`)
+      }
+      if (this.inboxRuns.some((row: InboxRun): boolean => row.run.status !== 'waiting')) {
+        ListItem() { this.inboxSection('最近会话') }
+        ForEach(this.inboxRuns.filter((row: InboxRun): boolean => row.run.status !== 'waiting'), (row: InboxRun) => {
+          ListItem() { this.inboxRunRow(row) }
+        }, (row: InboxRun) => `${row.run.id}:${row.address}:${row.unread}`)
+      }
+      if (this.scheduleMessages.some((message: RunMessage): boolean => !message.dismissed)) {
+        ListItem() { this.inboxSection('定时任务') }
+        ForEach(this.scheduleMessages.filter((message: RunMessage): boolean => !message.dismissed), (message: RunMessage) => {
+          ListItem() {
+            this.scheduledMessageRow(message)
+          }.swipeAction({ end: this.scheduleInboxDelete.bind(this, message), edgeEffect: SwipeEdgeEffect.None })
+        }, (message: RunMessage) => `${message.key}:${message.unread}`)
+      }
+      if (!this.inboxRuns.length && !this.scheduleMessages.some((message: RunMessage): boolean => !message.dismissed)) {
         ListItem() {
-          this.scheduledMessageRow(message)
-        }.swipeAction({ end: this.scheduleInboxDelete.bind(this, message), edgeEffect: SwipeEdgeEffect.None })
-      }, (message: RunMessage) => `${message.key}:${message.unread}`)
+          Column({ space: 9 }) {
+            Stack() {
+              headerSymbol($r('sys.symbol.inbox'), this.accent, 24)
+            }.width(48).height(48).borderRadius(15).backgroundColor(this.accentTint)
+            Text('暂无任务消息').fontSize(15).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
+          }.width('100%').padding({ top: 44, bottom: 36 })
+        }
+      }
     }.layoutWeight(1).width('100%').scrollBar(BarState.Off).edgeEffect(EdgeEffect.Spring)
       .contentStartOffset(this.statusBarHeight + this.headerHeight + 14)
       .contentEndOffset(this.bottomPad + 16)
       .padding({ left: 16, right: 16 })
   }
+
+  @Builder
+  inboxSection(title: string) {
+    Text(title).fontSize(13).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_muted'))
+      .padding({ left: 4, top: 10, bottom: 1 }).accessibilityGroup(true)
+  }
+
+  @Builder
+  inboxRunRow(row: InboxRun) {
+    Button({ type: ButtonType.Normal }) {
+      Row({ space: 11 }) {
+        runStatusMark(row.run.status, this.accent, this.accentTint, 36)
+        Column({ space: 5 }) {
+          Row({ space: 6 }) {
+            Text(row.run.title || 'Pi 会话').fontSize(15).fontWeight(row.unread ? FontWeight.Bold : FontWeight.Medium)
+              .fontColor($r('app.color.pigo_text')).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).layoutWeight(1)
+            if (row.unread) Blank().width(6).height(6).borderRadius(3).backgroundColor(this.accent)
+          }.width('100%')
+          Text(`${row.computer} · ${scheduleTime(row.run.finishedAt)}`)
+            .fontSize(11).fontColor($r('app.color.pigo_muted')).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+        }.alignItems(HorizontalAlign.Start).layoutWeight(1)
+        Text(runStatus(row.run.status)).fontSize(12).fontColor(runStatusInk(row.run.status, this.accent))
+        headerSymbol($r('sys.symbol.chevron_right'), $r('app.color.pigo_muted'), 13)
+      }.width('100%').padding(12)
+    }.id(`inbox-run-${row.run.id}`).width('100%').padding(0)
+      .attributeModifier(themedCardSurface(this.darkMode, this.themeId))
+      .enabled(!this.busy && !this.openingSession).onClick(() => { void this.openInboxRun(row); })
+  }
+
   @Builder
   scheduleInboxDelete(message: RunMessage) {
     Button('删除').id(`schedule-dismiss-${message.run.id}`).width(72).height('100%').padding(0)
@@ -314,7 +357,7 @@ export struct ScheduleOverlay {
         SymbolGlyph($r('sys.symbol.chevron_right')).fontSize(14).fontColor([$r('app.color.pigo_muted')])
       }.width('100%').padding(12)
     }.id(`schedule-message-${message.run.id}`).width('100%').padding(0)
-      .backgroundColor($r('app.color.pigo_panel')).border({ width: 1, radius: 16, color: $r('app.color.pigo_line') })
+      .attributeModifier(themedCardSurface(this.darkMode, this.themeId))
       .onClick(() => { this.showScheduleDetail(message); })
   }
   @Builder

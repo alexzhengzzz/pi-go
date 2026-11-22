@@ -400,21 +400,6 @@ export struct SettingsView {
       .onClick(() => { this.minePage = page; })
   }
   @Builder
-  miniSakuraPetal(x: string, y: string, w: number, h: number, angle: number, alpha: number) {
-    Blank()
-      .width(w).height(h)
-      .borderRadius({ topLeft: Math.round(h * 0.72), topRight: Math.round(h * 0.95), bottomLeft: Math.round(h * 0.95), bottomRight: Math.round(h * 0.22) })
-      .linearGradient({
-        angle: 135,
-        colors: this.darkMode
-          ? [['#FFA8C8', 0], ['#F06B9E', 1]]
-          : [['#FFE0EC', 0], ['#FF9EC4', 1]]
-      })
-      .opacity(this.darkMode ? alpha * 0.78 : alpha)
-      .rotate({ angle: angle })
-      .position({ x: x, y: y })
-  }
-  @Builder
   themePreviewCard() {
     Column({ space: 10 }) {
       Row({ space: 8 }) {
@@ -438,6 +423,10 @@ export struct SettingsView {
             colors: [[this.activePalette().auraBottom, 0], ['#00000000', 1]]
           })
         if (this.themeId === 'sakura') {
+          Image($rawfile(this.darkMode ? 'sakura_dark.jpg' : 'sakura_light.jpg'))
+            .width('100%').height('100%')
+            .objectFit(ImageFit.Cover)
+            .opacity(this.darkMode ? 0.72 : 0.78)
           SakuraPetals({ darkMode: this.darkMode, compact: true })
         }
         Column({ space: 8 }) {
@@ -516,12 +505,10 @@ export struct SettingsView {
               colors: [[this.paletteFor(style).auraBottom, 0], ['#00000000', 1]]
             })
           if (style.id === 'sakura') {
-            Stack() {
-              this.miniSakuraPetal('12%', '16%', 10, 7, -28, 0.8)
-              this.miniSakuraPetal('28%', '28%', 7, 5, 36, 0.65)
-              Text('✿').fontSize(12).fontColor(this.darkMode ? '#FFA8C8' : '#FF8FB8')
-                .opacity(this.darkMode ? 0.45 : 0.62).position({ x: '6%', y: '4%' })
-            }.width('100%').height('100%').hitTestBehavior(HitTestMode.None)
+            Image($rawfile(this.darkMode ? 'sakura_dark.jpg' : 'sakura_light.jpg'))
+              .width('100%').height('100%')
+              .objectFit(ImageFit.Cover)
+              .opacity(this.darkMode ? 0.78 : 0.85)
           }
           Column({ space: 5 }) {
             Row() {

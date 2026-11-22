@@ -1,8 +1,8 @@
 import { execFileSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join, relative, resolve } from 'node:path';
 import { previewFile } from './workspace-files.mjs';
 import { stateDirectory } from './session-metadata.mjs';
 
@@ -16,6 +16,23 @@ const artifactPattern = /\.(png|jpe?g|webp|gif|svg|pdf|md|html|csv|xlsx?|docx?|p
 function allowable(path) {
   return path.length <= 1024 && !/[\u0000-\u001f\u007f\\]/.test(path) &&
     path.split('/').every((part) => part && part !== '..' && part !== '.' && !ignored.has(part));
+}
+
+export function referencedArtifacts(cwd, references) {
+  const root = realpathSync(cwd);
+  const found = new Set();
+  for (const reference of references) {
+    if (typeof reference !== 'string' || reference.length > 2048 || /^[a-z]+:\/\//i.test(reference)) continue;
+    const path = relative(root, isAbsolute(reference) ? reference : resolve(root, reference));
+    if (!allowable(path) || !artifactPattern.test(path)) continue;
+    try {
+      const local = join(root, path);
+      const info = lstatSync(local);
+      if (info.isFile() && realpathSync(local) === local) found.add(path);
+      if (found.size >= 12) break;
+    } catch {}
+  }
+  return [...found];
 }
 
 function treePaths(cwd) {
