@@ -1,5 +1,5 @@
 // Local IPC for Pi Go session handoff, workspace registration, and RPC interactions.
-// The broker discovers the daemon through host-<pid>.sock and GET /health.
+// The daemon publishes host capabilities beside its socket for the broker.
 // Keep the existing protocol and error codes for installed brokers and clients.
 import { execFile } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
@@ -10,6 +10,7 @@ import { basename, join, resolve } from 'node:path';
 import { lstat, mkdir, realpath, rmdir, stat } from 'node:fs/promises';
 import { promisify } from 'node:util';
 import { ipcDirectory, localRequest, pairingRuntimes, workers } from '../bridge/local-ipc.mjs';
+import { registerSocket } from '../bridge/socket-registry.mjs';
 import { computerSessions } from '../bridge/computer-sessions.mjs';
 import { listSessions, findSession, invalidateSessionCatalog } from './catalog.mjs';
 
@@ -87,6 +88,11 @@ export function createDaemonHost({ registry, runtimes, schedules, profile = daem
     });
   });
 
+  const health = () => ({
+    protocol: 'pi-go-desktop-host/1', profile, canCreateWorkspace: true, workspaceLibrary: true, schedules: schedules?.closing === false,
+  });
+  const registration = registerSocket(server, health);
+
   const reply = (response, status, data) => {
     response.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
     response.end(JSON.stringify(data));
@@ -146,7 +152,7 @@ export function createDaemonHost({ registry, runtimes, schedules, profile = daem
 
   async function handle(request, response) {
     if (request.method === 'GET' && request.url === '/health') {
-      return reply(response, 200, { protocol: 'pi-go-desktop-host/1', profile, canCreateWorkspace: true, workspaceLibrary: true, schedules: schedules?.closing === false });
+      return reply(response, 200, health());
     }
     if (request.method !== 'POST' || !routes.has(request.url) || request.headers.origin !== undefined) {
       return reply(response, 404, { error: 'not_found' });
@@ -347,6 +353,7 @@ export function createDaemonHost({ registry, runtimes, schedules, profile = daem
 
   const shutdown = () => {
     quitting = true;
+    registration.withdraw();
     server.close();
     server.closeAllConnections();
   };

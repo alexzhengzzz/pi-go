@@ -1,6 +1,7 @@
+import { glassCardSurface } from '../Immersive';
 import { unboundAction } from './ComponentAction';
 import { Companion } from '../CredentialVault';
-import { APPEARANCE_MODES, AppearanceMode, THEME_STYLES, ThemeStyle, appearanceMode, themeStyle } from '../Appearance';
+import { APPEARANCE_MODES, AppearanceMode, THEME_STYLES, ThemeStyle, appearanceMode, themeCanvasColor, themeStyle } from '../Appearance';
 import { HuaweiProfile } from '../HuaweiProfile';
 import { CloudComputer } from '../AccountSync';
 import { validUsb } from '../PairingCode';
@@ -219,8 +220,7 @@ export struct SettingsView {
         ForEach(group.connections, (record: Companion) => {
           this.computerConnection(record, group)
         }, (record: Companion) => record.address)
-      }.width('100%').padding(14).borderRadius(16).backgroundColor($r('app.color.pigo_panel'))
-        .border({ width: 1, color: $r('app.color.pigo_line') })
+      }.width('100%').padding(14).attributeModifier(glassCardSurface(this.darkMode, 16))
     }, (group: ComputerGroup) => `${group.id}|${group.name}|${group.connections.map((record: Companion): string => record.address).join('|')}`)
     if (this.removeTarget) {
       Text(this.huaweiProfile ? '移除手机上的配对和账号列表中的连接记录。' : '移除手机上的这条配对记录。')
@@ -249,8 +249,7 @@ export struct SettingsView {
                 .onClick(() => { this.removeTarget = computer.address; })
             }
           }.width('100%')
-        }.width('100%').padding(14).backgroundColor($r('app.color.pigo_panel')).borderRadius(16)
-          .border({ width: 1, color: $r('app.color.pigo_line') })
+        }.width('100%').padding(14).attributeModifier(glassCardSurface(this.darkMode, 16))
       }, (computer: CloudComputer) => computer.address)
     }
   }
@@ -322,8 +321,7 @@ export struct SettingsView {
       Button('配对并连接').chatAction().id('pair').enabled(!this.busy && !this.openingSession && !this.removeTarget)
         .backgroundColor(this.accent).fontColor(this.accentForeground).width('100%').height(46)
         .onClick(() => { void this.pair(); })
-    }.padding(16).backgroundColor($r('app.color.pigo_panel')).borderRadius(16).width('100%')
-      .border({ width: 1, color: $r('app.color.pigo_line') })
+    }.padding(16).width('100%').attributeModifier(glassCardSurface(this.darkMode, 16))
   }
   @Builder
   profileCard() {
@@ -372,8 +370,7 @@ export struct SettingsView {
             .onClick(() => { this.scheduleCloudSync(0); })
         }.width('100%')
       }
-    }.width('100%').padding(16).backgroundColor($r('app.color.pigo_panel')).borderRadius(16)
-      .border({ width: 1, color: $r('app.color.pigo_line') })
+    }.width('100%').padding(16).attributeModifier(glassCardSurface(this.darkMode, 16))
   }
   @Builder
   mineEntry(page: string, label: string, summary: string) {
@@ -384,9 +381,9 @@ export struct SettingsView {
             SymbolGlyph($r('sys.symbol.computer')).fontSize(21).fontColor([this.accent])
           } else {
             Row({ space: 3 }) {
-              Blank().width(6).height(6).borderRadius(3).backgroundColor(this.accentFor(THEME_STYLES[0]))
-              Blank().width(6).height(6).borderRadius(3).backgroundColor(this.accentFor(THEME_STYLES[1]))
-              Blank().width(6).height(6).borderRadius(3).backgroundColor(this.accentFor(THEME_STYLES[2]))
+              Blank().width(6).height(6).borderRadius(3).backgroundColor(this.accentFor(themeStyle('mint')))
+              Blank().width(6).height(6).borderRadius(3).backgroundColor(this.accentFor(themeStyle('ocean')))
+              Blank().width(6).height(6).borderRadius(3).backgroundColor(this.accentFor(themeStyle('sakura')))
             }
           }
         }.width(40).height(40).backgroundColor(this.accentTint).borderRadius(12)
@@ -397,9 +394,70 @@ export struct SettingsView {
         }.layoutWeight(1).alignItems(HorizontalAlign.Start)
         SymbolGlyph($r('sys.symbol.chevron_right')).fontSize(15).fontColor([$r('app.color.pigo_muted')])
       }.width('100%').padding(14)
-    }.id(`mine-${page}`).width('100%').padding(0).backgroundColor($r('app.color.pigo_panel'))
-      .border({ width: 1, radius: 16, color: $r('app.color.pigo_line') })
+    }.id(`mine-${page}`).width('100%').padding(0)
+      .attributeModifier(glassCardSurface(this.darkMode, 16))
       .onClick(() => { this.minePage = page; })
+  }
+  @Builder
+  themePreviewCard() {
+    Column({ space: 10 }) {
+      Row({ space: 8 }) {
+        Text('效果预览').fontSize(14).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_muted')).layoutWeight(1)
+        Text(`${themeStyle(this.themeId).label} · ${themeStyle(this.themeId).subtitle}`)
+          .fontSize(12).fontColor(this.accent)
+      }.width('100%')
+      Column({ space: 8 }) {
+        Row() {
+          Text('帮我切换到一个更有氛围的主题').fontSize(13).fontColor($r('app.color.pigo_text'))
+            .padding({ left: 12, right: 12, top: 8, bottom: 8 })
+            .backgroundColor(this.accentTint)
+            .borderRadius({ topLeft: 14, topRight: 5, bottomLeft: 14, bottomRight: 14 })
+        }.width('100%').justifyContent(FlexAlign.End)
+        Row({ space: 8 }) {
+          Blank().width(6).height(6).borderRadius(3).backgroundColor(this.accent)
+          Text('已应用当前配色与背景色调').fontSize(13).fontColor($r('app.color.pigo_text')).layoutWeight(1)
+          Text('发送').fontSize(11).fontWeight(FontWeight.Medium).fontColor(this.accentForeground)
+            .padding({ left: 10, right: 10, top: 4, bottom: 4 })
+            .backgroundColor(this.accent).borderRadius(10)
+        }.width('100%').alignItems(VerticalAlign.Center)
+          .padding({ left: 12, right: 10, top: 8, bottom: 8 })
+          .backgroundColor($r('app.color.pigo_panel')).borderRadius(12)
+      }.width('100%').padding(12).borderRadius(12)
+        .backgroundColor(themeCanvasColor(themeStyle(this.themeId), this.darkMode))
+        .border({ width: 1, radius: 12, color: $r('app.color.pigo_line') })
+    }.width('100%').padding(16).attributeModifier(glassCardSurface(this.darkMode, 16))
+  }
+  @Builder
+  themeOption(style: ThemeStyle) {
+    Button({ type: ButtonType.Normal }) {
+      Column({ space: 8 }) {
+        Row({ space: 8 }) {
+          Row({ space: 4 }) {
+            Blank().width(20).height(20).borderRadius(10).backgroundColor(this.accentFor(style))
+            Blank().width(12).height(20).borderRadius(6).backgroundColor(this.tintFor(style))
+              .border({ width: 0.5, radius: 6, color: $r('app.color.pigo_line') })
+            Blank().width(10).height(20).borderRadius(5).backgroundColor(themeCanvasColor(style, this.darkMode))
+              .border({ width: 0.5, radius: 5, color: $r('app.color.pigo_line') })
+          }.layoutWeight(1)
+          if (this.themeId === style.id) {
+            SymbolGlyph($r('sys.symbol.checkmark_circle_fill')).fontSize(18).fontColor([this.accentFor(style)])
+          }
+        }.width('100%').alignItems(VerticalAlign.Center)
+        Column({ space: 2 }) {
+          Text(style.label).fontSize(15).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
+          Text(style.subtitle).fontSize(12).fontColor($r('app.color.pigo_muted')).maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+        }.width('100%').alignItems(HorizontalAlign.Start)
+      }.width('100%').padding(12)
+    }.id(`theme-${style.id}`).layoutWeight(1).padding(0).borderRadius(14)
+      .accessibilitySelected(this.themeId === style.id)
+      .backgroundColor(this.themeId === style.id ? this.tintFor(style) : $r('app.color.pigo_control'))
+      .border({
+        width: this.themeId === style.id ? 1.5 : 1,
+        radius: 14,
+        color: this.themeId === style.id ? this.accentFor(style) : $r('app.color.pigo_line')
+      })
+      .onClick(() => { this.selectTheme(style.id); })
   }
   @Builder
   themeSettings() {
@@ -414,26 +472,24 @@ export struct SettingsView {
             .onClick(() => { this.selectAppearanceMode(mode); })
         }, (mode: AppearanceMode) => mode.id)
       }.width('100%').padding(4).borderRadius(14).backgroundColor($r('app.color.pigo_control'))
-    }.width('100%').padding(16).backgroundColor($r('app.color.pigo_panel')).borderRadius(16)
-      .border({ width: 1, color: $r('app.color.pigo_line') })
-    Column({ space: 6 }) {
-      Text('主题配色').fontSize(16).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text')).width('100%')
-      ForEach(THEME_STYLES, (style: ThemeStyle) => {
-        Button({ type: ButtonType.Normal }) {
-          Row({ space: 12 }) {
-            Blank().width(22).height(22).borderRadius(11).backgroundColor(this.accentFor(style))
-            Text(style.label).fontSize(15).fontColor($r('app.color.pigo_text')).layoutWeight(1)
-            if (this.themeId === style.id) {
-              SymbolGlyph($r('sys.symbol.checkmark')).fontSize(17).fontColor([this.accent])
-            }
-          }.width('100%').padding({ left: 12, right: 12 })
-        }.id(`theme-${style.id}`).width('100%').height(44).padding(0).borderRadius(12)
-          .accessibilitySelected(this.themeId === style.id)
-          .backgroundColor(this.themeId === style.id ? this.accentTint : Color.Transparent)
-          .onClick(() => { this.selectTheme(style.id); })
-      }, (style: ThemeStyle) => style.id)
-    }.width('100%').padding(16).backgroundColor($r('app.color.pigo_panel')).borderRadius(16)
-      .border({ width: 1, color: $r('app.color.pigo_line') })
+    }.width('100%').padding(16).attributeModifier(glassCardSurface(this.darkMode, 16))
+    this.themePreviewCard()
+    Column({ space: 10 }) {
+      Row() {
+        Text('主题配色').fontSize(16).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text')).layoutWeight(1)
+        Text(`${THEME_STYLES.length} 款`).fontSize(13).fontColor($r('app.color.pigo_muted'))
+      }.width('100%')
+      ForEach(this.themeRows(), (pair: ThemeStyle[], rowIndex: number) => {
+        Row({ space: 10 }) {
+          ForEach(pair, (style: ThemeStyle) => {
+            this.themeOption(style)
+          }, (style: ThemeStyle) => style.id)
+          if (pair.length === 1) {
+            Blank().layoutWeight(1)
+          }
+        }.width('100%')
+      }, (_pair: ThemeStyle[], rowIndex: number) => `theme-row-${rowIndex}`)
+    }.width('100%').padding(16).attributeModifier(glassCardSurface(this.darkMode, 16))
     if (this.appearanceNotice) Text(this.appearanceNotice).fontSize(13).fontColor($r('app.color.pigo_warning'))
   }
   @Builder
@@ -446,8 +502,7 @@ export struct SettingsView {
       Toggle({ type: ToggleType.Switch, isOn: this.runNoticesEnabled })
         .id('run-notice-setting').selectedColor(this.accent).accessibilityText('运行结束通知')
         .onChange((enabled: boolean) => { void this.setRunNoticesEnabled(enabled); })
-    }.width('100%').padding(14).backgroundColor($r('app.color.pigo_panel')).borderRadius(16)
-      .border({ width: 1, color: $r('app.color.pigo_line') })
+    }.width('100%').padding(14).attributeModifier(glassCardSurface(this.darkMode, 16))
   }
   @Builder
   liveViewSettings() {
@@ -460,11 +515,21 @@ export struct SettingsView {
         .id('live-view-setting').selectedColor(this.accent).accessibilityText('任务实况窗')
         .enabled(this.liveViewStatus !== 'rights')
         .onChange((enabled: boolean) => { void this.setLiveViewsEnabled(enabled); })
-    }.width('100%').padding(14).backgroundColor($r('app.color.pigo_panel')).borderRadius(16)
-      .border({ width: 1, color: $r('app.color.pigo_line') })
+    }.width('100%').padding(14).attributeModifier(glassCardSurface(this.darkMode, 16))
   }
   private accentFor(style: ThemeStyle): string {
     return this.darkMode ? style.dark : style.light;
+  }
+  private tintFor(style: ThemeStyle): string {
+    return this.darkMode ? style.darkTint : style.lightTint;
+  }
+  private themeRows(): ThemeStyle[][] {
+    const rows: ThemeStyle[][] = [];
+    for (let i = 0; i < THEME_STYLES.length; i += 2) {
+      const end = Math.min(i + 2, THEME_STYLES.length);
+      rows.push(THEME_STYLES.slice(i, end));
+    }
+    return rows;
   }
   private cloudOnlyComputers(): CloudComputer[] {
     return this.cloudComputers.filter((row: CloudComputer): boolean =>

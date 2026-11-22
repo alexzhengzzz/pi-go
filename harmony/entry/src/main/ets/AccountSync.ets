@@ -4,6 +4,8 @@ import { util } from '@kit.ArkTS';
 import { cryptoFramework } from '@kit.CryptoArchitectureKit';
 
 const TABLE = 'accountsettings';
+// Cloud Space rejects empty encrypted payloads.
+const REMOVED_COMPUTER_PAYLOAD = '{"removed":true}';
 export const SYNC_THEME = 'theme_style';
 export const SYNC_MODE = 'appearance_mode';
 
@@ -31,7 +33,7 @@ function digest(value: string): string {
 
 export function computerSyncRow(address: string, mode: string): SyncRow {
   const computer: CloudComputer = { address: address, mode: mode };
-  return { key: 'computer_' + digest(address), payload: mode ? JSON.stringify(computer) : '' };
+  return { key: 'computer_' + digest(address), payload: mode ? JSON.stringify(computer) : REMOVED_COMPUTER_PAYLOAD };
 }
 
 function decodeComputer(row: SyncRow): CloudComputer | undefined {
@@ -80,6 +82,9 @@ export class AccountSync {
 
   async synchronize(): Promise<relationalStore.ProgressCode> {
     await this.enableDistributed();
+    // Repair legacy removals in place so the same record keys still suppress reseeding.
+    await this.store.executeSql("UPDATE accountsettings SET payload = ? WHERE recordkey GLOB 'computer_*' AND payload = ''",
+      [REMOVED_COMPUTER_PAYLOAD]);
     let timeout = -1;
     try {
       return await new Promise<relationalStore.ProgressCode>((resolve, reject) => {

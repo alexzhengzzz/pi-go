@@ -46,6 +46,8 @@ function fixture(t) {
           assert.equal(mode, rdb.SyncMode.SYNC_MODE_TIME_FIRST);
           assert.deepEqual(tables, ['accountsettings']);
           progress({ schedule: 1, code: 0 });
+          const emptyPayload = db.prepare("SELECT 1 FROM accountsettings WHERE payload = '' LIMIT 1").get();
+          if (emptyPayload) throw new Error('Cloud rejects an empty encrypted payload');
           progress({ schedule: rdb.Progress.SYNC_FINISH, code: cloudCode });
         }
       };
@@ -62,6 +64,7 @@ function fixture(t) {
   return {
     ...loadSync(rdb, crypto, util),
     configurations,
+    database: () => databases.get(configurations.at(-1).customDir),
     setCloudCode: (code) => { cloudCode = code; }
   };
 }
@@ -107,4 +110,24 @@ test('sync reports the cloud completion status from the progress callback', asyn
   assert.equal(await store.synchronize(), 3);
   setCloudCode(0);
   assert.equal(await store.synchronize(), 0);
+});
+
+test('sync uploads new and legacy computer removals and keeps them out of the restored list', async (t) => {
+  const { AccountSync, computerSyncRow, database } = fixture(t);
+  const store = await AccountSync.open({}, 'account-one');
+  const legacy = computerSyncRow('https://192.168.5.2:18981', 'lan');
+  const removed = computerSyncRow('http://127.0.0.1:18977', 'usb');
+  await store.save(removed);
+  await store.save(computerSyncRow('http://127.0.0.1:18977', ''));
+  assert.notEqual(database().prepare('SELECT payload FROM accountsettings WHERE recordkey = ?').get(removed.key).payload, '');
+  database().prepare("INSERT INTO accountsettings (recordkey, payload) VALUES (?, '')").run(legacy.key);
+  await store.save({ key: 'theme_style', payload: 'iris' });
+
+  assert.equal(await store.synchronize(), 0);
+  await store.seed([legacy, removed]);
+  assert.deepEqual(await store.read(), { computers: [], theme: 'iris', mode: '' });
+
+  await store.save(legacy);
+  assert.equal(await store.synchronize(), 0);
+  assert.deepEqual((await store.read()).computers, [{ address: 'https://192.168.5.2:18981', mode: 'lan' }]);
 });

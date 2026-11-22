@@ -3,6 +3,7 @@ import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import { unlinkSync } from 'node:fs';
 import { ipcDirectory } from './local-ipc.mjs';
+import { registerSocket } from './socket-registry.mjs';
 
 // Local discovery is deliberately separate from the workers visible to a paired phone.
 export function pairingRuntime(snapshot, share, unshare) {
@@ -16,7 +17,10 @@ export function pairingRuntime(snapshot, share, unshare) {
         let body = '';
         for await (const chunk of req) { body += chunk; if (body.length > 512) return reply(400, { error: 'invalid_body' }); }
         if (JSON.parse(body).id !== snapshot()?.id) return reply(409, { error: 'session_changed' });
-        if (req.url === '/share') await share(); else unshare();
+        if (req.url === '/share') {
+          if (!snapshot()?.shared) await share();
+        } else unshare();
+        registration.publish();
         return reply(200, { session: snapshot() });
       }
       reply(404, { error: 'not_found' });
@@ -25,6 +29,7 @@ export function pairingRuntime(snapshot, share, unshare) {
   server.maxConnections = 4;
   server.setTimeout(4000, (socket) => socket.destroy());
   server.on('error', () => {});
+  const registration = registerSocket(server, () => ({ session: snapshot() }));
   server.listen(path);
-  return () => { server.close(); server.closeAllConnections(); try { unlinkSync(path); } catch {} };
+  return () => { registration.withdraw(); server.close(); server.closeAllConnections(); try { unlinkSync(path); } catch {} };
 }

@@ -7,6 +7,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { SessionManager, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { ipcDirectory, localRequest, workerSocket } from "./local-ipc.mjs";
+import { registerSocket } from "./socket-registry.mjs";
 import { pairingRuntime } from "./pairing-runtime.mjs";
 import { maxPromptBody, validPromptImage, validPromptImageBuffer, stageAttachment, stagedAttachment, safeAttachmentName,
   promptAttachments, maxImageBytes, maxFileBytes } from "./attachments.mjs";
@@ -175,6 +176,7 @@ function createProbe() {
   const emit = (type: string, data: object, eventRunId = runId) => {
     syncSeq += 1;
     const current = status();
+    if (["session/status", "session/changed", "queue/status", "prompt/unconfirmed"].includes(type)) registration.publish();
     const event = { type, sessionId: current?.id, ...data };
     const legacy = `data: ${JSON.stringify(event)}\n\n`;
     const update = { ...event, cursor: cursor(eventRunId) } as typeof event & {
@@ -563,6 +565,7 @@ function createProbe() {
           activePrompt = undefined;
           emit("prompt/unconfirmed", { requestId: input.requestId });
         }, 5000).unref();
+        registration.publish();
         return reply(response, 202, { dispatched: true, requestId: input.requestId });
       }
       return fail(404, "not_found");
@@ -580,6 +583,8 @@ function createProbe() {
   };
   const server = createServer(options, handle(false));
   const worker = createServer(options, handle(true));
+  const registration = registerSocket(worker, () => ({ session: status(), historyDirectory }));
+  let sharing: Promise<void> | undefined;
   server.maxConnections = 12;
   worker.maxConnections = 12;
   server.setTimeout(30_000, (socket) => socket.destroy());
@@ -615,6 +620,7 @@ function createProbe() {
       runtime = undefined;
       runId = undefined;
       command = undefined;
+      registration.withdraw();
       worker.close();
       worker.closeAllConnections();
     },
@@ -718,12 +724,15 @@ function createProbe() {
     isShared() { return worker.listening; },
     async share(ctx: ExtensionContext) {
       if ("switchSession" in ctx) command = ctx as ExtensionCommandContext;
+      if (sharing) return sharing;
       if (worker.listening) return;
       const socket = workerSocket();
-      await new Promise<void>((resolve, reject) => {
+      sharing = new Promise<void>((resolve, reject) => {
         worker.once("error", reject);
         worker.listen(socket, () => { worker.off("error", reject); resolve(); });
       });
+      try { await sharing; }
+      finally { sharing = undefined; }
     },
     async start(ctx: ExtensionCommandContext, port: number) {
       command = ctx;
@@ -751,6 +760,7 @@ function createProbe() {
       removeTicket();
       server.close();
       server.closeAllConnections();
+      registration.withdraw();
       worker.close();
       worker.closeAllConnections();
     },

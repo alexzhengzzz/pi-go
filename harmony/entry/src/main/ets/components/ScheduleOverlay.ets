@@ -1,10 +1,11 @@
 import { unboundAction } from './ComponentAction';
 import { workspaceName } from '../model/SessionStore';
-import { glassButtonSurface } from '../Immersive';
+import { immersiveSurface } from '../Immersive';
 import { Companion } from '../CredentialVault';
 import { ScheduleJob, RunMessage, scheduleTime, scheduleRunStatus, scheduleRunReason, isCurrentScheduleComputer } from '../ScheduledRuns';
 import { WorkspaceRow } from '../model/PiGoTypes';
 import { headerSymbol } from './HeaderSymbol';
+import { canvasFadeStops } from '../Appearance';
 
 @Extend(Button)
 function chatAction() {
@@ -54,57 +55,75 @@ export struct ScheduleOverlay {
   @Prop accent: string;
   @Prop accentForeground: string;
   @Prop accentTint: string;
+  @Prop canvasBg: string;
   @Prop headerHeight: number;
   @Prop bottomPad: number;
   @Prop computerTitle: string;
 
+  @Builder
+  overlayHeader() {
+    Row({ space: 12 }) {
+      Button({ type: ButtonType.Normal }) {
+        headerSymbol($r('sys.symbol.chevron_left'), $r('app.color.pigo_text'), 21)
+      }.headerAction().attributeModifier(immersiveSurface(this.darkMode)).accessibilityText('返回').enabled(!this.scheduleSaving)
+        .onClick(() => { this.backFromSchedule(); })
+      Text(this.schedulePage === 'inbox' ? '收件箱' : this.schedulePage === 'detail' ? '运行详情' :
+        this.schedulePage === 'editor' ? (this.scheduleEditing ? '编辑定时任务' : '新建定时任务') : '运行历史')
+        .layoutWeight(1).fontSize(20).fontWeight(FontWeight.Bold).fontColor($r('app.color.pigo_text'))
+    }.width('100%').padding({ left: 16, right: 16, top: this.statusBarHeight + 8, bottom: 12 })
+      .linearGradient({
+        direction: GradientDirection.Bottom,
+        colors: canvasFadeStops(this.canvasBg)
+      })
+  }
+
   build() {
-    Column({ space: 10 }) {
-      Row({ space: 12 }) {
-        Button({ type: ButtonType.Normal }) {
-          headerSymbol($r('sys.symbol.chevron_left'), $r('app.color.pigo_text'), 21)
-        }.headerAction().attributeModifier(glassButtonSurface(this.darkMode)).accessibilityText('返回').enabled(!this.scheduleSaving)
-          .onClick(() => { this.backFromSchedule(); })
-        Text(this.schedulePage === 'inbox' ? '收件箱' : this.schedulePage === 'detail' ? '运行详情' :
-          this.schedulePage === 'editor' ? (this.scheduleEditing ? '编辑定时任务' : '新建定时任务') : '运行历史')
-          .layoutWeight(1).fontSize(20).fontWeight(FontWeight.Bold).fontColor($r('app.color.pigo_text'))
-      }.width('100%').height(this.headerHeight)
-        .border({ width: { bottom: 1 }, color: $r('app.color.pigo_line') })
-      if (this.schedulePage === 'inbox') {
-        this.scheduleInboxList()
-      } else {
-        Scroll() {
-          Column({ space: 12 }) {
-            if (this.scheduleError) Text(this.scheduleError).fontSize(14).fontColor($r('app.color.pigo_error'))
-            if (this.schedulePage === 'detail' && this.scheduleDetail) {
-              this.scheduledRunDetail(this.scheduleDetail)
-            } else if (this.schedulePage === 'editor') {
-              this.scheduleEditor()
-            } else if (this.schedulePage === 'history') {
-              Text(this.computerTitle).fontSize(13).fontColor($r('app.color.pigo_muted'))
-              if (!this.scheduleMessages.some((item: RunMessage): boolean => isCurrentScheduleComputer(this.computers, this.base, item))) {
-                Text('暂无运行记录').fontSize(14).fontColor($r('app.color.pigo_muted'))
+    Navigation() {
+      Column({ space: 10 }) {
+        if (this.schedulePage === 'inbox') {
+          this.scheduleInboxList()
+        } else {
+          Scroll() {
+            Column({ space: 12 }) {
+              if (this.scheduleError) Text(this.scheduleError).fontSize(14).fontColor($r('app.color.pigo_error'))
+              if (this.schedulePage === 'detail' && this.scheduleDetail) {
+                this.scheduledRunDetail(this.scheduleDetail)
+              } else if (this.schedulePage === 'editor') {
+                this.scheduleEditor()
+              } else if (this.schedulePage === 'history') {
+                Text(this.computerTitle).fontSize(13).fontColor($r('app.color.pigo_muted'))
+                if (!this.scheduleMessages.some((item: RunMessage): boolean => isCurrentScheduleComputer(this.computers, this.base, item))) {
+                  Text('暂无运行记录').fontSize(14).fontColor($r('app.color.pigo_muted'))
+                }
+                ForEach(this.scheduleMessages.filter((item: RunMessage): boolean => isCurrentScheduleComputer(this.computers, this.base, item)),
+                  (message: RunMessage) => { this.scheduledMessageRow(message) },
+                  (message: RunMessage) => `${message.key}:${message.unread}`)
               }
-              ForEach(this.scheduleMessages.filter((item: RunMessage): boolean => isCurrentScheduleComputer(this.computers, this.base, item)),
-                (message: RunMessage) => { this.scheduledMessageRow(message) },
-                (message: RunMessage) => `${message.key}:${message.unread}`)
-            }
-          }.width('100%').alignItems(HorizontalAlign.Start).padding({ top: 6, bottom: 12 })
-        }.layoutWeight(1).width('100%').align(Alignment.TopStart).scrollBar(BarState.Off)
-      }
-      if (this.schedulePage === 'detail' && this.scheduleDetail?.run.sessionId) {
-        if (this.isPaired && !isCurrentScheduleComputer(this.computers, this.base, this.scheduleDetail)) {
-          Text(`当前聊天在 ${this.computerTitle}`).fontSize(13).fontColor($r('app.color.pigo_muted'))
+            }.width('100%').alignItems(HorizontalAlign.Start)
+              .padding({ left: 16, right: 16, top: this.statusBarHeight + this.headerHeight + 14, bottom: 16 })
+          }.layoutWeight(1).width('100%').align(Alignment.TopStart).scrollBar(BarState.Off)
         }
-        Button(`在 ${this.scheduleDetail.computer} 打开会话`).chatAction().width('100%').height(46)
-          .backgroundColor(this.accent).fontColor(this.accentForeground)
-          .enabled(!this.busy && !this.openingSession).onClick(() => {
-            if (this.scheduleDetail) void this.openScheduledSession(this.scheduleDetail);
-          })
-      }
-    }.id('schedule-overlay').width('100%').height('100%').padding({
-      left: 16, right: 16, top: this.statusBarHeight + 8, bottom: this.bottomPad + 8
-    }).backgroundColor($r('app.color.launch_background')).hitTestBehavior(HitTestMode.BLOCK_HIERARCHY)
+        if (this.schedulePage === 'detail' && this.scheduleDetail?.run.sessionId) {
+          Column({ space: 8 }) {
+            if (this.isPaired && !isCurrentScheduleComputer(this.computers, this.base, this.scheduleDetail)) {
+              Text(`当前聊天在 ${this.computerTitle}`).fontSize(13).fontColor($r('app.color.pigo_muted'))
+            }
+            Button(`在 ${this.scheduleDetail.computer} 打开会话`).chatAction().width('100%').height(46)
+              .backgroundColor(this.accent).fontColor(this.accentForeground)
+              .enabled(!this.busy && !this.openingSession).onClick(() => {
+                if (this.scheduleDetail) void this.openScheduledSession(this.scheduleDetail);
+              })
+          }.width('100%').padding({ left: 16, right: 16, bottom: this.bottomPad + 8 })
+        }
+      }.width('100%').height('100%')
+    }.id('schedule-overlay').width('100%').height('100%')
+      .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP])
+      .mode(NavigationMode.Stack).hideBackButton(true).hideToolBar(true)
+      .title({ builder: this.overlayHeader, height: this.headerHeight + this.statusBarHeight + 20 }, {
+        backgroundColor: Color.Transparent,
+        barStyle: BarStyle.STACK
+      })
+      .backgroundColor(this.canvasBg).hitTestBehavior(HitTestMode.BLOCK_HIERARCHY)
   }
   @Builder
   scheduleInboxList() {
@@ -126,7 +145,10 @@ export struct ScheduleOverlay {
           this.scheduledMessageRow(message)
         }.swipeAction({ end: this.scheduleInboxDelete.bind(this, message), edgeEffect: SwipeEdgeEffect.None })
       }, (message: RunMessage) => `${message.key}:${message.unread}`)
-    }.layoutWeight(1).width('100%').scrollBar(BarState.Off).padding({ top: 6, bottom: 12 })
+    }.layoutWeight(1).width('100%').scrollBar(BarState.Off).edgeEffect(EdgeEffect.Spring)
+      .contentStartOffset(this.statusBarHeight + this.headerHeight + 14)
+      .contentEndOffset(this.bottomPad + 16)
+      .padding({ left: 16, right: 16 })
   }
   @Builder
   scheduleInboxDelete(message: RunMessage) {

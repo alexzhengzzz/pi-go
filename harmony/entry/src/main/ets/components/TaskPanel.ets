@@ -1,3 +1,4 @@
+import { glassCardSurface } from '../Immersive';
 import { unboundAction } from './ComponentAction';
 import { workspaceName } from '../model/SessionStore';
 import { RunMessage, ScheduleJob, scheduleTime } from '../ScheduledRuns';
@@ -14,6 +15,7 @@ function chatAction() {
 
 @Component
 export struct TaskPanel {
+  @StorageProp('pigoDark') private darkMode: boolean = false;
   @Prop topClearance: number;
   @Prop bottomClearance: number;
   @Prop runningRows: RunningRow[];
@@ -56,8 +58,7 @@ export struct TaskPanel {
       ForEach(this.scheduleRuns,
         (row: RunMessage) => {
           Text(`${row.run.name} · 定时任务运行中`).fontSize(15).fontColor($r('app.color.pigo_text'))
-            .width('100%').padding(14).borderRadius(16).backgroundColor($r('app.color.pigo_panel'))
-            .border({ width: 1, color: $r('app.color.pigo_line') })
+            .width('100%').padding(14).attributeModifier(glassCardSurface(this.darkMode, 16))
         }, (row: RunMessage) => row.key)
       if (this.reachable && this.runningRows.length) {
         ForEach(this.runningRows, (row: RunningRow) => {
@@ -97,8 +98,7 @@ export struct TaskPanel {
             Text(this.reachable ? '暂无运行中的任务' : '电脑未连接')
               .fontSize(15).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
           }.layoutWeight(1).alignItems(HorizontalAlign.Start)
-        }.width('100%').padding(14).borderRadius(16).backgroundColor($r('app.color.pigo_panel'))
-          .border({ width: 1, color: $r('app.color.pigo_line') })
+        }.width('100%').padding(14).attributeModifier(glassCardSurface(this.darkMode, 16))
       }
     }.width('100%').alignItems(HorizontalAlign.Start)
   }
@@ -144,8 +144,8 @@ export struct TaskPanel {
           }.id(`schedule-operations-${job.id}`).width(40).height(40).padding(0).borderRadius(10)
             .backgroundColor(Color.Transparent).accessibilityText('定时任务操作')
             .enabled(this.reachable && !this.scheduleSaving && !this.scheduleLoading).bindMenu(this.scheduleJobMenu(job))
-        }.width('100%').padding({ left: 14, right: 6, top: 12, bottom: 12 }).borderRadius(16)
-          .backgroundColor($r('app.color.pigo_panel')).border({ width: 1, color: $r('app.color.pigo_line') })
+        }.width('100%').padding({ left: 14, right: 6, top: 12, bottom: 12 })
+          .attributeModifier(glassCardSurface(this.darkMode, 16))
       }, (job: ScheduleJob) => `${job.id}:${job.version}:${job.nextAt}`)
     }.width('100%').alignItems(HorizontalAlign.Start)
   }

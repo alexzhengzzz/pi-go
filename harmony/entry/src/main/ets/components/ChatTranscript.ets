@@ -4,6 +4,15 @@ import { ChatContent } from '../ChatContent';
 import { ChatImage } from '../ChatImage';
 import { markdownWorkspacePath, messageFileChips, normalizeWorkspacePath } from '../ChatPaths';
 import { ChatMessage, LiveTool, QueuedSteering } from '../model/PiGoTypes';
+import {
+  buildTranscriptTurns,
+  isReadOnlyTool,
+  ProcessStep,
+  ProcessSummary,
+  RecentToolRef,
+  toolActionTitle,
+  TranscriptTurn
+} from '../TranscriptTurns';
 import { headerSymbol } from './HeaderSymbol';
 
 @Extend(Button)
@@ -26,7 +35,7 @@ export struct ChatTranscript {
   @Prop busy: boolean;
   @Require closeMarkdownTableReader: () => void = unboundAction;
   @Require copyText: (value: string) => Promise<void> = unboundAction;
-  @Prop currentId: string;
+  @Prop @Watch('onSessionChanged') currentId: string;
   @Prop darkMode: boolean;
   @Require dismissKeyboard: () => void = unboundAction;
   @Prop historyCursor?: string;
@@ -60,8 +69,45 @@ export struct ChatTranscript {
   @Prop accent: string;
   @Prop accentTint: string;
   @Prop topPadding: number = 10;
+  @Prop bottomPadding: number = 8;
+  @Prop scrollBottomOffset: number = 14;
   @Require readTranscriptHeight: () => number = unboundAction;
   @Require setTranscriptViewport: (height: number) => void = unboundAction;
+
+  @State private processOpenIds: string[] = [];
+
+  private onSessionChanged(): void {
+    this.processOpenIds = [];
+  }
+
+  private isProcessOpen(processId: string): boolean {
+    if (!processId) return false;
+    if (processId === 'live') return this.liveThinkingOpen;
+    return this.processOpenIds.includes(processId);
+  }
+
+  private toggleProcess(processId: string): void {
+    if (!processId) return;
+    if (processId === 'live') {
+      this.liveThinkingOpen = !this.liveThinkingOpen;
+      return;
+    }
+    if (this.processOpenIds.includes(processId)) {
+      this.processOpenIds = this.processOpenIds.filter((item: string): boolean => item !== processId);
+    } else {
+      this.processOpenIds = this.processOpenIds.concat([processId]);
+    }
+  }
+
+  private displayTurns(): TranscriptTurn[] {
+    return buildTranscriptTurns(this.messages, this.unlistedLiveTools(), this.liveThinking, this.liveText, this.idle);
+  }
+
+  private needsWaitingPulse(): boolean {
+    if (this.idle || this.liveText || this.liveThinking || this.unlistedLiveTools().length) return false;
+    if (!this.messages.length) return true;
+    return this.messages[this.messages.length - 1].role === 'user';
+  }
 
   @Builder
   defaultEmptyTranscript() {}
@@ -78,67 +124,20 @@ export struct ChatTranscript {
             if (!this.messages.length && !this.liveText && !this.liveTools.length && !this.liveThinking && this.idle) {
               this.emptyTranscript()
             }
-            ForEach(this.messages, (message: ChatMessage) => {
-              if (message.text || message.thinking || message.imageCount) {
-                Row() {
-                  Column({ space: 8 }) {
-                    if (message.thinking) this.thinkingCard(message.id, message.thinking, message.thinkingMs ?? -1,
-                      this.thinkingOpenIds.includes(message.id))
-                    if (message.text) {
-                      if (message.role === 'user') {
-                        Text(message.text).fontSize(16).lineHeight(26)
-                          .copyOption(CopyOptions.LocalDevice).fontColor($r('app.color.pigo_text'))
-                      } else {
-                        this.richChatText(message.text, this.workspaceCwd)
-                      }
-                      if (this.messageFiles(message).length) {
-                        Flex({ wrap: FlexWrap.Wrap }) {
-                          ForEach(this.messageFiles(message), (path: string) => {
-                            Column() {
-                              this.fileChip(path, message.role !== 'user')
-                            }.margin({ right: 8, bottom: 8 })
-                          }, (path: string) => path)
-                        }.width('100%')
-                      }
-                      if (message.textTruncated) {
-                        Button(this.loadingMessageText === message.id ? '正在加载全文…' : '查看完整回复').chatAction()
-                          .enabled(this.reachable && !this.loadingMessageText)
-                          .onClick(() => { void this.showFullReply(message.id); })
-                      } else if (message.role !== 'user') {
-                        this.copyButton('复制回复', message.text)
-                      }
-                    }
-                    if (message.imageCount) {
-                      Column({ space: 6 }) {
-                        this.historyImages(message.imageCount, this.currentId, message.id)
-                      }.id(`image-message-${message.id}`).alignItems(HorizontalAlign.Start)
-                    }
-                  }.alignItems(HorizontalAlign.Start).padding(message.role === 'user' ?
-                    { left: 14, right: 14, top: 10, bottom: 10 } : 0)
-                    .width(message.role === 'user' ? undefined : '100%')
-                    .constraintSize({ maxWidth: message.role === 'user' ? '88%' : '100%' })
-                    .backgroundColor(message.role === 'user' ? this.accentTint : Color.Transparent)
-                    .borderRadius({ topLeft: 17, topRight: 6, bottomLeft: 17, bottomRight: 17 })
-                }.width('100%').justifyContent(message.role === 'user' ? FlexAlign.End : FlexAlign.Start)
-                  .padding({ top: message.role === 'user' ? 14 : 8, bottom: 4 })
+            ForEach(this.displayTurns(), (turn: TranscriptTurn) => {
+              if (turn.kind === 'user' && turn.message) {
+                this.userBubble(turn.message)
+              } else {
+                this.assistantTurn(turn)
               }
-              this.toolGroup(message.tools ?? [], message.id)
-            }, (message: ChatMessage) => this.transcriptMessageKey(message))
-            this.toolGroup(this.unlistedLiveTools(), '')
-            if (this.liveThinking) this.thinkingCard('', this.liveThinking, -1, this.liveThinkingOpen)
-            if (this.liveText) {
-              Column({ space: 8 }) {
-                this.richChatText(this.liveText, this.workspaceCwd)
-                if (messageFileChips(this.liveText, this.workspaceCwd).length) {
-                  Flex({ wrap: FlexWrap.Wrap }) {
-                    ForEach(messageFileChips(this.liveText, this.workspaceCwd), (path: string) => {
-                      Column() {
-                        this.fileChip(path, true)
-                      }.margin({ right: 8, bottom: 8 })
-                    }, (path: string) => path)
-                  }.width('100%')
-                }
-              }.alignItems(HorizontalAlign.Start).width('100%').padding({ top: 10, bottom: 18 })
+            }, (turn: TranscriptTurn) => this.turnKey(turn))
+            if (this.needsWaitingPulse()) {
+              Row({ space: 8 }) {
+                LoadingProgress().width(13).height(13).color(this.accent)
+                Text('正在思考…').fontSize(13).fontColor($r('app.color.pigo_muted'))
+              }.width('100%').padding({ left: 12, right: 12, top: 10, bottom: 10 })
+                .backgroundColor($r('app.color.pigo_panel')).borderRadius(12)
+                .border({ width: 1, color: $r('app.color.pigo_line') })
             }
             ForEach(this.queuedSteering.filter((message: QueuedSteering): boolean => message.sessionKey === this.draftKey(this.currentId)),
               (message: QueuedSteering) => {
@@ -156,7 +155,7 @@ export struct ChatTranscript {
                     .backgroundColor(this.accentTint).borderRadius({ topLeft: 17, topRight: 6, bottomLeft: 17, bottomRight: 17 })
                 }.width('100%').justifyContent(FlexAlign.End).padding({ top: 10, bottom: 4 })
               }, (message: QueuedSteering) => message.id)
-          }.width('100%').padding({ left: 16, right: 16, top: this.topPadding, bottom: 8 })
+          }.width('100%').padding({ left: 16, right: 16, top: this.topPadding, bottom: this.bottomPadding })
             .onAreaChange((_oldArea: Area, newArea: Area) => {
               this.positionTranscript(transcriptId, Number(newArea.height));
             })
@@ -189,36 +188,252 @@ export struct ChatTranscript {
       if (!this.transcriptFollow) {
         Button({ type: ButtonType.Normal }) {
           headerSymbol($r('sys.symbol.chevron_down'), $r('app.color.pigo_text'), 19)
-        }.id('scroll-bottom').headerAction().attributeModifier(glassButtonSurface(this.darkMode)).margin({ right: 16, bottom: 14 })
+        }.id('scroll-bottom').headerAction().attributeModifier(glassButtonSurface(this.darkMode)).margin({ right: 16, bottom: this.scrollBottomOffset })
           .accessibilityText('滚动到最新消息')
           .onClick(() => { this.transcriptFollow = true; this.transcript.scrollEdge(Edge.Bottom); })
       }
     }.layoutWeight(1).width('100%')
   }
+
   @Builder
-  thinkingCard(id: string, content: string, ms: number, open: boolean) {
+  userBubble(message: ChatMessage) {
+    Row() {
+      Column({ space: 8 }) {
+        if (message.text) {
+          Text(message.text).fontSize(16).lineHeight(26)
+            .copyOption(CopyOptions.LocalDevice).fontColor($r('app.color.pigo_text'))
+          if (this.messageFiles(message).length) {
+            Flex({ wrap: FlexWrap.Wrap }) {
+              ForEach(this.messageFiles(message), (path: string) => {
+                Column() {
+                  this.fileChip(path, false)
+                }.margin({ right: 8, bottom: 8 })
+              }, (path: string) => path)
+            }.width('100%')
+          }
+        }
+        if (message.imageCount) {
+          Column({ space: 6 }) {
+            this.historyImages(message.imageCount, this.currentId, message.id)
+          }.id(`image-message-${message.id}`).alignItems(HorizontalAlign.Start)
+        }
+      }.alignItems(HorizontalAlign.Start).padding({ left: 14, right: 14, top: 10, bottom: 10 })
+        .constraintSize({ maxWidth: '88%' })
+        .backgroundColor(this.accentTint)
+        .borderRadius({ topLeft: 17, topRight: 6, bottomLeft: 17, bottomRight: 17 })
+    }.width('100%').justifyContent(FlexAlign.End).padding({ top: 14, bottom: 4 })
+  }
+
+  @Builder
+  assistantTurn(turn: TranscriptTurn) {
     Column({ space: 8 }) {
+      if (turn.summary) {
+        this.processBlock(turn, turn.summary)
+      }
+      if (turn.message) {
+        if (turn.message.text) {
+          this.richChatText(turn.message.text, this.workspaceCwd)
+          if (this.messageFiles(turn.message).length) {
+            Flex({ wrap: FlexWrap.Wrap }) {
+              ForEach(this.messageFiles(turn.message), (path: string) => {
+                Column() {
+                  this.fileChip(path, true)
+                }.margin({ right: 8, bottom: 8 })
+              }, (path: string) => path)
+            }.width('100%')
+          }
+          if (turn.message.textTruncated) {
+            Button(this.loadingMessageText === turn.message.id ? '正在加载全文…' : '查看完整回复').chatAction()
+              .enabled(this.reachable && !this.loadingMessageText)
+              .onClick(() => { if (turn.message) void this.showFullReply(turn.message.id); })
+          } else {
+            this.copyButton('复制回复', turn.message.text)
+          }
+        }
+        if (turn.message.imageCount) {
+          Column({ space: 6 }) {
+            this.historyImages(turn.message.imageCount, this.currentId, turn.message.id)
+          }.id(`image-message-${turn.message.id}`).alignItems(HorizontalAlign.Start)
+        }
+      }
+      if (turn.extraImageMessages.length) {
+        ForEach(turn.extraImageMessages, (imageMessage: ChatMessage) => {
+          if (imageMessage.imageCount) {
+            Column({ space: 6 }) {
+              this.historyImages(imageMessage.imageCount, this.currentId, imageMessage.id)
+            }.id(`image-message-${imageMessage.id}`).alignItems(HorizontalAlign.Start)
+          }
+        }, (imageMessage: ChatMessage) => `${imageMessage.id}:${imageMessage.imageCount ?? 0}`)
+      }
+      if (turn.liveText) {
+        Column({ space: 8 }) {
+          this.richChatText(turn.liveText, this.workspaceCwd)
+          if (messageFileChips(turn.liveText, this.workspaceCwd).length) {
+            Flex({ wrap: FlexWrap.Wrap }) {
+              ForEach(messageFileChips(turn.liveText, this.workspaceCwd), (path: string) => {
+                Column() {
+                  this.fileChip(path, true)
+                }.margin({ right: 8, bottom: 8 })
+              }, (path: string) => path)
+            }.width('100%')
+          }
+        }.alignItems(HorizontalAlign.Start).width('100%').padding({ top: 4, bottom: 12 })
+      }
+    }.alignItems(HorizontalAlign.Start).width('100%').padding({ top: 6, bottom: 4 })
+  }
+
+  @Builder
+  processBlock(turn: TranscriptTurn, summary: ProcessSummary) {
+    if (turn.isLive && !this.idle && !turn.liveText && !this.isProcessOpen(turn.processId)) {
+      this.livePulseCard(turn, summary)
+    } else {
+      Column({ space: 6 }) {
+        this.processCapsule(turn, summary, this.isProcessOpen(turn.processId))
+        if (this.isProcessOpen(turn.processId)) {
+          this.processTimeline(turn)
+        }
+      }.width('100%').alignItems(HorizontalAlign.Start)
+    }
+  }
+
+  @Builder
+  livePulseCard(turn: TranscriptTurn, summary: ProcessSummary) {
+    Column({ space: 6 }) {
+      Row({ space: 8 }) {
+        LoadingProgress().width(13).height(13).color(this.accent)
+        Text(summary.liveTitle)
+          .fontSize(13).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
+          .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).layoutWeight(1)
+        SymbolGlyph($r('sys.symbol.chevron_right')).fontSize(13).fontColor([$r('app.color.pigo_muted')])
+      }.width('100%').onClick(() => { this.toggleProcess(turn.processId); })
+
+      if (summary.toolCount > summary.recentTools.length) {
+        Text(`已完成前 ${summary.toolCount - summary.recentTools.length} 项操作，点击展开全部`)
+          .fontSize(11).fontColor($r('app.color.pigo_muted')).maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis }).width('100%')
+          .onClick(() => { this.toggleProcess(turn.processId); })
+      }
+
+      if (summary.recentTools.length) {
+        Column({ space: 2 }) {
+          ForEach(summary.recentTools, (item: RecentToolRef) => {
+            this.compactToolRow(item.tool, item.messageId, item.tool.state !== 'run' && item.tool.state !== 'fail')
+          }, (item: RecentToolRef) => `${item.messageId}:${this.toolKey(item.tool)}`)
+        }.width('100%')
+      }
+
+      if (summary.latestThinking) {
+        Text(summary.latestThinking)
+          .fontSize(12).fontStyle(FontStyle.Italic).fontColor($r('app.color.pigo_muted'))
+          .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).width('100%')
+          .onClick(() => { this.toggleProcess(turn.processId); })
+      }
+    }.width('100%').padding({ left: 12, right: 12, top: 10, bottom: 10 })
+      .backgroundColor($r('app.color.pigo_panel')).borderRadius(12)
+      .border({ width: 1, color: $r('app.color.pigo_line') })
+  }
+
+  @Builder
+  processCapsule(turn: TranscriptTurn, summary: ProcessSummary, open: boolean) {
+    Row({ space: 6 }) {
+      if (turn.isLive && !this.idle) {
+        LoadingProgress().width(12).height(12).color(this.accent)
+      } else {
+        Text('✻').fontSize(12).fontColor(summary.hasFailure ? $r('app.color.pigo_error') : $r('app.color.pigo_info'))
+      }
+      Text(summary.label)
+        .fontSize(12.5)
+        .fontColor(summary.hasFailure ? $r('app.color.pigo_error') : $r('app.color.pigo_muted'))
+        .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).layoutWeight(1)
+      SymbolGlyph(open ? $r('sys.symbol.chevron_down') : $r('sys.symbol.chevron_right'))
+        .fontSize(13).fontColor([$r('app.color.pigo_muted')])
+    }.width('100%').padding({ left: 10, right: 10, top: 8, bottom: 8 })
+      .backgroundColor(summary.hasFailure ? $r('app.color.pigo_error_panel') : $r('app.color.pigo_control'))
+      .borderRadius(10)
+      .onClick(() => { this.toggleProcess(turn.processId); })
+  }
+
+  @Builder
+  processTimeline(turn: TranscriptTurn) {
+    Column() {
+      Column({ space: 6 }) {
+        ForEach(turn.steps, (step: ProcessStep) => {
+          if (step.kind === 'thinking') {
+            this.timelineThinkingStep(step, this.thinkingOpenIds.includes(step.id))
+          } else if (step.kind === 'note') {
+            Text(step.text)
+              .fontSize(13).lineHeight(20).fontColor($r('app.color.pigo_muted'))
+              .copyOption(CopyOptions.LocalDevice).width('100%').padding({ left: 4, right: 4, top: 2, bottom: 2 })
+          } else if (step.kind === 'tool' && step.tool) {
+            this.compactToolRow(step.tool, step.messageId, false)
+          }
+        }, (step: ProcessStep) => this.stepKey(step))
+        if (turn.steps.length >= 4) {
+          Row({ space: 4 }) {
+            Text('收起过程').fontSize(12).fontColor($r('app.color.pigo_muted'))
+            SymbolGlyph($r('sys.symbol.chevron_up')).fontSize(12).fontColor([$r('app.color.pigo_muted')])
+          }.padding({ left: 4, top: 4, bottom: 2 })
+            .onClick(() => { this.toggleProcess(turn.processId); })
+        }
+      }.width('100%').alignItems(HorizontalAlign.Start)
+        .padding({ left: 10, top: 2, bottom: 4 })
+        .border({ width: { left: 2 }, color: $r('app.color.pigo_line') })
+    }.width('100%').padding({ left: 6 })
+  }
+
+  @Builder
+  timelineThinkingStep(step: ProcessStep, open: boolean) {
+    Column({ space: 4 }) {
       Row({ space: 6 }) {
-        Text('✻').fontSize(13).fontColor($r('app.color.pigo_info'))
-        Text(id ? (ms >= 0 ? `思考 · ${(ms / 1000).toFixed(1)}s` : '思考') : '思考中…')
-          .fontSize(13).fontColor($r('app.color.pigo_info')).layoutWeight(1)
-        SymbolGlyph(open ? $r('sys.symbol.chevron_down') : $r('sys.symbol.chevron_right'))
-          .fontSize(14).fontColor([$r('app.color.pigo_muted')])
-      }.width('100%').onClick(() => {
-        if (id) this.toggleThinking(id, !open);
-        else this.liveThinkingOpen = !open;
-      })
+        Text(step.live ? '思考中…' : (step.ms >= 0 ? `思考 · ${(step.ms / 1000).toFixed(1)}s` : '思考'))
+          .fontSize(12).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_info')).layoutWeight(1)
+        Text(open ? '收起' : '全文').fontSize(11).fontColor($r('app.color.pigo_muted'))
+      }.width('100%').onClick(() => { this.toggleThinking(step.id, !open); })
       if (open) {
         Scroll() {
-          Text(content).fontSize(13).fontStyle(FontStyle.Italic).fontColor($r('app.color.pigo_muted')).lineHeight(21)
+          Text(step.text).fontSize(12.5).fontStyle(FontStyle.Italic).fontColor($r('app.color.pigo_muted')).lineHeight(20)
             .copyOption(CopyOptions.LocalDevice).width('100%')
-        }.constraintSize({ maxHeight: 320 }).width('100%').scrollBar(BarState.Off)
-      } else if (!id) {
-        Text(content.split('\n').pop() ?? '').fontSize(12).fontColor($r('app.color.pigo_muted')).maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis }).width('100%')
+        }.constraintSize({ maxHeight: 280 }).width('100%').scrollBar(BarState.Off)
+      } else {
+        Text(step.text)
+          .fontSize(12.5).fontStyle(FontStyle.Italic).fontColor($r('app.color.pigo_muted')).lineHeight(19)
+          .maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis }).width('100%')
+          .onClick(() => { this.toggleThinking(step.id, true); })
       }
-    }.width('100%').padding(12).backgroundColor($r('app.color.pigo_control')).borderRadius(12)
+    }.width('100%').padding({ left: 10, right: 10, top: 8, bottom: 8 })
+      .backgroundColor($r('app.color.pigo_control')).borderRadius(10)
   }
+
+  @Builder
+  compactToolRow(tool: LiveTool, messageId: string, dimmed: boolean) {
+    Button({ type: ButtonType.Normal }) {
+      Row({ space: 8 }) {
+        SymbolGlyph(this.toolIcon(tool)).fontSize(15)
+          .fontColor([tool.state === 'fail' ? $r('app.color.pigo_error') :
+            (isReadOnlyTool(tool.name) ? $r('app.color.pigo_muted') : this.accent)])
+        Text(toolActionTitle(tool.name)).fontSize(12.5)
+          .fontWeight(isReadOnlyTool(tool.name) ? FontWeight.Regular : FontWeight.Medium)
+          .fontColor(tool.state === 'fail' ? $r('app.color.pigo_error') :
+            (isReadOnlyTool(tool.name) ? $r('app.color.pigo_muted') : $r('app.color.pigo_text')))
+          .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).constraintSize({ maxWidth: '36%' })
+        Text(tool.detail).fontSize(12).fontColor($r('app.color.pigo_muted')).maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis }).layoutWeight(1)
+        if (tool.state === 'run' && !this.idle) {
+          LoadingProgress().width(12).height(12).color(this.accent)
+        } else if (tool.state === 'fail') {
+          Text('失败').fontSize(11.5).fontColor($r('app.color.pigo_error'))
+        } else if (tool.ms && tool.ms >= 100) {
+          Text(`${(tool.ms / 1000).toFixed(1)}s`).fontSize(11).fontColor($r('app.color.pigo_muted'))
+        }
+        SymbolGlyph($r('sys.symbol.chevron_right')).fontSize(12).fontColor([$r('app.color.pigo_muted')])
+      }.width('100%')
+    }.width('100%').height(34).padding({ left: 8, right: 6 }).borderRadius(8)
+      .backgroundColor($r('app.color.pigo_panel'))
+      .border({ width: 0.5, color: $r('app.color.pigo_line') })
+      .opacity(dimmed ? 0.68 : 1)
+      .onClick(() => { this.openToolDetails(tool, messageId); })
+  }
+
   @Builder
   fileChip(path: string, lookupName: boolean) {
     Button({ type: ButtonType.Normal }) {
@@ -236,38 +451,7 @@ export struct ChatTranscript {
       .padding({ left: 10, right: 10, top: 7, bottom: 7 }).enabled(!this.openingFile)
       .onClick(() => { void this.openReferencedFile(this.workspaceCwd, path, lookupName); })
   }
-  @Builder
-  toolRow(tool: LiveTool, messageId: string) {
-    Button({ type: ButtonType.Normal }) {
-      Row({ space: 9 }) {
-        SymbolGlyph(this.toolIcon(tool)).fontSize(17).fontColor([this.accent])
-        Text(this.toolTitle(tool)).fontSize(13).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
-          .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).constraintSize({ maxWidth: '38%' })
-        Text(tool.detail).fontSize(12).fontColor($r('app.color.pigo_muted')).maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis }).layoutWeight(1)
-        if (tool.state === 'run' && !this.idle) {
-          LoadingProgress().width(13).height(13).color(this.accent)
-        } else if (tool.state === 'fail') {
-          Text('失败').fontSize(12).fontColor($r('app.color.pigo_error'))
-        }
-        SymbolGlyph($r('sys.symbol.chevron_right')).fontSize(13).fontColor([$r('app.color.pigo_muted')])
-      }.width('100%')
-    }.width('100%').height(44).padding({ left: 10, right: 8 }).borderRadius(8).backgroundColor(Color.Transparent)
-      .onClick(() => { this.openToolDetails(tool, messageId); })
-  }
-  @Builder
-  toolGroup(tools: LiveTool[], messageId: string) {
-    if (tools.length) {
-      Column() {
-        ForEach(tools, (tool: LiveTool, index: number) => {
-          if (index > 0) Divider().color($r('app.color.pigo_line')).margin({ left: 36, right: 8 })
-          this.toolRow(tool, messageId)
-        }, (tool: LiveTool) => this.toolKey(tool))
-      }.width('100%').padding({ left: 2, right: 2 })
-        .backgroundColor($r('app.color.pigo_panel')).borderRadius(12)
-        .border({ width: 1, color: $r('app.color.pigo_line') })
-    }
-  }
+
   @Builder
   copyButton(label: string, value: string) {
     Button({ type: ButtonType.Normal }) {
@@ -275,6 +459,7 @@ export struct ChatTranscript {
     }.width(36).height(36).padding(0).borderRadius(10).backgroundColor(Color.Transparent)
       .accessibilityText(label).onClick(() => { void this.copyText(value); })
   }
+
   @Builder
   richChatText(text: string, cwd: string, documentPath: string = '', allowLandscape: boolean = true) {
     ChatContent({ text: text, accent: this.accent, allowLandscape: allowLandscape,
@@ -288,6 +473,7 @@ export struct ChatTranscript {
       copyCode: (value: string): void => { void this.copyText(value); }
     })
   }
+
   @Builder
   historyImages(count: number, sessionId: string, messageId: string, toolId: string = '') {
     ForEach(Array.from({ length: count }, (_: Object, index: number): number => index), (index: number) => {
@@ -298,6 +484,7 @@ export struct ChatTranscript {
       })
     }, (index: number): string => `${sessionId}-${messageId}-${toolId}-${index}`)
   }
+
   private messageFiles(message: ChatMessage): string[] {
     if (message.role !== 'user') return messageFileChips(message.text, this.workspaceCwd);
     const start = message.text.lastIndexOf('\n\n[Pi Go 附件] 手机上传了 ');
@@ -312,33 +499,39 @@ export struct ChatTranscript {
     }
     return paths;
   }
-  private toolTitle(tool: LiveTool): string {
-    switch (tool.name) {
-      case 'bash': return '执行命令';
-      case 'read': return '读取文件';
-      case 'write': return '写入文件';
-      case 'edit': return '编辑文件';
-      case 'grep':
-      case 'find': return '搜索工作区';
-      case 'ls': return '列出目录';
-      case 'web_search': return '网页搜索';
-      default: return tool.name;
-    }
-  }
+
   private toolIcon(tool: LiveTool): Resource {
     if (tool.name === 'bash') return $r('sys.symbol.code_square');
     if (tool.name === 'grep' || tool.name === 'find' || tool.name === 'web_search') return $r('sys.symbol.magnifyingglass');
     if (tool.name === 'write' || tool.name === 'edit') return $r('sys.symbol.square_and_pencil');
     return $r('sys.symbol.folder');
   }
+
   private toolKey(tool: LiveTool): string {
     return `${tool.id}-${tool.state}-${tool.ms ?? 0}`;
   }
-  private transcriptMessageKey(message: ChatMessage): string {
-    const thinking = message.thinking && this.thinkingOpenIds.includes(message.id) ? 'open' : '';
-    const tools = message.tools?.map((tool: LiveTool): string => this.toolKey(tool)).join(',') ?? '';
-    return `${message.id}:${thinking}:${tools}:${message.textTruncated ?? false}`;
+
+  private stepKey(step: ProcessStep): string {
+    if (step.kind === 'tool' && step.tool) return `${step.id}:${this.toolKey(step.tool)}`;
+    if (step.kind === 'thinking') {
+      const open = this.thinkingOpenIds.includes(step.id) ? '1' : '0';
+      return `${step.id}:${open}:${step.text.length}:${step.ms}`;
+    }
+    return `${step.id}:${step.text.length}`;
   }
+
+  private turnKey(turn: TranscriptTurn): string {
+    if (turn.kind === 'user' && turn.message) {
+      return `u:${turn.message.id}:${turn.message.text.length}:${turn.message.imageCount ?? 0}`;
+    }
+    const open = this.isProcessOpen(turn.processId) ? '1' : '0';
+    const stepSig = turn.steps.map((step: ProcessStep): string => this.stepKey(step)).join('|');
+    const finalSig = turn.message
+      ? `${turn.message.id}:${turn.message.text.length}:${turn.message.textTruncated ?? false}:${turn.message.imageCount ?? 0}`
+      : '';
+    return `a:${turn.id}:${open}:${this.idle ? 1 : 0}:${turn.liveText.length}:${finalSig}:${stepSig}`;
+  }
+
   private unlistedLiveTools(): LiveTool[] {
     if (!this.liveTools.length) return this.liveTools;
     const saved = new Set<string>();
@@ -347,7 +540,8 @@ export struct ChatTranscript {
     }
     return this.liveTools.filter((tool: LiveTool): boolean => !saved.has(tool.id));
   }
-  private draftKey(id: string): string {
-    return `${this.base}|${id}`;
+
+  private draftKey(sessionId: string): string {
+    return `${this.base}::${sessionId}`;
   }
 }

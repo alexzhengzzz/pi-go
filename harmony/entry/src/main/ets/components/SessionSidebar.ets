@@ -1,3 +1,5 @@
+import { glassCardSurface, glassDrawerSurface, immersiveSurface } from '../Immersive';
+import { headerSymbol } from './HeaderSymbol';
 import { unboundAction } from './ComponentAction';
 import { SIDEBAR_VIEWS, workspaceName } from '../model/SessionStore';
 import { SessionRow, SidebarRow, PendingInteraction, RunningRow, WorkspaceRow, Payload } from '../model/PiGoTypes';
@@ -15,6 +17,7 @@ function chatAction() {
 
 @Component
 export struct SessionSidebar {
+  @StorageProp('pigoDark') private darkMode: boolean = false;
   @Link activeTab: string;
   @Prop base: string;
   @Prop busy: boolean;
@@ -71,80 +74,112 @@ export struct SessionSidebar {
   @Require onDrawerAppear: () => void = unboundAction;
   @Require connectionEpoch: () => number = unboundAction;
 
-  build() {
-    Column({ space: !this.dockedSessions || this.compactSessionPane || this.windowHeight < SHORT_WINDOW_HEIGHT ? 8 : 12 }) {
-      Row({ space: this.compactSessionPane ? 6 : 10 }) {
-        if (this.dockedSessions) {
-          Stack() {
-            SymbolGlyph($r('sys.symbol.computer')).fontSize(19).fontColor([this.accent])
-          }.width(34).height(34).borderRadius(10).backgroundColor(this.accentTint)
-        }
-        Button({ type: ButtonType.Normal }) {
-          Row({ space: this.dockedSessions ? 6 : 8 }) {
-            if (!this.dockedSessions) {
-              SymbolGlyph($r('sys.symbol.computer')).fontSize(21).fontColor([this.accent])
-            }
-            Text(this.computerTitle).fontSize(this.compactSessionPane ? 14 : this.dockedSessions ? 17 : 19)
-              .fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
-              .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
-              .layoutWeight(this.dockedSessions ? 1 : 0)
-              .constraintSize({ maxWidth: this.dockedSessions ? '100%' : '65%' })
-            SymbolGlyph($r('sys.symbol.chevron_down')).fontSize(13).fontColor([$r('app.color.pigo_muted')])
-          }.width('100%')
-        }.id('computers').layoutWeight(1).height(48).padding(0).backgroundColor(Color.Transparent)
-          .accessibilityText('切换电脑').enabled(!this.busy).onClick(() => { this.openComputers(); })
-        if (!this.dockedSessions) {
-          Button({ type: ButtonType.Normal }) {
-            SymbolGlyph($r('sys.symbol.xmark')).fontSize(18).fontColor([$r('app.color.pigo_muted')])
-          }.width(44).height(44).padding(0).backgroundColor(Color.Transparent).accessibilityText('关闭会话抽屉')
-            .onClick(() => { this.setDrawer(false); })
-        }
-      }.width('100%').padding({ left: this.dockedSessions ? 2 : 10 })
-      Button({ type: ButtonType.Normal }) {
-        Row({ space: this.compactSessionPane ? 6 : 8 }) {
-          SymbolGlyph($r('sys.symbol.square_and_pencil')).fontSize(18)
-            .fontColor([this.dockedSessions ? this.accentForeground : this.accent])
-          Text('新建会话').fontSize(this.dockedSessions ? 15 : 15).fontWeight(FontWeight.Medium)
-            .fontColor(this.dockedSessions ? this.accentForeground : $r('app.color.pigo_text')).maxLines(1)
-        }.justifyContent(FlexAlign.Center).width('100%')
-      }.id('drawer-new-task').width('100%').height(44).padding(0)
-        .backgroundColor(this.dockedSessions ? this.accent : $r('app.color.pigo_panel'))
-        .border({ width: this.dockedSessions ? 0 : 1, radius: 12, color: $r('app.color.pigo_line') })
-        .enabled(this.reachable && !this.busy && !this.openingSession && this.hostAvailable &&
-          (this.projects.length > 0 || this.canCreateWorkspace))
-        .bindMenu(this.newTaskOptions())
-      if (!this.reachable) this.offlineNotice(true, this.compactSessionPane)
-      Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.SpaceBetween, alignContent: FlexAlign.SpaceBetween }) {
-        ForEach(SIDEBAR_VIEWS, (view: string) => {
-          Button({ type: ButtonType.Normal }) {
-            Text(this.sessionViewLabel(view))
-              .fontSize(13).fontColor(this.sessionView === view ? this.accentForeground : $r('app.color.pigo_muted')).maxLines(1)
-              .fontWeight(this.sessionView === view ? FontWeight.Medium : FontWeight.Regular)
-          }.id(`session-view-${view}`).width(this.compactSessionPane ? '49%' : '24%')
-            .height(34).padding(0).borderRadius(9)
-            .backgroundColor(this.sessionView === view ? this.accent : Color.Transparent)
-            .accessibilitySelected(this.sessionView === view).enabled(!this.busy && !this.sessionLoading && this.reachable)
-            .onClick(() => { this.selectSessionView(view); })
-        }, (view: string) => view)
-      }.width('100%').padding(4).borderRadius(12).backgroundColor($r('app.color.pigo_control'))
-      if (this.sessionLoading && (!this.sessionCatalogLoaded || this.loadedView !== this.sessionView)) {
-        Text('正在加载任务…').fontSize(13).fontColor($r('app.color.pigo_muted')).width('100%')
-      } else if (this.sessionCatalogFailed) {
-        Button('任务加载失败，重试').chatAction().id('session-retry').width('100%').height(38)
-          .enabled(this.reachable && !this.busy && !this.openingSession).onClick(() => { void this.loadSessions(); })
+  @Builder
+  sidebarHeader() {
+    Row({ space: this.compactSessionPane ? 6 : 10 }) {
+      if (this.dockedSessions) {
+        Stack() {
+          SymbolGlyph($r('sys.symbol.computer')).fontSize(19).fontColor([this.accent])
+        }.width(34).height(34).borderRadius(10).backgroundColor(this.accentTint)
       }
-      this.sessionLibrary()
-      Row({ space: 6 }) {
-        Blank().width(6).height(6).borderRadius(3)
-          .backgroundColor(this.reachable ? $r('app.color.pigo_success') : $r('app.color.pigo_warning'))
-        Text(this.base.split('://')[1] || '').id('active-computer').fontSize(11).fontColor($r('app.color.pigo_muted'))
-          .layoutWeight(1).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
-      }.width('100%').padding({ left: this.compactSessionPane ? 4 : 10 })
+      Button({ type: ButtonType.Normal }) {
+        Row({ space: this.dockedSessions ? 6 : 8 }) {
+          if (!this.dockedSessions) {
+            SymbolGlyph($r('sys.symbol.computer')).fontSize(21).fontColor([this.accent])
+          }
+          Text(this.computerTitle).fontSize(this.compactSessionPane ? 14 : this.dockedSessions ? 17 : 19)
+            .fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
+            .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+            .layoutWeight(this.dockedSessions ? 1 : 0)
+            .constraintSize({ maxWidth: this.dockedSessions ? '100%' : '65%' })
+          SymbolGlyph($r('sys.symbol.chevron_down')).fontSize(13).fontColor([$r('app.color.pigo_muted')])
+        }.width('100%')
+      }.id('computers').layoutWeight(1).height(44).padding(0).backgroundColor(Color.Transparent)
+        .accessibilityText('切换电脑').enabled(!this.busy).onClick(() => { this.openComputers(); })
+      if (!this.dockedSessions) {
+        Button({ type: ButtonType.Normal }) {
+          headerSymbol($r('sys.symbol.xmark'), $r('app.color.pigo_text'), 17)
+        }.width(40).height(40).padding(0).borderRadius(20).backgroundColor(Color.Transparent)
+          .attributeModifier(immersiveSurface(this.darkMode))
+          .accessibilityText('关闭会话抽屉')
+          .onClick(() => { this.setDrawer(false); })
+      }
+    }.width('100%').padding({
+      left: this.compactSessionPane ? 10 : 18,
+      right: 12,
+      top: this.statusBarHeight + (this.compactSessionPane ? 8 : 10),
+      bottom: 8
+    })
+  }
+
+  build() {
+    Navigation() {
+      Column({ space: !this.dockedSessions || this.compactSessionPane || this.windowHeight < SHORT_WINDOW_HEIGHT ? 8 : 12 }) {
+        if (this.dockedSessions) {
+          Button({ type: ButtonType.Normal }) {
+            Row({ space: this.compactSessionPane ? 6 : 8 }) {
+              SymbolGlyph($r('sys.symbol.square_and_pencil')).fontSize(18).fontColor([this.accentForeground])
+              Text('新建会话').fontSize(15).fontWeight(FontWeight.Medium).fontColor(this.accentForeground).maxLines(1)
+            }.justifyContent(FlexAlign.Center).width('100%')
+          }.id('drawer-new-task').width('100%').height(44).padding(0).borderRadius(14)
+            .backgroundColor(this.accent)
+            .enabled(this.reachable && !this.busy && !this.openingSession && this.hostAvailable &&
+              (this.projects.length > 0 || this.canCreateWorkspace))
+            .bindMenu(this.newTaskOptions())
+        } else {
+          Button({ type: ButtonType.Normal }) {
+            Row({ space: 8 }) {
+              SymbolGlyph($r('sys.symbol.square_and_pencil')).fontSize(18).fontColor([this.accent])
+              Text('新建会话').fontSize(15).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text')).maxLines(1)
+            }.justifyContent(FlexAlign.Center).width('100%')
+          }.id('drawer-new-task').width('100%').height(44).padding(0)
+            .attributeModifier(glassCardSurface(this.darkMode, 14))
+            .enabled(this.reachable && !this.busy && !this.openingSession && this.hostAvailable &&
+              (this.projects.length > 0 || this.canCreateWorkspace))
+            .bindMenu(this.newTaskOptions())
+        }
+        if (!this.reachable) this.offlineNotice(true, this.compactSessionPane)
+        Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.SpaceBetween, alignContent: FlexAlign.SpaceBetween }) {
+          ForEach(SIDEBAR_VIEWS, (view: string) => {
+            Button({ type: ButtonType.Normal }) {
+              Text(this.sessionViewLabel(view))
+                .fontSize(13).fontColor(this.sessionView === view ? this.accentForeground : $r('app.color.pigo_muted')).maxLines(1)
+                .fontWeight(this.sessionView === view ? FontWeight.Medium : FontWeight.Regular)
+            }.id(`session-view-${view}`).width(this.compactSessionPane ? '49%' : '24%')
+              .height(34).padding(0).borderRadius(10)
+              .backgroundColor(this.sessionView === view ? this.accent : Color.Transparent)
+              .accessibilitySelected(this.sessionView === view).enabled(!this.busy && !this.sessionLoading && this.reachable)
+              .onClick(() => { this.selectSessionView(view); })
+          }, (view: string) => view)
+        }.width('100%').padding(4).attributeModifier(glassCardSurface(this.darkMode, 14))
+        if (this.sessionLoading && (!this.sessionCatalogLoaded || this.loadedView !== this.sessionView)) {
+          Text('正在加载任务…').fontSize(13).fontColor($r('app.color.pigo_muted')).width('100%')
+        } else if (this.sessionCatalogFailed) {
+          Button('任务加载失败，重试').chatAction().id('session-retry').width('100%').height(38)
+            .enabled(this.reachable && !this.busy && !this.openingSession).onClick(() => { void this.loadSessions(); })
+        }
+        this.sessionLibrary()
+        Row({ space: 6 }) {
+          Blank().width(6).height(6).borderRadius(3)
+            .backgroundColor(this.reachable ? $r('app.color.pigo_success') : $r('app.color.pigo_warning'))
+          Text(this.base.split('://')[1] || '').id('active-computer').fontSize(11).fontColor($r('app.color.pigo_muted'))
+            .layoutWeight(1).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+        }.width('100%').padding({ left: this.compactSessionPane ? 4 : 10 })
+      }.width('100%').height('100%')
+        .padding({
+          left: this.compactSessionPane ? 8 : 12,
+          right: 12,
+          top: this.statusBarHeight + (this.compactSessionPane ? 58 : 64),
+          bottom: this.bottomPad + 18
+        })
     }.id('session-sidebar').width(this.dockedSessions ? this.sessionPaneWidth : this.drawerWidth).height('100%')
-      .padding({ left: this.compactSessionPane ? 8 : 12, right: 12,
-        top: this.statusBarHeight + (this.compactSessionPane ? 8 : 12), bottom: this.bottomPad + 18 })
-      .border({ width: { right: this.dockedSessions ? 1 : 0 }, color: $r('app.color.pigo_line') })
-      .backgroundColor($r('app.color.pigo_sidebar'))
+      .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
+      .mode(NavigationMode.Stack).hideBackButton(true).hideToolBar(true)
+      .title({ builder: this.sidebarHeader, height: 52 + this.statusBarHeight + 12 }, {
+        backgroundColor: Color.Transparent,
+        barStyle: BarStyle.STACK
+      })
+      .attributeModifier(glassDrawerSurface(this.darkMode, this.dockedSessions))
       .transition(TransitionEffect.move(TransitionEdge.START))
       .onGestureJudgeBegin(() => this.dockedSessions ? GestureJudgeResult.REJECT : GestureJudgeResult.CONTINUE)
       .gesture(PanGesture({ direction: PanDirection.Horizontal }).onActionEnd((event: GestureEvent) => { this.swipeDrawer(event); }))

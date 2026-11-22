@@ -13,6 +13,7 @@
     "host/daemon/catalog.mjs",
     "host/bridge/phase0.ts",
     "host/bridge/local-ipc.mjs",
+    "host/bridge/socket-registry.mjs",
     "host/bridge/broker.mjs",
     "host/bridge/attachments.mjs",
     "host/bridge/message-view.mjs",

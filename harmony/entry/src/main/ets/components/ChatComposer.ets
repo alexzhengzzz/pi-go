@@ -1,3 +1,4 @@
+import { glassComposerSurface, hasImmersiveMaterial, immersiveSheetMaterial } from '../Immersive';
 import { unboundAction } from './ComponentAction';
 import { skillCommands } from '../model/CommandState';
 import { ModelOption, DraftAttachment, CommandRow, Payload } from '../model/PiGoTypes';
@@ -13,6 +14,7 @@ function chatAction() {
 
 @Component
 export struct ChatComposer {
+  @StorageProp('pigoDark') private darkMode: boolean = false;
   @Prop acceptsImage: boolean;
   @Require applyModelFromMenu: (index: number) => Promise<void> = unboundAction;
   @Require applyThinkingLevelFromMenu: (level: string) => Promise<void> = unboundAction;
@@ -135,7 +137,9 @@ export struct ChatComposer {
           .onClick(() => { void this.openModelMenu(); })
           .bindSheet($$this.showModelMenu, this.modelSheet(), {
             detents: ['60%', SheetSize.LARGE], preferType: SheetType.BOTTOM, dragBar: true, showClose: false,
-            backgroundColor: $r('app.color.pigo_panel'), maskColor: '#66000000'
+            backgroundColor: hasImmersiveMaterial() ? undefined : $r('app.color.pigo_panel'),
+            systemMaterial: immersiveSheetMaterial(),
+            maskColor: '#52000000'
           })
         Blank()
         Button({ type: ButtonType.Normal }) {
@@ -147,26 +151,28 @@ export struct ChatComposer {
           .onClick(() => { this.openComposerMenu(); })
           .bindSheet($$this.showComposerMenu, this.composerMenu(), {
             height: SheetSize.FIT_CONTENT, preferType: SheetType.BOTTOM, showClose: false,
-            backgroundColor: $r('app.color.pigo_panel'), maskColor: '#66000000'
+            backgroundColor: hasImmersiveMaterial() ? undefined : $r('app.color.pigo_panel'),
+            systemMaterial: immersiveSheetMaterial(),
+            maskColor: '#52000000'
           })
         if (this.idle || this.hasDraft()) {
           Button({ type: ButtonType.Normal }) {
             SymbolGlyph($r('sys.symbol.arrow_up')).fontSize(20)
               .fontColor([this.canSend() ? this.accentForeground : $r('app.color.pigo_muted')])
-          }.id('send').width(44).height(44).padding(0).borderRadius(13)
+          }.id('send').width(44).height(44).padding(0).borderRadius(16)
             .backgroundColor(this.canSend() ? this.accent : $r('app.color.pigo_control'))
             .accessibilityText(this.idle ? '发送消息' : '发送消息以引导当前任务').enabled(this.canSend())
             .onClick(() => { void this.send(); })
         } else {
           Button({ type: ButtonType.Normal }) {
             Rect().width(12).height(12).fill(this.accentForeground).radius(2)
-          }.id('abort').width(44).height(44).borderRadius(13).backgroundColor(this.accent)
+          }.id('abort').width(44).height(44).borderRadius(16).backgroundColor(this.accent)
             .accessibilityText('停止生成').enabled(this.reachable && !this.busy && !this.openingSession)
             .onClick(() => { void this.requestAction('/abort', { id: this.currentId }); })
         }
       }.width('100%')
-    }.width('100%').padding({ left: 7, right: 7, top: 6, bottom: 6 }).backgroundColor($r('app.color.pigo_panel'))
-      .border({ width: 1, color: $r('app.color.pigo_line') }).borderRadius(18)
+    }.width('100%').padding({ left: 8, right: 8, top: 6, bottom: 6 })
+      .attributeModifier(glassComposerSurface(this.darkMode))
   }
   @Builder
   composerMenuAction(label: string, symbol: Resource, id: string, enabled: boolean, action: () => void) {

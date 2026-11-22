@@ -5,7 +5,8 @@ import { createServer as createSecureServer } from 'node:https';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { pipeline } from 'node:stream/promises';
-import { desktopHosts, ipcDirectory, localRequest, localUpload, workers, pairingRuntimes } from './local-ipc.mjs';
+import { ipcDirectory, localRequest, localUpload } from './local-ipc.mjs';
+import { createSocketRegistry } from './socket-registry.mjs';
 import { newLanIdentity, newPublicIdentity, privateIPv4, publicAddress } from './lan-tls.mjs';
 import { startDiscovery } from './lan-discovery.mjs';
 import { listFiles, previewFile, saveFile, openWorkspaceDownload, findWorkspaceFileByName } from './workspace-files.mjs';
@@ -55,6 +56,8 @@ const streams = new Set();
 let remoteRequests = 0;
 let remoteBudget = 40;
 let remoteBudgetAt = performance.now();
+
+const registry = createSocketRegistry({ shouldShare: () => computerAccess && Boolean(bearer) && !closing });
 
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -111,8 +114,7 @@ function savePairing(nextBearer) {
 async function pumpEvents(client, authorization) {
   try {
     while (!client.closed && matches(authorization, bearer)) {
-      const live = await workerList();
-      if (client.closed || !matches(authorization, bearer)) break;
+      const live = registry.workers();
       const current = selectionFor(live);
       if (!current) {
         client.session = undefined;
@@ -129,7 +131,7 @@ async function pumpEvents(client, authorization) {
         if (client.closed || !matches(authorization, bearer) || version !== selectionVersion) client.upstream?.destroy();
         else if (!client.sequenced && !client.response.write(': keepalive\n\n')) client.response.destroy();
       }, 4000);
-      const path = workerPath(client.sequenced ? '/events?sync=2' : '/events', current.session, client.sequenced);
+      const path = workerPath(client.sequenced ? '/events?sync=2' : '/events', current.session, true);
       const upstream = ipcRequest({ socketPath: current.socket, path, method: 'GET', agent: false }, (res) => {
         if (res.statusCode !== 200) { res.resume(); finish(); return; }
         res.setEncoding('utf8');
@@ -211,39 +213,6 @@ async function rawBody(request, limit) {
   return bytes;
 }
 
-async function workerList(openingId) {
-  if (computerAccess && bearer) await Promise.all(pairingRuntimes().map(async (socket) => {
-    try {
-      const { status, data } = await localRequest(socket, 'GET', '/session', undefined, 700);
-      if (status === 200 && data.session?.id && !data.session.shared) {
-        await localRequest(socket, 'POST', '/share', { id: data.session.id }, 1000);
-      }
-    } catch {}
-  }));
-  const states = [];
-  const complete = Promise.all(workers().map(async (socket, index) => {
-    try {
-      const { status, data } = await localRequest(socket, 'GET', '/session');
-      if (status === 200 && typeof data.session?.id === 'string' && typeof data.session?.cwd === 'string') {
-        states[index] = { socket, session: data.session, historyDirectory: typeof data.historyDirectory === 'string' ? data.historyDirectory : undefined };
-      }
-    } catch (cause) {
-      if (cause.code === 'ECONNREFUSED') {
-        try { unlinkSync(socket); } catch {}
-      }
-    }
-  }));
-  if (openingId !== undefined) {
-    let timer;
-    await Promise.race([complete, new Promise((resolve) => { timer = setTimeout(resolve, 700); })]);
-    clearTimeout(timer);
-    // Restore from disk only after the full probe window in case a slow worker has the target.
-    if (states.some((worker) => worker.session.id === openingId)) return states.filter(Boolean);
-  }
-  await complete;
-  return states.filter(Boolean);
-}
-
 function select(worker) {
   metadata.visit(worker.session);
   chosen = true;
@@ -277,7 +246,7 @@ async function catalog(live, hostSocket, granted = [], includeComputerHistory = 
       : nativeProjectsById.get(session.id) === cwd)) return;
     let cursor = 0;
     for (let page = 0; page < 3; page += 1) {
-      const path = workerPath(`/sessions?limit=100&cursor=${cursor}`, session);
+      const path = workerPath(`/sessions?limit=100&cursor=${cursor}`, session, true);
       const result = await localRequest(socket, 'GET', path).catch(() => undefined);
       if (result?.status !== 200 || result.data.current?.cwd !== cwd || !Array.isArray(result.data.sessions)) return;
       for (const record of result.data.sessions) {
@@ -304,14 +273,13 @@ async function catalog(live, hostSocket, granted = [], includeComputerHistory = 
 }
 
 async function hostContext() {
-  const hosts = await desktopHosts();
+  const hosts = registry.hosts();
   if (hosts.length !== 1) return { ambiguous: hosts.length > 1, granted: [] };
-  const socket = hosts[0];
-  const result = await localRequest(socket, 'GET', '/health', undefined, 700).catch(() => undefined);
-  const profile = result?.data.profile;
-  const workspaceReply = result?.data.workspaceLibrary === true
+  const { socket, health } = hosts[0];
+  const profile = health.profile;
+  const workspaceReply = health.workspaceLibrary === true
     ? await localRequest(socket, 'POST', '/workspaces', {}).catch(() => undefined) : undefined;
-  const supportsWorkspaces = result?.data.workspaceLibrary === true;
+  const supportsWorkspaces = health.workspaceLibrary === true;
   const registered = workspaceReply?.status === 200 && Array.isArray(workspaceReply.data.workspaces)
     ? workspaceReply.data.workspaces.filter((row) => typeof row.cwd === 'string') : undefined;
   const registeredPaths = registered && new Set(registered.map(({ cwd }) => cwd));
@@ -328,8 +296,19 @@ async function hostContext() {
   }
   const workspaces = registered?.filter(({ cwd }) => granted.includes(cwd)).map(({ cwd, name }) => ({ cwd, name }));
   return { socket, profile, granted: [...new Set(granted)], workspaces, revision: workspaceReply?.data?.revision,
-    canCreateWorkspace: computerAccess && result?.data.canCreateWorkspace === true,
-    schedules: result?.data.schedules === true };
+    canCreateWorkspace: computerAccess && health.canCreateWorkspace === true,
+    schedules: health.schedules === true };
+}
+
+async function sharedWorkspace(cwd, live, granted) {
+  if (granted.includes(cwd)) return true;
+  const workers = live.filter(({ session }) => session.cwd === cwd);
+  // A cache entry alone must not extend filesystem access past a worker's lifetime.
+  return (await Promise.all(workers.map(async ({ socket, session }) => {
+    const result = await localRequest(socket, 'GET', workerPath('/session', session, true),
+      undefined, 700).catch(() => undefined);
+    return result?.status === 200 && result.data.session?.id === session.id && result.data.session.cwd === cwd;
+  }))).some(Boolean);
 }
 
 async function scheduleRequest(request, response, path) {
@@ -361,9 +340,9 @@ async function scheduleRequest(request, response, path) {
 const workerIdentity = ({ socket, session }) => ({ id: session.id, pid: Number(/(?:^|\/)w-(\d+)-/.exec(socket)?.[1]) });
 
 async function pendingInteraction(worker) {
-  const hosts = await desktopHosts();
+  const hosts = registry.hosts();
   if (hosts.length !== 1) return undefined;
-  const pending = await localRequest(hosts[0], 'POST', '/pending', workerIdentity(worker), 700).catch(() => undefined);
+  const pending = await localRequest(hosts[0].socket, 'POST', '/pending', workerIdentity(worker), 700).catch(() => undefined);
   if (pending?.status === 200) return pending.data.interaction;
 }
 
@@ -403,10 +382,12 @@ async function nativeHandoff(request, response, route, cwd, id, context, hasLive
     if (result.status !== 200) return error(response, result.status, result.data.error ?? 'desktop_handoff_failed');
     if (typeof result.data.id !== 'string' || (id !== undefined && result.data.id !== id)) return error(response, 409, 'session_changed');
     const expected = realpathSync(cwd);
-    const available = (await workerList(route === '/open' ? result.data.id : undefined)).filter(({ session }) => {
+    const isTarget = ({ session }) => {
       try { return session.id === result.data.id && realpathSync(session.cwd) === expected; }
       catch { return false; }
-    });
+    };
+    await registry.waitForWorker(isTarget, 2500);
+    const available = registry.workers().filter(isTarget);
     if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
     if (available.length !== 1) return error(response, 409, available.length ? 'session_occupied' : 'desktop_share_failed');
     return await replyOpen(request, response, available[0], includeHistory);
@@ -436,6 +417,7 @@ const publicHandler = async (request, response) => {
       catch { return error(response, 500, 'pairing_state_unavailable'); }
       clearTicket();
       bearer = nextBearer;
+      registry.enableSharing();
       lastSeen = Date.now();
       selected = undefined;
       chosen = false;
@@ -468,11 +450,13 @@ const publicHandler = async (request, response) => {
       const parameters = new URL(request.url ?? '/', 'http://pi-go').searchParams;
       const cwd = parameters.get('cwd') ?? '';
       const path = parameters.get('path') ?? '';
-      const live = await workerList();
+      const live = registry.workers();
       if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
       const context = await hostContext();
       if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
-      if (typeof cwd !== 'string' || (!live.some(({ session }) => session.cwd === cwd) && !context.granted.includes(cwd))) return error(response, 403, 'desktop_workspace_unshared');
+      const shared = await sharedWorkspace(cwd, live, context.granted);
+      if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
+      if (!shared) return error(response, 403, 'desktop_workspace_unshared');
       try {
         let file;
         try { file = openWorkspaceDownload(cwd, path); }
@@ -503,14 +487,14 @@ const publicHandler = async (request, response) => {
       const kind = parameters.get('kind');
       const name = safeAttachmentName(parameters.get('name') ?? '');
       if ((kind !== 'image' && kind !== 'file') || !name) return error(response, 400, 'invalid_attachment');
-      const live = await workerList();
+      const live = registry.workers();
       if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
       const current = selectionFor(live);
       if (!current) return error(response, 409, 'session_unavailable');
       if (live.filter(({ session }) => session.id === current.session.id).length !== 1) return error(response, 409, 'session_occupied');
       const bytes = await rawBody(request, kind === 'image' ? maxImageBytes : maxFileBytes);
       if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
-      const result = await localUpload(current.socket, workerPath(request.url ?? '/upload', current.session), bytes).catch(() => undefined);
+      const result = await localUpload(current.socket, workerPath(request.url ?? '/upload', current.session, true), bytes).catch(() => undefined);
       if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
       if (!result) return error(response, 409, 'session_unavailable');
       return reply(response, result.status, result.data);
@@ -530,13 +514,19 @@ const publicHandler = async (request, response) => {
       if (!result) return error(response, 409, 'desktop_handoff_unconfirmed');
       return reply(response, result.status, result.data);
     }
-    const live = await workerList(route === 'POST /open' && typeof input.id === 'string' ? input.id : undefined);
+    if (route === 'POST /open' && typeof input.id === 'string') {
+      // A just-shared target may still be arriving via the directory watcher.
+      await registry.waitForWorker(({ session }) => session.id === input.id, 250);
+    }
+    const live = registry.workers();
     if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
     const current = selectionFor(live);
     if (path.startsWith('/files/')) {
       const context = await hostContext();
       if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
-      if (typeof input.cwd !== 'string' || (!live.some(({ session }) => session.cwd === input.cwd) && !context.granted.includes(input.cwd))) return error(response, 403, 'desktop_workspace_unshared');
+      const shared = typeof input.cwd === 'string' && await sharedWorkspace(input.cwd, live, context.granted);
+      if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
+      if (!shared) return error(response, 403, 'desktop_workspace_unshared');
       try {
         if (path === '/files/list') return reply(response, 200, listFiles(input.cwd, input.path, input.cursor));
         if (path === '/files/save') return reply(response, 200, saveFile(input.cwd, input.path, input.text, input.version));
@@ -586,10 +576,10 @@ const publicHandler = async (request, response) => {
             pid: Number(/(?:^|\/)w-(\d+)-/.exec(socket)?.[1]) });
         }
       }
-      const hosts = await desktopHosts();
+      const hosts = registry.hosts();
       if (hosts.length === 1 && running.length) {
         await Promise.all(running.map(async (row) => {
-          const pending = await localRequest(hosts[0], 'POST', '/pending', { id: row.id, pid: row.pid }, 700).catch(() => undefined);
+          const pending = await localRequest(hosts[0].socket, 'POST', '/pending', { id: row.id, pid: row.pid }, 700).catch(() => undefined);
           if (pending?.status === 200 && pending.data.interaction) row.state = 'waiting';
         }));
       }
@@ -668,9 +658,9 @@ const publicHandler = async (request, response) => {
     if (!current) {
       if (selected && (snapshot || route === 'GET /chat')) {
         const target = selected;
-        const hosts = await desktopHosts();
+        const hosts = registry.hosts();
         const result = hosts.length === 1
-          ? await localRequest(hosts[0], 'POST', '/session-deleted', target, 700).catch(() => undefined) : undefined;
+          ? await localRequest(hosts[0].socket, 'POST', '/session-deleted', target, 700).catch(() => undefined) : undefined;
         if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
         if (selected !== target) return error(response, 409, 'session_changed');
         if (result?.data?.deleted === true) {
@@ -684,10 +674,10 @@ const publicHandler = async (request, response) => {
     if (route === 'GET /session') return reply(response, 200, { session: current.session });
     if (input && (input.id !== current.session.id || live.filter(({ session }) => session.id === input.id).length !== 1)) return error(response, 409, 'session_changed');
     if (route === 'POST /answer') {
-      const hosts = await desktopHosts();
+      const hosts = registry.hosts();
       if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
       if (hosts.length !== 1) return error(response, 409, 'interaction_unavailable');
-      const answer = await localRequest(hosts[0], 'POST', '/answer', { ...workerIdentity(current), pendingId: input.pendingId, answer: input.answer }).catch(() => undefined);
+      const answer = await localRequest(hosts[0].socket, 'POST', '/answer', { ...workerIdentity(current), pendingId: input.pendingId, answer: input.answer }).catch(() => undefined);
       if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
       return reply(response, answer?.status ?? 409, answer?.data ?? { error: 'interaction_unavailable' });
     }
@@ -695,7 +685,7 @@ const publicHandler = async (request, response) => {
     const sessionScopedMessage = isImage || route === 'GET /message-text';
     const scopedRead = sessionScopedMessage || snapshot || route === 'GET /history';
     const version = selectionVersion;
-    const result = await localRequest(current.socket, request.method, workerPath(request.url, current.session, scopedRead), input,
+    const result = await localRequest(current.socket, request.method, workerPath(request.url, current.session, true), input,
       isImage ? 8000 : undefined, isImage ? maxHistoryImageBase64 + 1024 : undefined).catch(() => undefined);
     if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
     if (!result) return error(response, 409, 'session_unavailable');
@@ -735,7 +725,11 @@ const admin = createServer(options, async (request, response) => {
   });
   if (request.method !== 'POST') return error(response, 404, 'not_found');
   try {
-    if (request.url === '/computer-access' && !remote) { computerAccess = true; return reply(response, 200, { enabled: true }); }
+    if (request.url === '/computer-access' && !remote) {
+      computerAccess = true;
+      registry.enableSharing();
+      return reply(response, 200, { enabled: true });
+    }
     if (['/ticket', '/ticket-lan', '/ticket-remote'].includes(request.url)) {
       if (request.url !== ticketRoute) return error(response, 409, 'wrong_transport');
       if (lan) {
@@ -785,6 +779,7 @@ function stop() {
   clearTicket();
   bearer = undefined;
   stopDiscovery?.();
+  registry.stop();
   for (const client of streams) { client.closed = true; client.upstream?.destroy(); try { client.response.destroy(); } catch {} }
   streams.clear();
   publicServer.close();
@@ -802,8 +797,9 @@ function listen(server, ...args) {
 
 process.once('SIGINT', stop);
 process.once('SIGTERM', stop);
-await listen(publicServer, port, host);
 try {
+  await registry.start();
+  await listen(publicServer, port, host);
   try {
     const previous = lstatSync(adminPath);
     if (!previous.isSocket() || previous.uid !== process.getuid()) throw new Error('unsafe_admin_socket');

@@ -28,10 +28,10 @@ import { Companion, CredentialVault } from '../CredentialVault';
 import { choosePromptImage, capturePromptImage, PromptImage } from '../PromptImage';
 import { choosePromptFiles, MAX_FILES } from '../PromptFile';
 import { ensureMicrophone, VoiceInputSession, voiceInputSupported } from '../VoiceInput';
-import { AppearanceMode, ThemeStyle, appearanceMode, openSettings, themeStyle } from '../Appearance';
+import { AppearanceMode, ThemeStyle, appearanceMode, canvasFadeStops, openSettings, themeCanvasColor, themeStyle } from '../Appearance';
 import { HuaweiProfile, authorizeHuaweiProfile, isHuaweiProfileCurrent } from '../HuaweiProfile';
 import { AccountSync, CloudComputer, SyncRow, SyncSnapshot, SYNC_MODE, SYNC_THEME, computerSyncRow } from '../AccountSync';
-import { immersiveSurface, glassButtonSurface, immersiveFloatingTabs } from '../Immersive';
+import { immersiveSurface, glassButtonSurface, glassComposerSurface, glassCardSurface, immersiveFloatingTabs, hasImmersiveMaterial, immersiveSheetMaterial } from '../Immersive';
 import { HISTORY_IMAGE_EXTENSIONS, isImageFile, markdownWorkspacePath, normalizeWorkspacePath, safeLocalFileName,
   textPreviewFormat } from '../ChatPaths';
 import { decodePairingBundle, validUsb } from '../PairingCode';
@@ -3625,6 +3625,8 @@ struct Index {
 
   private accentForeground(): string { return this.darkMode ? '#15191C' : '#FFFFFF'; }
 
+  private themeCanvas(): string { return themeCanvasColor(themeStyle(this.themeId), this.darkMode); }
+
   private selectTheme(id: string): void {
     this.appearanceNotice = '';
     this.themeId = id;
@@ -3892,8 +3894,7 @@ struct Index {
             .backgroundColor(this.accent()).fontColor(this.accentForeground())
             .enabled(!this.busy && this.reachable && !!this.renameDraft.trim())
             .onClick(() => { void this.requestAction('/rename', { id: this.currentId, name: this.renameDraft.trim() }); })
-        }.width('100%').padding(14).borderRadius(16).backgroundColor($r('app.color.pigo_panel'))
-          .border({ width: 1, color: $r('app.color.pigo_line') })
+        }.width('100%').padding(14).attributeModifier(glassCardSurface(this.darkMode, 16))
         Column({ space: 10 }) {
           Row() {
             Text('模型与思考').fontSize(15).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text')).layoutWeight(1)
@@ -3946,8 +3947,7 @@ struct Index {
           if (!this.models.length) {
             Text('没有可用模型，请在电脑上检查 Pi CLI 的模型配置。').fontSize(13).fontColor($r('app.color.pigo_muted')).width('100%')
           }
-        }.width('100%').padding(14).borderRadius(16).backgroundColor($r('app.color.pigo_panel'))
-          .border({ width: 1, color: $r('app.color.pigo_line') })
+        }.width('100%').padding(14).attributeModifier(glassCardSurface(this.darkMode, 16))
       }.width('100%').padding({ left: 16, right: 16, top: this.topContentClearance(), bottom: this.bottomPad() + 16 })
     }.layoutWeight(1).width('100%').align(Alignment.TopStart).scrollBar(BarState.Off)
   }
@@ -4023,9 +4023,7 @@ struct Index {
     }.width('100%').padding({ left: 16, right: 16, top: this.statusBarHeight + 8, bottom: 12 })
       .linearGradient({
         direction: GradientDirection.Bottom,
-        colors: this.darkMode
-          ? [['#FA121519', 0], ['#D9121519', 0.55], ['#44121519', 0.85], ['#00121519', 1]]
-          : [['#FAF8F9FB', 0], ['#D9F8F9FB', 0.55], ['#44F8F9FB', 0.85], ['#00F8F9FB', 1]]
+        colors: canvasFadeStops(this.themeCanvas())
       })
   }
 
@@ -4070,9 +4068,23 @@ struct Index {
       accent: this.accent(),
       accentTint: this.accentTint(),
       topPadding: this.chatHasTopCards() ? 10 : this.topContentClearance(),
+      bottomPadding: this.chatBottomClearance(),
+      scrollBottomOffset: this.chatScrollBottomOffset(),
       readTranscriptHeight: () => this.transcriptContentHeight,
       setTranscriptViewport: (height: number): void => { this.transcriptViewport = height; }
     })
+  }
+
+  private composerBottomMargin(): number {
+    return (this.showRootBottomTabs() ? this.bottomTabsHeight() + 10 : 0) + this.bottomPad() + 8;
+  }
+
+  private chatScrollBottomOffset(): number {
+    return this.composerBottomMargin() + (this.attachments.length ? 186 : 114);
+  }
+
+  private chatBottomClearance(): number {
+    return this.composerBottomMargin() + (this.attachments.length ? 194 : 122);
   }
 
   @Builder
@@ -4091,70 +4103,73 @@ struct Index {
     } else if (this.noSession) {
       this.welcome()
     } else {
-      if (this.chatHasTopCards()) {
-        Column({ space: 8 }) {
-          this.runningStrip()
-          if (!this.reachable && !this.offlineDismissed) this.offlineNotice(false)
-          if (this.interaction) this.pendingCard(this.interaction)
-          if (this.pendingSend && !this.busy) {
-            Row({ space: 8 }) {
-              Button('核对发送').chatAction().id('check-send').enabled(this.reachable).onClick(() => { void this.checkSend(); })
-              Button('保留草稿').chatAction().id('keep-draft').onClick(() => {
-                this.chatState.unconfirmed.delete(this.draftKey(this.currentId));
-                this.pendingSend = undefined;
-                this.status = '已保留草稿，未重发。';
-              })
-            }.width('100%')
-          }
-        }.width('100%').padding({ left: 16, right: 16, top: this.topContentClearance() })
-      }
-      this.chatTranscript()
-      Column({ space: 6 }) {
-        if (this.commandPalette && this.commandPaletteActive()) {
-          Column({ space: 2 }) {
-            if (!this.commandMatches().length) {
-              Text(this.commandsLoading ? '正在加载命令…' : !this.reachable ? '电脑离线，等待重连' :
-                this.commandError || (this.commandRows.length ? '没有匹配的命令' : '暂无可用命令'))
-                .fontSize(13).fontColor($r('app.color.pigo_muted')).padding({ left: 10, right: 10, top: 10, bottom: 10 }).maxLines(2)
-                .onClick(() => { if (this.commandError) void this.loadCommands(); })
-            } else {
-              Scroll() {
-                Column({ space: 2 }) {
-                  ForEach(this.commandMatches(), (row: CommandRow) => {
-                    Column({ space: 2 }) {
-                      Row({ space: 8 }) {
-                        Text(row.invoke ?? `/${row.name}`).fontSize(14).fontWeight(FontWeight.Medium)
-                          .fontColor($r('app.color.pigo_text')).maxLines(1).layoutWeight(1)
-                          .textOverflow({ overflow: TextOverflow.Ellipsis })
-                        if (row.source) {
-                          Text(this.commandSourceLabel(row.source)).fontSize(10).fontColor($r('app.color.pigo_muted'))
-                            .padding({ left: 6, right: 6, top: 2, bottom: 2 }).borderRadius(8)
-                            .backgroundColor($r('app.color.pigo_control')).maxLines(1)
-                        }
-                      }.width('100%')
-                      if (row.description) {
-                        Text(row.description).fontSize(12).fontColor($r('app.color.pigo_muted')).maxLines(1)
-                          .textOverflow({ overflow: TextOverflow.Ellipsis }).width('100%')
-                      }
-                    }.alignItems(HorizontalAlign.Start).width('100%').padding({ left: 10, right: 10, top: 7, bottom: 7 })
-                    .borderRadius(10).id(`command-row-${row.name}`)
-                    .onClick(() => { this.pickCommand(row); })
-                  }, (row: CommandRow) => row.name)
+      Stack({ alignContent: Alignment.Bottom }) {
+        Column() {
+          if (this.chatHasTopCards()) {
+            Column({ space: 8 }) {
+              this.runningStrip()
+              if (!this.reachable && !this.offlineDismissed) this.offlineNotice(false)
+              if (this.interaction) this.pendingCard(this.interaction)
+              if (this.pendingSend && !this.busy) {
+                Row({ space: 8 }) {
+                  Button('核对发送').chatAction().id('check-send').enabled(this.reachable).onClick(() => { void this.checkSend(); })
+                  Button('保留草稿').chatAction().id('keep-draft').onClick(() => {
+                    this.chatState.unconfirmed.delete(this.draftKey(this.currentId));
+                    this.pendingSend = undefined;
+                    this.status = '已保留草稿，未重发。';
+                  })
                 }.width('100%')
-              }.constraintSize({ maxHeight: this.keyboardHeight || this.windowHeight < SHORT_WINDOW_HEIGHT ? 132 : 216 })
-                .width('100%').edgeEffect(EdgeEffect.Spring)
-            }
-          }.width('100%').padding(4)
-          .backgroundColor($r('app.color.pigo_panel')).border({ width: 1, color: $r('app.color.pigo_line') }).borderRadius(14)
-          .id('command-palette')
-        }
-        this.composer()
-      }.width('100%').padding({
-        left: 16,
-        right: 16,
-        top: 4,
-        bottom: (this.showRootBottomTabs() ? this.bottomTabsHeight() + 10 : 0) + this.bottomPad() + 8
-      })
+              }
+            }.width('100%').padding({ left: 16, right: 16, top: this.topContentClearance() })
+          }
+          this.chatTranscript()
+        }.width('100%').height('100%')
+        Column({ space: 6 }) {
+          if (this.commandPalette && this.commandPaletteActive()) {
+            Column({ space: 2 }) {
+              if (!this.commandMatches().length) {
+                Text(this.commandsLoading ? '正在加载命令…' : !this.reachable ? '电脑离线，等待重连' :
+                  this.commandError || (this.commandRows.length ? '没有匹配的命令' : '暂无可用命令'))
+                  .fontSize(13).fontColor($r('app.color.pigo_muted')).padding({ left: 10, right: 10, top: 10, bottom: 10 }).maxLines(2)
+                  .onClick(() => { if (this.commandError) void this.loadCommands(); })
+              } else {
+                Scroll() {
+                  Column({ space: 2 }) {
+                    ForEach(this.commandMatches(), (row: CommandRow) => {
+                      Column({ space: 2 }) {
+                        Row({ space: 8 }) {
+                          Text(row.invoke ?? `/${row.name}`).fontSize(14).fontWeight(FontWeight.Medium)
+                            .fontColor($r('app.color.pigo_text')).maxLines(1).layoutWeight(1)
+                            .textOverflow({ overflow: TextOverflow.Ellipsis })
+                          if (row.source) {
+                            Text(this.commandSourceLabel(row.source)).fontSize(10).fontColor($r('app.color.pigo_muted'))
+                              .padding({ left: 6, right: 6, top: 2, bottom: 2 }).borderRadius(8)
+                              .backgroundColor($r('app.color.pigo_control')).maxLines(1)
+                          }
+                        }.width('100%')
+                        if (row.description) {
+                          Text(row.description).fontSize(12).fontColor($r('app.color.pigo_muted')).maxLines(1)
+                            .textOverflow({ overflow: TextOverflow.Ellipsis }).width('100%')
+                        }
+                      }.alignItems(HorizontalAlign.Start).width('100%').padding({ left: 10, right: 10, top: 7, bottom: 7 })
+                      .borderRadius(10).id(`command-row-${row.name}`)
+                      .onClick(() => { this.pickCommand(row); })
+                    }, (row: CommandRow) => row.name)
+                  }.width('100%')
+                }.constraintSize({ maxHeight: this.keyboardHeight || this.windowHeight < SHORT_WINDOW_HEIGHT ? 132 : 216 })
+                  .width('100%').edgeEffect(EdgeEffect.Spring)
+              }
+            }.width('100%').padding(6)
+            .attributeModifier(glassComposerSurface(this.darkMode, true))
+            .id('command-palette')
+          }
+          this.composer()
+        }.width('100%').padding({
+          left: 16,
+          right: 16,
+          bottom: this.composerBottomMargin()
+        }).hitTestBehavior(HitTestMode.Transparent)
+      }.width('100%').layoutWeight(1)
     }
   }
 
@@ -4729,7 +4744,7 @@ struct Index {
       }.width(30).height(30).padding(0).borderRadius(8).backgroundColor(Color.Transparent)
         .accessibilityText('关闭提示').onClick(() => { this.status = ''; })
     }.width('100%').padding({ left: 12, right: 6, top: 8, bottom: 8 })
-      .backgroundColor($r('app.color.pigo_warning_panel')).borderRadius(12)
+      .attributeModifier(glassCardSurface(this.darkMode, 14, true))
   }
 
   @Builder
@@ -4822,7 +4837,7 @@ struct Index {
       }.width('100%').layoutWeight(1).align(Alignment.TopStart).scrollBar(BarState.Off)
     }.width('100%').height('100%').padding({
       left: 16, right: 16, top: this.statusBarHeight + 8, bottom: this.bottomPad() + 4
-    }).backgroundColor($r('app.color.launch_background')).hitTestBehavior(HitTestMode.BLOCK_HIERARCHY)
+    }).backgroundColor(this.themeCanvas()).hitTestBehavior(HitTestMode.BLOCK_HIERARCHY)
   }
 
   @Builder
@@ -4908,8 +4923,8 @@ struct Index {
             .enabled(!this.busy && this.reachable && !!this.newSpaceName.trim())
             .onClick(() => { void this.createWorkspaceTask(); })
         }.width('100%')
-      }.width('90%').constraintSize({ maxWidth: 360 }).padding(18).borderRadius(20)
-        .backgroundColor($r('app.color.pigo_panel'))
+      }.width('90%').constraintSize({ maxWidth: 360 }).padding(18)
+        .attributeModifier(glassCardSurface(this.darkMode, 20, true))
     }.id('new-space-dialog').width('100%').height('100%')
   }
 
@@ -4933,9 +4948,8 @@ struct Index {
         }.id('run-completion-dismiss').width(44).height(44).padding(0).backgroundColor(Color.Transparent)
           .accessibilityText('关闭运行通知').onClick(() => { this.advanceRunNotice(); })
       }.id('run-completion-banner').width('100%').constraintSize({ maxWidth: 440 })
-        .padding({ left: 14, right: 4, top: 6, bottom: 6 }).borderRadius(16)
-        .backgroundColor($r('app.color.pigo_panel')).border({ width: 1, color: $r('app.color.pigo_line') })
-        .shadow({ radius: 16, offsetY: 5, color: this.darkMode ? '#80000000' : '#25627085' })
+        .padding({ left: 14, right: 4, top: 6, bottom: 6 })
+        .attributeModifier(glassCardSurface(this.darkMode, 16, true))
     }.width('100%').justifyContent(FlexAlign.Center).padding({ left: 16, right: 16 })
       .margin({ top: this.statusBarHeight + 8 }).hitTestBehavior(HitTestMode.Transparent)
       .transition(TransitionEffect.OPACITY.animation({ duration: 180, curve: Curve.EaseOut }))
@@ -5055,6 +5069,7 @@ struct Index {
       accent: this.accent(),
       accentForeground: this.accentForeground(),
       accentTint: this.accentTint(),
+      canvasBg: this.themeCanvas(),
       headerHeight: this.headerHeight(),
       bottomPad: this.bottomPad(),
       computerTitle: this.computerTitle()
@@ -5076,8 +5091,8 @@ struct Index {
         SymbolGlyph($r('sys.symbol.xmark')).fontSize(15).fontColor([$r('app.color.pigo_muted')])
       }.width(40).height(40).padding(0).borderRadius(10).backgroundColor(Color.Transparent)
         .accessibilityText('关闭定时任务通知').onClick(() => { this.scheduleBanner = undefined; })
-    }.id('schedule-completion-banner').width('92%').constraintSize({ maxWidth: 440 }).padding(6).borderRadius(16)
-      .backgroundColor($r('app.color.pigo_panel')).border({ width: 1, color: $r('app.color.pigo_line') })
+    }.id('schedule-completion-banner').width('92%').constraintSize({ maxWidth: 440 }).padding(6)
+      .attributeModifier(glassCardSurface(this.darkMode, 16, true))
   }
 
   build() {
@@ -5092,16 +5107,13 @@ struct Index {
             this.voicePreparing || this.voiceFinishing || !this.isPaired || this.activeTab === 'mine'
             ? GestureJudgeResult.REJECT : GestureJudgeResult.CONTINUE)
           .gesture(PanGesture({ direction: PanDirection.Horizontal }).onActionEnd((event: GestureEvent) => { this.swipeDrawer(event); }))
-      }.width('100%').height('100%').backgroundColor($r('app.color.launch_background'))
+      }.width('100%').height('100%').backgroundColor(this.themeCanvas())
         .borderRadius({ topLeft: this.drawerOpen() ? 24 : 0, bottomLeft: this.drawerOpen() ? 24 : 0 })
-        .clip(true).translate({ x: this.drawerOpen() ? this.drawerWidth() : 0 })
-        .shadow({ radius: 24, offsetX: -5,
-          color: this.drawerOpen() ? (this.darkMode ? '#A0000000' : '#50627085') : Color.Transparent })
-        .opacity(this.drawerOpen() ? (this.darkMode ? 0.48 : 0.38) : 1)
+        .clip(true).translate({ x: this.drawerOpen() ? 36 : 0 })
         .accessibilityLevel(this.drawerOpen() || this.schedulePage ? 'no-hide-descendants' : 'auto')
       if (this.drawerOpen()) {
         Button({ type: ButtonType.Normal }).width('100%').height('100%').padding(0)
-          .backgroundColor(Color.Transparent).borderRadius(0)
+          .backgroundColor(this.darkMode ? '#52000000' : '#2E0F1722').borderRadius(0)
           .accessibilityText('关闭会话列表').onClick(() => { this.setDrawer(false); })
           .gesture(PanGesture({ direction: PanDirection.Horizontal }).onActionEnd((event: GestureEvent) => { this.swipeDrawer(event); }))
       }
@@ -5129,8 +5141,9 @@ struct Index {
             } else {
               Text(this.voiceHint).fontSize(15).fontColor($r('app.color.pigo_text')).textAlign(TextAlign.Center)
             }
-          }.id('voice-feedback').width(250).padding(26).alignItems(HorizontalAlign.Center).borderRadius(20)
-            .backgroundColor(this.holdCancel ? '#B74747' : $r('app.color.pigo_control'))
+          }.id('voice-feedback').width(250).padding(26).alignItems(HorizontalAlign.Center)
+            .borderRadius(20).backgroundColor(this.holdCancel ? '#B74747' : $r('app.color.pigo_control'))
+            .attributeModifier(this.holdCancel ? undefined : glassCardSurface(this.darkMode, 20, true))
         }.width('100%').height('100%').justifyContent(FlexAlign.Center)
           .hitTestBehavior(HitTestMode.None)
       }
@@ -5140,10 +5153,10 @@ struct Index {
           if (this.textFilePreview) {
             Stack({ alignContent: Alignment.Top }) {
               this.textPreviewPage(this.textFilePreview)
-            }.width('100%').height('100%').backgroundColor($r('app.color.launch_background'))
+            }.width('100%').height('100%').backgroundColor(this.themeCanvas())
               .hitTestBehavior(HitTestMode.BLOCK_HIERARCHY)
           }
-        }.width('100%').height('100%').backgroundColor($r('app.color.launch_background'))
+        }.width('100%').height('100%').backgroundColor(this.themeCanvas())
           .hitTestBehavior(HitTestMode.BLOCK_HIERARCHY)
       }
       if (this.markdownTableReader) this.markdownTableReaderPage(this.markdownTableReader)
@@ -5157,11 +5170,13 @@ struct Index {
       }
       if (this.schedulePage) this.scheduleOverlay()
     }.width('100%').height('100%').padding({ left: this.leftInset, right: this.rightInset })
-      .backgroundColor(this.drawerOpen() ? $r('app.color.pigo_sidebar') : $r('app.color.launch_background'))
+      .backgroundColor(this.drawerOpen() ? $r('app.color.pigo_sidebar') : this.themeCanvas())
       .clip(true)
       .bindSheet(this.showToolDetails, this.toolDetailsSheet(), {
         detents: ['65%', SheetSize.LARGE], dragBar: true, showClose: true,
-        backgroundColor: $r('app.color.pigo_panel'), maskColor: '#99000000',
+        backgroundColor: hasImmersiveMaterial() ? undefined : $r('app.color.pigo_panel'),
+        systemMaterial: immersiveSheetMaterial(),
+        maskColor: '#52000000',
         onDisappear: () => { this.closeToolDetails(); }
       })
   }
