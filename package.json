@@ -4,6 +4,12 @@
   "private": true,
   "type": "module",
   "files": [
+    "daemon/README.md",
+    "daemon/daemon.mjs",
+    "daemon/host.mjs",
+    "daemon/runtimes.mjs",
+    "daemon/registry.mjs",
+    "daemon/catalog.mjs",
     "desktop/phase0.ts",
     "desktop/local-ipc.mjs",
     "desktop/broker.mjs",
@@ -23,7 +29,8 @@
     "desktop/pi-desktop-v0.2.2-alpha.patch",
     "scripts/prepare-desktop-host.sh",
     "scripts/build-desktop-host-app.sh",
-    "scripts/install-desktop-host-app.sh"
+    "scripts/install-desktop-host-app.sh",
+    "scripts/install-daemon-launchd.sh"
   ],
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*"
@@ -37,6 +44,7 @@
     "test": "node --test test/*.test.mjs",
     "build:pairing": "zsh scripts/build-pairing-app.sh",
     "build:desktop-host": "zsh scripts/build-desktop-host-app.sh",
-    "install:desktop-host": "zsh scripts/install-desktop-host-app.sh"
+    "install:desktop-host": "zsh scripts/install-desktop-host-app.sh",
+    "install:daemon": "zsh scripts/install-daemon-launchd.sh"
   }
 }

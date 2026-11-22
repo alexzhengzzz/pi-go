@@ -86,8 +86,11 @@ function createProbe() {
   let activePrompt: string | undefined;
   let promptError: string | undefined;
   let runId: string | undefined;
+  let streamId = "";
+  let syncSeq = 0;
   const requests = new Map<string, string>();
   const streams = new Set<ServerResponse>();
+  const sequencedStreams = new Set<ServerResponse>();
   const streamTargets = new Map<ServerResponse, { id: string; cwd: string }>();
   const status = () => {
     const ctx = runtime?.ctx;
@@ -96,12 +99,25 @@ function createProbe() {
       acceptsImage: ctx.model?.input.includes("image") === true,
       model: ctx.model && modelRow(ctx.model), thinkingLevel: ctx.thinkingLevel };
   };
-  const emit = (type: string, data: object) => {
+  const cursor = (eventRunId = runId) => ({
+    sessionId: runtime?.ctx.sessionManager.getSessionId(), streamId, runId: eventRunId ?? null, seq: syncSeq,
+  });
+  const historyLeaf = () => runtime?.ctx.sessionManager.getLeafId() ?? null;
+  const emit = (type: string, data: object, eventRunId = runId) => {
+    syncSeq += 1;
     const current = status();
-    const frame = `data: ${JSON.stringify({ type, sessionId: current?.id, ...data })}\n\n`;
+    const event = { type, sessionId: current?.id, ...data };
+    const legacy = `data: ${JSON.stringify(event)}\n\n`;
+    const update = { ...event, cursor: cursor(eventRunId) } as typeof event & {
+      cursor: ReturnType<typeof cursor>; seq?: number; thinkingSeq?: number; runId?: string;
+    };
+    delete update.seq;
+    delete update.thinkingSeq;
+    delete update.runId;
+    const sequenced = sequencedStreams.size ? `data: ${JSON.stringify(update)}\n\n` : legacy;
     for (const stream of streams) {
       const target = streamTargets.get(stream);
-      if ((target && (current?.id !== target.id || current.cwd !== target.cwd)) || !stream.write(frame)) stream.destroy();
+      if ((target && (current?.id !== target.id || current.cwd !== target.cwd)) || !stream.write(sequencedStreams.has(stream) ? sequenced : legacy)) stream.destroy();
     }
   };
   const stopPing = () => {
@@ -135,7 +151,7 @@ function createProbe() {
       }
       const path = (request.url ?? "").split("?")[0];
       const route = `${request.method} ${path}`;
-      if (privateSocket && !["GET /session", "GET /chat", "GET /history", "GET /tool-detail", "GET /message-image", "GET /message-text", "GET /sessions", "GET /models", "GET /commands", "GET /events", "POST /prompt", "POST /upload", "POST /abort", "POST /receipt", "POST /model", "POST /rename"].includes(route)) {
+      if (privateSocket && !["GET /session", "GET /session/snapshot", "GET /chat", "GET /history", "GET /tool-detail", "GET /message-image", "GET /message-text", "GET /sessions", "GET /models", "GET /commands", "GET /events", "POST /prompt", "POST /upload", "POST /abort", "POST /receipt", "POST /model", "POST /rename"].includes(route)) {
         return fail(404, "not_found");
       }
       if (route === "POST /pair") {
@@ -160,15 +176,19 @@ function createProbe() {
         if (!target || switching || current?.id !== target.id || current.cwd !== target.cwd) return fail(409, "session_changed");
       }
       if (route === "GET /events") {
+        const sequenced = new URL(request.url ?? "/", "http://pi-go").searchParams.get("sync") === "2";
+        if (sequenced && (!runtime || switching)) return fail(409, "session_unavailable");
         if (streams.size >= 4) return fail(429, "too_many_streams");
         request.socket.setTimeout(0);
         response.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-store", "Connection": "keep-alive" });
-        response.write(`data: ${JSON.stringify({ type: "ready", session: status() })}\n\n`);
+        response.write(`data: ${JSON.stringify({ type: "ready", session: status(), cursor: sequenced ? cursor() : undefined })}\n\n`);
         streams.add(response);
+        if (sequenced) sequencedStreams.add(response);
         if (target) streamTargets.set(response, target);
         startPing();
         response.on("close", () => {
           streams.delete(response);
+          sequencedStreams.delete(response);
           streamTargets.delete(response);
           if (!streams.size) stopPing();
         });
@@ -176,6 +196,10 @@ function createProbe() {
       }
       if (!runtime || switching) return fail(409, "session_unavailable");
       if (route === "GET /session") return reply(response, 200, { session: status() });
+      if (route === "GET /session/snapshot") {
+        return reply(response, 200, { session: { ...status(), runId: runId ?? null }, cursor: cursor(), historyLeaf: historyLeaf(),
+          liveText, liveThinking, tools: Array.from(toolLog.values(), ({ summary }) => summary), promptError });
+      }
       const active = runtime;
       if (route === "GET /models") {
         const scoped = active.ctx.scopedModels;
@@ -294,8 +318,12 @@ function createProbe() {
         if (end < 0) return fail(409, "history_changed");
         const limit = route === "GET /history" ? Math.min(60, Math.max(1, Math.floor(Number(parameters.get("limit")) || 60))) : 60;
         const start = Math.max(0, end - limit);
-        return reply(response, 200, { session: status(), messages: messages.slice(start, end),
-          historyCursor: start > 0 ? messages[start].id : undefined, liveText, liveSeq, liveThinking, liveThinkSeq,
+        const page = { session: status(), messages: messages.slice(start, end),
+          historyCursor: start > 0 ? messages[start].id : undefined };
+        if (route === "GET /history" && parameters.get("sync") === "2") {
+          return reply(response, 200, { ...page, historyLeaf: historyLeaf(), cursor: cursor() });
+        }
+        return reply(response, 200, { ...page, liveText, liveSeq, liveThinking, liveThinkSeq,
           tools: Array.from(toolLog.values(), ({ summary }) => summary), promptError });
       }
       const catalog = async () => {
@@ -464,9 +492,12 @@ function createProbe() {
           // 再短暂延迟后用真实状态校准；权威状态仍由 /chat 轮询兜底。
           const liveRunId = status()?.runId ?? runId;
           emit("queue/status", { runId: liveRunId, queued: true });
+          const binding = streamId;
           setTimeout(() => {
             const current = status();
-            if (current) emit("queue/status", { runId: current.runId, queued: current.queued });
+            if (current && binding === streamId && liveRunId === runId) {
+              emit("queue/status", { runId: current.runId, queued: current.queued });
+            }
           }, 250).unref();
           return reply(response, 202, { dispatched: true, requestId: input.requestId });
         }
@@ -502,7 +533,10 @@ function createProbe() {
 
   return {
     bind(pi: ExtensionAPI, ctx: ExtensionContext) {
+      for (const stream of sequencedStreams) stream.destroy();
       runtime = { pi, ctx };
+      streamId = randomBytes(16).toString("hex");
+      syncSeq = 0;
       runId = ctx.isIdle() ? undefined : randomBytes(16).toString("hex");
       liveText = "";
       liveSeq = 0;
@@ -555,6 +589,7 @@ function createProbe() {
       emit("tool/end", { tool: activity.summary });
     },
     settled(aborted: boolean) {
+      const settledRunId = runId;
       runId = undefined;
       liveText = "";
       liveSeq = 0;
@@ -562,7 +597,7 @@ function createProbe() {
       liveThinkSeq = 0;
       toolLog.clear();
       activePrompt = undefined;
-      emit("session/status", { idle: true, aborted, queued: status()?.queued ?? false });
+      emit("session/status", { idle: true, aborted, queued: status()?.queued ?? false }, settledRunId);
     },
     final(reason: string) {
       if (activePrompt && reason === "error") promptError = "model_error";

@@ -229,6 +229,11 @@ test("shared bridge /events forwards worker frames, follows selection and ends o
   const workers = [];
   const spawnWorker = async (id, cwd) => {
     const clients = new Set();
+    const cursor = { sessionId: id, streamId: `stream-${id}`, runId: null, seq: 0 };
+    let historyRequested;
+    let releaseHistory;
+    const historyWaiting = new Promise(resolve => { historyRequested = resolve; });
+    const holdHistory = new Promise(resolve => { releaseHistory = resolve; });
     const server = createHttpServer((request, response) => {
       const route = `${request.method} ${(request.url ?? "").split("?")[0]}`;
       if (route === "GET /session") {
@@ -236,9 +241,28 @@ test("shared bridge /events forwards worker frames, follows selection and ends o
         response.end(JSON.stringify({ session: { id, cwd, idle: true, queued: false } }));
         return;
       }
+      if (route === "GET /history") {
+        historyRequested();
+        void holdHistory.then(() => {
+          response.writeHead(200, { "Content-Type": "application/json" });
+          response.end(JSON.stringify({ cursor, session: { id, cwd }, messages: [{ id: "history" }] }));
+        });
+        return;
+      }
+      if (route === "GET /session/snapshot") {
+        response.writeHead(200, { "Content-Type": "application/json" });
+        response.end(JSON.stringify({ cursor, session: { id, cwd, idle: true, queued: false } }));
+        return;
+      }
       if (route === "GET /events") {
+        const params = new URL(request.url, "http://worker").searchParams;
+        if (params.get("sync") === "2") {
+          assert.equal(params.get("_pigoSession"), id);
+          assert.equal(params.get("_pigoCwd"), cwd);
+        }
         response.writeHead(200, { "Content-Type": "text/event-stream" });
-        response.write(`data: ${JSON.stringify({ type: "ready", session: { id, cwd, idle: true, queued: false } })}\n\n`);
+        response.write(`data: ${JSON.stringify({ type: "ready", session: { id, cwd, idle: true, queued: false },
+          cursor: params.get("sync") === "2" ? cursor : undefined })}\n\n`);
         clients.add(response);
         response.on("close", () => clients.delete(response));
         return;
@@ -252,7 +276,7 @@ test("shared bridge /events forwards worker frames, follows selection and ends o
       server.listen(socket, () => { server.off("error", reject); resolve(); });
     });
     const record = {
-      server, socket, id, cwd, clients,
+      server, socket, id, cwd, clients, historyWaiting, releaseHistory, cursor,
       emit: (data) => {
         const frame = `data: ${JSON.stringify({ sessionId: id, ...data })}\n\n`;
         for (const client of clients) client.write(frame);
@@ -303,8 +327,21 @@ test("shared bridge /events forwards worker frames, follows selection and ends o
   assert.equal(delta.value.seq, 1);
   alpha.emit({ type: "tool/start", tool: { id: "t1", name: "bash", detail: "npm test", state: "run" } });
   assert.equal((await feed.next()).value.tool.name, "bash");
+  const sequenced = events(await fetch(`${url}/events?sync=2`, { headers, signal: AbortSignal.timeout(5000) }));
+  assert.deepEqual((await sequenced.next()).value.cursor, alpha.cursor);
+  const oldHistory = fetch(`${url}/history?id=session-alpha`, { headers, signal: AbortSignal.timeout(5000) });
+  await alpha.historyWaiting;
   const beta = await spawnWorker("session-beta", join(ipc, "project-b"));
   assert.equal((await post("/open", { id: "session-beta" })).status, 200);
+  alpha.releaseHistory();
+  assert.equal((await oldHistory).status, 409);
+  assert.equal((await sequenced.next()).done, true);
+  const next = events(await fetch(`${url}/events?sync=2`, { headers, signal: AbortSignal.timeout(5000) }));
+  assert.deepEqual((await next.next()).value.cursor, beta.cursor);
+  const state = await (await fetch(`${url}/session/snapshot`, { headers })).json();
+  assert.deepEqual(state.cursor, beta.cursor);
+  assert.equal(state.messages, undefined);
+  await next.return();
   const switched = await feed.next();
   assert.equal(switched.value.type, "ready");
   assert.equal(switched.value.session.id, "session-beta");
@@ -439,31 +476,66 @@ test("phase 0 against Pi 1.4.0 RPC, using an offline provider and disposable pro
   assert.equal((await (await bridge.get(`/sessions?limit=1&cursor=${paged.nextCursor}`)).json()).nextCursor, undefined);
 
   assert.equal((await (await bridge.get("/sessions?query=nothing-here")).json()).total, 0);
+  const readFrame = async (stream, label) => {
+    try { return await stream.next(); }
+    catch (error) {
+      throw new Error(`Could not read ${label} from the Pi event stream`, { cause: error });
+    }
+  };
   const feed = events(await bridge.get("/events"));
-  assert.equal((await feed.next()).value.type, "ready");
+  assert.equal((await readFrame(feed, "feed")).value.type, "ready");
   const opened = await bridge.post("/open", { id: historic.sessionId });
   assert.equal(opened.status, 200, await opened.clone().text());
   assert.equal((await desktop.rpc("get_state")).sessionId, historic.sessionId);
-  assert.equal((await feed.next()).value.session.id, historic.sessionId);
+  assert.equal((await readFrame(feed, "feed")).value.session.id, historic.sessionId);
+  const syncFeed = events(await bridge.get("/events?sync=2"));
+  const syncReady = (await readFrame(syncFeed, "syncFeed")).value;
+  assert.equal(syncReady.cursor.sessionId, historic.sessionId);
+  assert.equal(syncReady.cursor.runId, null);
   const since = desktop.messages.length;
   const input = { id: historic.sessionId, requestId: "offline-turn", text: "Continue the historical session." };
   assert.equal((await bridge.post("/prompt", input)).status, 202);
   assert.equal((await bridge.post("/prompt", input)).status, 409);
   // 运行开始即携带 runId/queued，手机立即可引导。
-  const started = (await feed.next()).value;
+  const started = (await readFrame(feed, "feed")).value;
   assert.equal(started.idle, false);
   assert.match(started.runId ?? "", /^[a-f0-9]{32}$/);
   assert.equal(started.queued, false);
-  assert.equal((await feed.next()).value.text, "fixture delta");
+  assert.equal((await readFrame(feed, "feed")).value.text, "fixture delta");
+  const syncStarted = (await readFrame(syncFeed, "syncFeed")).value.cursor;
+  const syncDelta = (await readFrame(syncFeed, "syncFeed")).value.cursor;
+  assert.equal(syncStarted.seq, syncReady.cursor.seq + 1);
+  assert.equal(syncStarted.runId, started.runId);
+  assert.deepEqual(syncDelta, { ...syncStarted, seq: syncStarted.seq + 1 });
+  const liveSnapshot = await (await bridge.get("/session/snapshot")).json();
+  assert.deepEqual(liveSnapshot.cursor, syncDelta);
+  assert.equal(liveSnapshot.liveText, "fixture delta");
+  assert.equal(liveSnapshot.messages, undefined);
+  await syncFeed.return();
+  const recoveredFeed = events(await bridge.get("/events?sync=2"));
+  assert.deepEqual((await readFrame(recoveredFeed, "recoveredFeed")).value.cursor, liveSnapshot.cursor);
+  const recentHistory = await (await bridge.get(`/history?id=${historic.sessionId}&sync=2`)).json();
+  assert.equal(recentHistory.historyLeaf, liveSnapshot.historyLeaf);
+  assert.ok(recentHistory.messages.some(message => message.text === input.text));
+  assert.equal(recentHistory.liveText, undefined);
   const streaming = await (await bridge.get("/chat")).json();
   assert.equal(streaming.session.id, historic.sessionId);
   assert.equal(streaming.session.idle, false);
   assert.equal(streaming.liveText, "fixture delta");
   assert.equal((await bridge.post("/abort", { id: historic.sessionId })).status, 202);
-  assert.equal((await feed.next()).value.reason, "aborted");
+  assert.equal((await readFrame(feed, "feed")).value.reason, "aborted");
   await desktop.wait((event) => event.type === "agent_settled", since);
   const { messages } = await desktop.rpc("get_messages");
   assert.ok(messages.some((message) => message.role === "user" && JSON.stringify(message.content).includes(input.text)));
+  const finalFrame = (await readFrame(recoveredFeed, "recoveredFeed")).value;
+  const settledFrame = (await readFrame(recoveredFeed, "recoveredFeed")).value;
+  assert.equal(finalFrame.type, "message/final");
+  assert.equal(settledFrame.type, "session/status");
+  assert.equal(settledFrame.cursor.runId, started.runId);
+  assert.equal(settledFrame.cursor.seq, finalFrame.cursor.seq + 1);
+  const idleSnapshot = await (await bridge.get("/session/snapshot")).json();
+  assert.deepEqual(idleSnapshot.cursor, { ...settledFrame.cursor, runId: null });
+  await recoveredFeed.return();
   const snapshot = await (await bridge.get("/chat")).json();
   assert.equal(snapshot.session.idle, true);
   assert.equal(snapshot.liveText, "");
@@ -471,7 +543,7 @@ test("phase 0 against Pi 1.4.0 RPC, using an offline provider and disposable pro
 
   const nextType = async (type) => {
     for (;;) {
-      const next = await feed.next();
+      const next = await readFrame(feed, "feed");
       if (next.done) throw new Error(`event stream ended before ${type}`);
       if (next.value.type === type) return next.value;
     }
@@ -608,11 +680,15 @@ test("shared bridge selects native runtimes without replacing their sessions", {
   await runtimeB.wait((event) => event.type === "message_update", since);
   // Running status includes background tasks, regardless of the selected chat.
   assert.equal((await bridge.post("/open", { id: sessionA.sessionId })).status, 200);
-  assert.deepEqual((await (await bridge.get("/sessions/status")).json()).runningSessionIds, [sessionB.sessionId]);
+  const running = await (await bridge.get("/sessions/status")).json();
+  assert.deepEqual(running.runningSessionIds, [sessionB.sessionId]);
+  assert.deepEqual(running.idleSessionIds, [sessionA.sessionId]);
   assert.equal((await bridge.post("/open", { id: sessionB.sessionId })).status, 200);
   assert.equal((await bridge.post("/abort", { id: sessionB.sessionId })).status, 202);
   await runtimeB.wait((event) => event.type === "agent_settled", since);
-  assert.deepEqual((await (await bridge.get("/sessions/status")).json()).runningSessionIds, []);
+  const settled = await (await bridge.get("/sessions/status")).json();
+  assert.deepEqual(settled.runningSessionIds, []);
+  assert.deepEqual(new Set(settled.idleSessionIds), new Set([sessionA.sessionId, sessionB.sessionId]));
   const [{ messages: messagesA }, { messages: messagesB }] = await Promise.all([runtimeA.rpc("get_messages"), runtimeB.rpc("get_messages")]);
   assert.ok(!JSON.stringify(messagesA).includes(input.text));
   assert.ok(JSON.stringify(messagesB).includes(input.text));

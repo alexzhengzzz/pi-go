@@ -4,6 +4,12 @@ import { stripTypeScriptTypes } from 'node:module';
 import { test } from 'node:test';
 
 // Exercise the actual page methods without requiring an ArkUI device runtime.
+const syncSource = readFileSync(new URL('../harmony/entry/src/main/ets/SessionSync.ets', import.meta.url), 'utf8');
+const { SessionSync } = await import(`data:text/javascript;base64,${Buffer.from(stripTypeScriptTypes(syncSource)).toString('base64')}`);
+class BridgeFailure extends Error {
+  constructor(status, message) { super(message); this.status = status; }
+}
+
 const page = readFileSync(new URL('../harmony/entry/src/main/ets/pages/Index.ets', import.meta.url), 'utf8');
 function method(name) {
   const start = page.search(new RegExp(`  private (?:async )?${name}\\(`));
@@ -13,16 +19,18 @@ function method(name) {
 }
 const methods = ['setDrawer', 'loadSessions', 'requestAction', 'positionTranscript', 'poll', 'loadSessionStatus', 'applyRunningStatus', 'backgroundRunning', 'backgroundActive', 'sessionState', 'sessionRunning'];
 methods.push('spaceSessions');
-methods.push('cacheChat', 'presentChat', 'send', 'mergeTranscript', 'sameMessage', 'applyLiveSnapshot',
-  'handleFrame', 'queueStreamPaint', 'flushStreamDeltas', 'finishSend', 'reconcileSteering');
+methods.push('cacheChat', 'presentChat', 'revealChat', 'send', 'mergeTranscript', 'sameMessage', 'applyLiveSnapshot',
+  'handleFrame', 'applyStreamFrame', 'requestSessionSnapshot', 'applySessionSnapshot', 'refreshSessionHistory',
+  'applySessionHistory', 'stopStream', 'streamDown', 'queueStreamPaint', 'flushStreamDeltas', 'finishSend', 'reconcileSteering');
 methods.push('chooseComputer', 'leaveComputer', 'persistComputers', 'pair', 'resetFileTree', 'closeFileEditor');
 methods.push('appendFileTreeRows', 'updateFileTree', 'toggleFileDirectory', 'loadFileDirectory');
 methods.push('newTaskOptions', 'closeNewSpace', 'createWorkspaceTask', 'createSpaceTask', 'confirmCloseSpace', 'closeWorkspace', 'armTranscriptFollow', 'onKeyboardChange');
 methods.push('dockedSessions', 'sessionPaneWidth', 'compactSessionPane', 'onWindowWidthChange');
+methods.push('chatTitle', 'observeSessionRun', 'observeRun', 'advanceRunNotice', 'clearRunNotices');
 const splitWidth = page.match(/^const SPLIT_WINDOW_WIDTH = \d+;$/m)[0];
 const Page = new Function('Curve', 'BridgeFailure', 'validUsb', 'MAX_COMPUTERS', 'Edge', '$r', 'DialogAlignment', stripTypeScriptTypes(`${splitWidth}\nconst STREAM_PAINT_INTERVAL_MS = 32;\nconst MAX_LIVE_TEXT_LENGTH = 16000;\nclass Harness {\n${methods.map(method).join('\n')}\n}`) + '; return Harness;')(
   { EaseOut: 0 },
-  class BridgeFailure extends Error {},
+  BridgeFailure,
   (address) => address === 'http://127.0.0.1:18977',
   12,
   { Bottom: 'bottom' },
@@ -34,8 +42,9 @@ function fixture() {
   Object.assign(state, {
     resetVoice: () => {}, resetCommands: () => {}, syncCommandPalette: () => {},
     fileDirectories: new Map(),
-    busy: false, sessionLoading: false, epoch: 1, reachable: true,
+    syncMode: 'legacy', busy: false, sessionLoading: false, epoch: 1, reachable: true,
     runningSessionIds: [], runningSessions: [], sessionStatusAt: 0, runningCatalogAt: 0, currentId: '', idle: true, queued: false,
+    observedRuns: new Map(), pendingRunNotices: [], runNoticeTimer: -1, messages: [],
     liveText: '', liveThinking: '', liveThinkSeq: 0, liveThinkingOpen: false, thinkingOpenIds: [],
     liveTools: [], liveSeq: 0, liveRevision: 0, streamAlive: false, queuedSteering: [],
     deltaPaintTimer: -1, pendingLiveText: '', pendingLiveThinking: '',
@@ -597,6 +606,44 @@ test('running status refresh updates all tasks without replacing cached pages', 
   assert.equal(state.sessionRunning('page-two'), false);
 });
 
+test('current task shows one banner after the queue drains across events and snapshots', (context) => {
+  const state = fixture();
+  Object.assign(state, { visible: true, currentId: 'one', schedule: () => {} });
+  context.after(() => state.clearRunNotices());
+  const session = { id: 'one', idle: true };
+  state.observeSessionRun(session);
+  assert.equal(state.runNotice, undefined);
+  state.applyStreamFrame({ type: 'session/status', idle: false });
+  state.applyStreamFrame({ type: 'session/status', idle: true, queued: true });
+  assert.equal(state.runNotice, undefined);
+  state.observeSessionRun(session);
+  assert.deepEqual(state.runNotice, { title: 'Cached task', stopped: false });
+  state.applyStreamFrame({ type: 'session/status', idle: true });
+  state.advanceRunNotice();
+  assert.equal(state.runNotice, undefined);
+
+  state.applyStreamFrame({ type: 'session/status', idle: false });
+  state.applyStreamFrame({ type: 'session/status', idle: true, aborted: true });
+  assert.equal(state.runNotice.stopped, true);
+});
+
+test('background banners require a previously running task to be confirmed idle', (context) => {
+  const state = fixture();
+  Object.assign(state, {
+    visible: true, currentId: 'one', sessionLoading: true,
+    sessions: [{ id: 'two', name: 'Build' }, { id: 'three', name: 'Closed' }]
+  });
+  context.after(() => state.clearRunNotices());
+  state.applyRunningStatus({ runningSessionIds: ['one', 'two', 'three'], idleSessionIds: [] });
+  state.applyRunningStatus(undefined);
+  assert.equal(state.runNotice, undefined);
+  state.applyRunningStatus({ runningSessionIds: [], idleSessionIds: ['one', 'two'] });
+  assert.deepEqual(state.runNotice, { title: 'Build', stopped: false });
+  state.applyRunningStatus({ runningSessionIds: [], idleSessionIds: ['one', 'two', 'three'] });
+  state.advanceRunNotice();
+  assert.equal(state.runNotice, undefined);
+});
+
 test('running badges use current chat state and disappear when disconnected', () => {
   const state = fixture();
   state.currentId = 'one';
@@ -943,4 +990,172 @@ test('an idle poll started before a new run preserves its buffered stream', asyn
   state.flushStreamDeltas();
   assert.equal(state.idle, false);
   assert.equal(state.liveText, 'New run');
+});
+
+function syncFixture() {
+  const state = navigationFixture();
+  Object.assign(state, {
+    sessionSync: new SessionSync(), syncMode: 'sequenced', historyRequest: 0,
+    streamGen: 0, streamTimer: -1, startStream: () => {}, scheduleStream: () => {},
+  });
+  return state;
+}
+
+const syncCursor = (seq, sessionId = 'one', streamId = 'first-worker', runId = 'run-1') =>
+  ({ sessionId, streamId, runId, seq });
+const snapshot = (cursor, liveText = '', historyLeaf = 'leaf') =>
+  ({ session: { id: cursor.sessionId, cwd: '/project', idle: cursor.runId === null },
+    cursor, liveText, historyLeaf, tools: [] });
+const feedFrame = (state, type, cursor, data = {}) =>
+  state.handleFrame(JSON.stringify({ type, sessionId: cursor.sessionId, cursor, ...data }));
+
+test('a sequence gap triggers one snapshot and drains only uncovered events', async () => {
+  const state = syncFixture();
+  state.historyStream = 'first-worker';
+  state.historyLeaf = 'leaf';
+  const scheduled = [];
+  state.schedule = delay => scheduled.push(delay);
+  feedFrame(state, 'ready', syncCursor(10));
+  assert.equal(state.applySessionSnapshot(snapshot(syncCursor(10), 'a')), true);
+  feedFrame(state, 'message/delta', syncCursor(12), { text: 'c' });
+  assert.equal(state.liveText, 'a');
+  assert.equal(scheduled.at(-1), 0);
+  let reply;
+  const calls = [];
+  state.request = path => {
+    calls.push(path);
+    return new Promise(resolve => { reply = resolve; });
+  };
+  const recovery = state.poll();
+  feedFrame(state, 'message/delta', syncCursor(12), { text: 'c' });
+  feedFrame(state, 'message/thinking', syncCursor(13), { text: 'thinking' });
+  await state.poll();
+  assert.deepEqual(calls, ['/session/snapshot']);
+  reply(snapshot(syncCursor(11), 'ab'));
+  await recovery;
+  feedFrame(state, 'message/delta', syncCursor(12), { text: ' duplicate' });
+  state.flushStreamDeltas();
+  assert.equal(state.liveText, 'abc');
+  assert.equal(state.liveThinking, 'thinking');
+  assert.equal(state.sessionSync.needsSnapshot(), false);
+  assert.equal(state.applySessionSnapshot(snapshot(syncCursor(12), 'stale')), false);
+  assert.equal(state.liveText, 'abc');
+});
+
+test('reconnect restores a new baseline and rejects old runs and worker bindings', async () => {
+  const state = syncFixture();
+  feedFrame(state, 'ready', syncCursor(18));
+  state.applySessionSnapshot(snapshot(syncCursor(18), 'old'));
+  const scheduled = [];
+  state.schedule = delay => scheduled.push(delay);
+  state.streamDown(state.streamGen, 1);
+  assert.equal(scheduled.at(-1), 0);
+  const nextRun = seq => syncCursor(seq, 'one', 'second-worker', 'run-2');
+  feedFrame(state, 'ready', nextRun(2));
+  feedFrame(state, 'message/delta', nextRun(4), { text: ' tail' });
+  feedFrame(state, 'session/status', syncCursor(19), { idle: true });
+  assert.equal(state.applySessionSnapshot(snapshot(syncCursor(19), 'stale')), false);
+  const result = snapshot(nextRun(3), 'recovered');
+  state.request = async path => {
+    assert.equal(path, '/session/snapshot');
+    return result;
+  };
+  state.historyStream = 'second-worker';
+  state.historyLeaf = 'leaf';
+  await state.poll();
+  state.flushStreamDeltas();
+  assert.equal(state.liveText, 'recovered tail');
+  assert.equal(state.idle, false);
+  assert.equal(state.runId, 'run-2');
+});
+
+test('switching away and back ignores earlier snapshots and history for the same session', async () => {
+  const state = syncFixture();
+  const first = snapshot(syncCursor(10), 'old');
+  assert.equal(state.applySessionSnapshot(first), true);
+  let previousHistory;
+  let previousSnapshot;
+  state.request = path => new Promise(resolve => {
+    if (path.startsWith('/history')) previousHistory = resolve;
+    else previousSnapshot = resolve;
+  });
+  const loadingHistory = state.refreshSessionHistory(first);
+  const polling = state.poll();
+  let selected = 'one';
+  const calls = [];
+  state.request = async (path, input) => {
+    calls.push(path);
+    if (path === '/open') selected = input.id;
+    const current = snapshot(syncCursor(11, selected, selected + '-worker'), selected);
+    if (path.startsWith('/history')) return { ...current, messages: [{ id: selected + '-message' }] };
+    return current;
+  };
+  assert.equal(await state.requestAction('/open', { id: 'two' }), true);
+  assert.equal(await state.requestAction('/open', { id: 'one' }), true);
+  previousHistory({ ...first, messages: [{ id: 'stale-message' }] });
+  previousSnapshot(first);
+  await Promise.all([loadingHistory, polling]);
+  assert.equal(state.currentId, 'one');
+  assert.equal(state.liveText, 'one');
+  assert.deepEqual(state.messages, [{ id: 'one-message' }]);
+  assert.deepEqual(calls, ['/open', '/session/snapshot', '/history?id=two&sync=2', '/open', '/session/snapshot', '/history?id=one&sync=2']);
+});
+
+test('legacy bridges fall back on a missing snapshot route, while transient errors keep the new protocol', async () => {
+  const state = syncFixture();
+  state.syncMode = 'probe';
+  const calls = [];
+  state.request = async path => {
+    calls.push(path);
+    if (path === '/session/snapshot') throw new BridgeFailure(503, 'unavailable');
+    assert.fail('a transient issue must keep the new protocol');
+  };
+  await assert.rejects(state.requestSessionSnapshot(state.epoch), /unavailable/);
+  assert.equal(state.syncMode, 'probe');
+  state.request = async path => {
+    calls.push(path);
+    if (path === '/session/snapshot') throw new BridgeFailure(404, 'not_found');
+    return { session: { id: 'one' }, messages: [] };
+  };
+  await state.requestSessionSnapshot(state.epoch);
+  await state.requestSessionSnapshot(state.epoch);
+  assert.equal(state.syncMode, 'legacy');
+  assert.deepEqual(calls, ['/session/snapshot', '/session/snapshot', '/chat', '/chat']);
+});
+
+
+test('lightweight polls load history only when the committed leaf advances', async () => {
+  const state = syncFixture();
+  const calls = [];
+  let leaf = 'old';
+  let seq = 7;
+  state.historyStream = 'first-worker';
+  state.historyLeaf = leaf;
+  state.messages = [{ id: 'older' }, { id: 'old' }];
+  state.request = async path => {
+    calls.push(path);
+    const result = snapshot(syncCursor(seq), 'active', leaf);
+    return path.startsWith('/history') ? { ...result, messages: [{ id: 'old' }, { id: leaf }] } : result;
+  };
+  await state.poll();
+  leaf = 'new';
+  seq++;
+  await state.poll();
+  await new Promise(resolve => setImmediate(resolve));
+  await state.poll();
+  assert.deepEqual(calls, ['/session/snapshot', '/session/snapshot', '/history?id=one&sync=2', '/session/snapshot']);
+  assert.deepEqual(state.messages.map(message => message.id), ['older', 'old', 'new']);
+});
+
+test('a late idle snapshot cannot overwrite the next run on the same stream', () => {
+  const state = syncFixture();
+  feedFrame(state, 'ready', syncCursor(7));
+  state.applySessionSnapshot(snapshot(syncCursor(7), 'last run'));
+  feedFrame(state, 'session/status', syncCursor(8), { idle: true });
+  feedFrame(state, 'session/status', syncCursor(9, 'one', 'first-worker', 'run-2'), { idle: false });
+  feedFrame(state, 'message/delta', syncCursor(10, 'one', 'first-worker', 'run-2'), { text: 'next run' });
+  assert.equal(state.applySessionSnapshot(snapshot(syncCursor(8, 'one', 'first-worker', null))), false);
+  state.flushStreamDeltas();
+  assert.equal(state.runId, 'run-2');
+  assert.equal(state.liveText, 'next run');
 });

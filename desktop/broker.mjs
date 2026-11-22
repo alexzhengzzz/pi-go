@@ -117,6 +117,7 @@ async function pumpEvents(client, authorization) {
       if (!current) {
         client.session = undefined;
         if (!client.response.write(`data: ${JSON.stringify({ type: 'bridge/status', state: selected ? 'session_closed' : 'no_session_selected' })}\n\n`)) client.response.destroy();
+        if (client.sequenced) break;
         await pause(400);
         continue;
       }
@@ -126,23 +127,29 @@ async function pumpEvents(client, authorization) {
       const done = new Promise((resolve) => { finish = resolve; });
       const tick = setInterval(() => {
         if (client.closed || !matches(authorization, bearer) || version !== selectionVersion) client.upstream?.destroy();
-        else if (!client.response.write(': keepalive\n\n')) client.response.destroy();
+        else if (!client.sequenced && !client.response.write(': keepalive\n\n')) client.response.destroy();
       }, 4000);
-      const path = workerPath('/events', current.session);
+      const path = workerPath(client.sequenced ? '/events?sync=2' : '/events', current.session, client.sequenced);
       const upstream = ipcRequest({ socketPath: current.socket, path, method: 'GET', agent: false }, (res) => {
         if (res.statusCode !== 200) { res.resume(); finish(); return; }
         res.setEncoding('utf8');
-        res.on('data', (chunk) => { if (!client.response.write(chunk)) client.response.destroy(); });
+        res.on('data', (chunk) => {
+          if (client.sequenced && (version !== selectionVersion || !matches(authorization, bearer))) upstream.destroy();
+          else if (!client.response.write(chunk)) client.response.destroy();
+        });
         res.on('end', finish);
+        res.on('close', finish);
         res.on('error', finish);
       });
       upstream.on('error', finish);
+      upstream.on('close', finish);
       upstream.end();
       client.upstream = upstream;
       await done;
       clearInterval(tick);
       client.upstream = undefined;
       upstream.destroy();
+      if (client.sequenced) break;
       if (!client.closed) await pause(300);
     }
   } catch {} finally {
@@ -234,7 +241,7 @@ function select(worker) {
   chosen = true;
   selected = { socket: worker.socket, id: worker.session.id, cwd: worker.session.cwd };
   selectionVersion += 1;
-  for (const client of streams) if (client.session !== selected.id) client.upstream?.destroy();
+  for (const client of streams) if (client.sequenced || client.session !== selected.id) client.upstream?.destroy();
 }
 
 function selectionFor(live) {
@@ -357,12 +364,13 @@ const publicHandler = async (request, response) => {
     if (remote && !acceptRemoteRequest(response)) return;
     lastSeen = Date.now();
     if (route === 'GET /health') return reply(response, 200, { protocol: 'pi-go-bridge/1' });
-    if (!['GET /session', 'GET /chat', 'GET /history', 'GET /tool-detail', 'GET /message-image', 'GET /message-text', 'GET /sessions', 'GET /sessions/status', 'GET /models', 'GET /commands', 'GET /events', 'GET /files/download', 'POST /open', 'POST /new', 'POST /prompt', 'POST /upload', 'POST /abort', 'POST /answer', 'POST /receipt', 'POST /model', 'POST /rename', 'POST /session-meta', 'POST /create-workspace', 'POST /close-workspace', 'POST /files/list', 'POST /files/read', 'POST /files/save'].includes(route)) return error(response, 404, 'not_found');
+    if (!['GET /session', 'GET /session/snapshot', 'GET /chat', 'GET /history', 'GET /tool-detail', 'GET /message-image', 'GET /message-text', 'GET /sessions', 'GET /sessions/status', 'GET /models', 'GET /commands', 'GET /events', 'GET /files/download', 'POST /open', 'POST /new', 'POST /prompt', 'POST /upload', 'POST /abort', 'POST /answer', 'POST /receipt', 'POST /model', 'POST /rename', 'POST /session-meta', 'POST /create-workspace', 'POST /close-workspace', 'POST /files/list', 'POST /files/read', 'POST /files/save'].includes(route)) return error(response, 404, 'not_found');
     if (route === 'GET /events') {
       if (streams.size >= 4) return error(response, 429, 'too_many_streams');
       request.socket.setTimeout(0);
       response.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', 'Connection': 'keep-alive' });
-      const client = { response, closed: false, session: undefined, upstream: undefined };
+      const sequenced = new URL(request.url ?? '/', 'http://pi-go').searchParams.get('sync') === '2';
+      const client = { response, sequenced, closed: false, session: undefined, upstream: undefined };
       streams.add(client);
       response.on('close', () => { client.closed = true; streams.delete(client); client.upstream?.destroy(); });
       void pumpEvents(client, request.headers.authorization);
@@ -481,7 +489,9 @@ const publicHandler = async (request, response) => {
     if (route === 'GET /sessions/status') {
       const running = [];
       const seen = new Set();
+      const idle = new Set();
       for (const { session, socket } of live) {
+        if (session.idle === true && session.queued !== true) idle.add(session.id);
         if ((session.idle === false || session.queued === true) && !seen.has(session.id)) {
           seen.add(session.id);
           running.push({ id: session.id, name: session.name, cwd: session.cwd,
@@ -497,7 +507,8 @@ const publicHandler = async (request, response) => {
         }));
       }
       for (const row of running) delete row.pid;
-      return reply(response, 200, { runningSessionIds: [...seen], runningSessions: running });
+      return reply(response, 200, { runningSessionIds: [...seen], runningSessions: running,
+        idleSessionIds: [...idle].filter((id) => !seen.has(id)) });
     }
     if (route === 'GET /sessions') {
       const parameters = new URL(request.url ?? '/', 'http://pi-go').searchParams;
@@ -566,7 +577,9 @@ const publicHandler = async (request, response) => {
       }
       return reply(response, 200, { closed: true });
     }
+    const snapshot = route === 'GET /session/snapshot';
     if (!current) {
+      if (snapshot) return reply(response, 200, { state: selected ? 'session_closed' : live.length ? 'no_session_selected' : 'no_shared_sessions' });
       if (route === 'GET /chat' || route === 'GET /session') return reply(response, 200, { messages: [], state: selected ? 'session_closed' : live.length ? 'no_session_selected' : 'no_shared_sessions' });
       return error(response, 409, 'session_unavailable');
     }
@@ -583,17 +596,18 @@ const publicHandler = async (request, response) => {
     }
     const isImage = route === 'GET /message-image';
     const sessionScopedMessage = isImage || route === 'GET /message-text';
+    const scopedRead = sessionScopedMessage || snapshot || route === 'GET /history';
     const version = selectionVersion;
-    const result = await localRequest(current.socket, request.method, workerPath(request.url, current.session, sessionScopedMessage), input,
+    const result = await localRequest(current.socket, request.method, workerPath(request.url, current.session, scopedRead), input,
       isImage ? 8000 : undefined, isImage ? maxHistoryImageBase64 + 1024 : undefined).catch(() => undefined);
     if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
     if (!result) return error(response, 409, 'session_unavailable');
-    if (sessionScopedMessage && version !== selectionVersion) return error(response, 409, 'session_changed');
-    if ((route === 'GET /chat' || (remote && route === 'GET /models')) && result.status === 200 &&
-        (result.data.session?.id !== current.session.id || (remote && result.data.session?.cwd !== current.session.cwd))) {
+    if (scopedRead && version !== selectionVersion) return error(response, 409, 'session_changed');
+    if ((snapshot || route === 'GET /chat' || (remote && route === 'GET /models')) && result.status === 200 &&
+        (result.data.session?.id !== current.session.id || ((snapshot || remote) && result.data.session?.cwd !== current.session.cwd))) {
       return error(response, 409, 'session_changed');
     }
-    if (route === 'GET /chat' && result.status === 200) {
+    if ((snapshot || route === 'GET /chat') && result.status === 200) {
       const hosts = await desktopHosts();
       if (hosts.length === 1) {
         const pending = await localRequest(hosts[0], 'POST', '/pending', identity, 700).catch(() => undefined);
@@ -601,6 +615,7 @@ const publicHandler = async (request, response) => {
       }
       if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
     }
+    if (scopedRead && version !== selectionVersion) return error(response, 409, 'session_changed');
     return reply(response, result.status, result.data);
   } catch (cause) {
     if (!response.headersSent) {

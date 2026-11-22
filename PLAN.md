@@ -4,6 +4,8 @@
 > 更新日期：2026-11-21  
 > 项目目标：通过鸿蒙手机安全地连接 Pi Desktop，查看、恢复和控制电脑上的 Pi coding agent 会话。  
 > 异地访问：已加入独立的 VPS 公网 IPv4 与 SSH 反向隧道入口，待实际 VPS 和鸿蒙蜂窝网络联调。见 [公网配对](docs/remote.md)。
+>
+> Pi CLI 宿主：macOS 可用 `daemon/` 托管 Pi RPC 会话和工作区，同时保留交互式 Pi CLI 会话共享。USB 桥和 daemon 支持通过 launchd 登录自启。安装与验收见 [daemon/README.md](daemon/README.md)。
 
 ## 1. 背景与目标
 

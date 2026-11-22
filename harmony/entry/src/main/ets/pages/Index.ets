@@ -22,6 +22,7 @@ import { AccountSync, CloudComputer, SyncRow, SyncSnapshot, SYNC_MODE, SYNC_THEM
 import { immersiveSurface } from '../Immersive';
 import { HISTORY_IMAGE_EXTENSIONS, isImageFile, markdownWorkspacePath, messageFileChips, normalizeWorkspacePath, safeLocalFileName, textPreviewFormat } from '../ChatPaths';
 import { decodePairingBundle, validSecureAddress, validUsb } from '../PairingCode';
+import { SequencedFrame, SessionSync, SyncCursor } from '../SessionSync';
 import { connectionLabel, validCompanion } from '../CompanionCheck';
 
 interface ModelOption {
@@ -45,7 +46,7 @@ interface SessionState {
   cwd: string;
   name?: string;
   idle: boolean;
-  runId?: string;
+  runId?: string | null;
   queued?: boolean;
   acceptsImage?: boolean;
   model?: ModelOption;
@@ -143,7 +144,7 @@ interface MarkdownTableReader {
   documentPath: string;
 }
 
-interface StreamFrame {
+interface StreamFrame extends SequencedFrame {
   type: string;
   sessionId?: string;
   session?: SessionState;
@@ -197,11 +198,19 @@ interface RunningRow {
   state?: string;
 }
 
+interface RunNotice {
+  title: string;
+  stopped: boolean;
+}
+
 interface BridgeReply {
+  cursor?: SyncCursor;
+  historyLeaf?: string | null;
   attachment?: UploadedAttachment;
   commands?: CommandRow[];
   runningSessionIds?: string[];
   runningSessions?: RunningRow[];
+  idleSessionIds?: string[];
   path?: string;
   entries?: FileEntry[];
   text?: string;
@@ -410,6 +419,12 @@ struct Index {
   private liveSeq: number = 0;
   private liveThinkSeq: number = 0;
   private liveRevision: number = 0;
+  private syncMode: string = 'probe';
+  private readonly sessionSync: SessionSync<StreamFrame> = new SessionSync<StreamFrame>();
+  private historyStream: string = '';
+  private historyLeaf?: string | null;
+  private historyLoadingEpoch?: number;
+  private historyRequest: number = 0;
   private deltaPaintTimer: number = -1;
   private pendingLiveText: string = '';
   private pendingLiveThinking: string = '';
@@ -421,6 +436,10 @@ struct Index {
   @State private sessions: SessionRow[] = [];
   @State private runningSessionIds: string[] = [];
   @State private runningSessions: RunningRow[] = [];
+  private readonly observedRuns: Map<string, string> = new Map<string, string>();
+  @State private runNotice?: RunNotice = undefined;
+  private pendingRunNotices: RunNotice[] = [];
+  private runNoticeTimer: number = -1;
   private sessionStatusAt: number = 0;
   private runningCatalogAt: number = 0;
   private sessionStatusLoading: boolean = false;
@@ -561,6 +580,7 @@ struct Index {
   }
   onPageHide(): void {
     this.visible = false;
+    this.clearRunNotices();
     this.cancelSchedule();
     this.stopStream();
     this.resetVoice();
@@ -569,6 +589,7 @@ struct Index {
   aboutToDisappear(): void {
     if (this.markdownTableReader) this.closeMarkdownTableReader();
     this.visible = false;
+    this.clearRunNotices();
     this.cancelSchedule();
     this.stopStream();
     this.stopRecordClock();
@@ -628,6 +649,9 @@ struct Index {
   private activateComputer(record: Companion): void {
     const usb = validUsb(record.address);
     this.epoch += 1;
+    this.syncMode = 'probe';
+    this.historyStream = '';
+    this.historyLeaf = undefined;
     this.base = record.address;
     this.token = record.token;
     this.pairingMode = usb ? 'usb' : connectionLabel(record) === '公网' ? 'remote' : 'lan';
@@ -650,7 +674,6 @@ struct Index {
     this.isPaired = true;
     this.schedule(0);
     this.stopStream();
-    this.startStream();
   }
 
   private chooseComputer(record: Companion): void {
@@ -710,6 +733,9 @@ struct Index {
   }
 
   private stopStream(): void {
+    this.sessionSync.disconnect();
+    this.historyRequest += 1;
+    this.historyLoadingEpoch = undefined;
     this.streamGen += 1;
     this.flushStreamDeltas();
     if (this.streamTimer !== -1) { clearTimeout(this.streamTimer); this.streamTimer = -1; }
@@ -728,6 +754,10 @@ struct Index {
 
   private streamDown(gen: number, delay: number): void {
     if (gen !== this.streamGen) return;
+    this.sessionSync.disconnect();
+    this.historyRequest += 1;
+    this.historyLoadingEpoch = undefined;
+    if (this.syncMode === 'sequenced') this.schedule(0);
     this.streamGen += 1;
     this.flushStreamDeltas();
     const req = this.streamReq;
@@ -738,7 +768,8 @@ struct Index {
   }
 
   private startStream(): void {
-    if (!this.isPaired || !this.visible || !this.base || !this.token || this.streamReq) return;
+    if (!this.isPaired || !this.visible || !this.base || !this.token || this.streamReq ||
+        this.syncMode === 'probe' || (this.syncMode === 'sequenced' && this.openingSession)) return;
     const gen = ++this.streamGen;
     const req = http.createHttp();
     this.streamReq = req;
@@ -765,7 +796,10 @@ struct Index {
     req.on('dataReceive', (data: ArrayBuffer) => {
       if (gen !== this.streamGen) return;
       buffer += decoder.decodeWithStream(new Uint8Array(data), { stream: true });
-      if (buffer.length > 262144) buffer = '';
+      if (buffer.length > 262144) {
+        this.streamDown(gen, 500);
+        return;
+      }
       let boundary = buffer.indexOf('\n\n');
       while (boundary >= 0) {
         const raw = buffer.substring(0, boundary);
@@ -775,11 +809,13 @@ struct Index {
           if (line.startsWith('data: ')) payload += line.substring(6);
         }
         if (payload) this.handleFrame(payload);
+        if (gen !== this.streamGen) return;
         boundary = buffer.indexOf('\n\n');
       }
     });
     req.on('dataEnd', () => { this.streamDown(gen, 2000); });
-    req.requestInStream(`${this.base}/events`, opts).then((code: number) => {
+    const path = this.syncMode === 'sequenced' ? '/events?sync=2' : '/events';
+    req.requestInStream(`${this.base}${path}`, opts).then((code: number) => {
       if (gen !== this.streamGen) return;
       if (code === 401) { this.leaveComputer(true); return; }
       if (code >= 400) this.streamDown(gen, code === 429 ? 8000 : 3000);
@@ -808,12 +844,29 @@ struct Index {
   private handleFrame(raw: string): void {
     let frame: StreamFrame;
     try { frame = JSON.parse(raw) as StreamFrame; } catch { return; }
+    if (this.syncMode === 'sequenced') {
+      if (!frame.cursor) {
+        if (frame.type === 'bridge/status') this.schedule(0);
+        return;
+      }
+      if (frame.type === 'ready') {
+        this.sessionSync.ready(frame.cursor);
+        this.schedule(0);
+      } else if (this.sessionSync.receive(frame, (event: StreamFrame): void => this.applyStreamFrame(event))) {
+        this.schedule(0);
+      }
+      return;
+    }
+    this.applyStreamFrame(frame);
+  }
+
+  private applyStreamFrame(frame: StreamFrame): void {
     if (frame.sessionId && frame.sessionId !== this.currentId) {
       if (frame.type === 'session/changed' || frame.type === 'ready') this.schedule(150);
       return;
     }
     if (frame.type === 'message/delta') {
-      if (typeof frame.text === 'string' && frame.text && (frame.seq === undefined || frame.seq > this.liveSeq)) {
+      if (typeof frame.text === 'string' && frame.text && (frame.cursor !== undefined || frame.seq === undefined || frame.seq > this.liveSeq)) {
         this.pendingLiveText = (this.pendingLiveText + frame.text).slice(-MAX_LIVE_TEXT_LENGTH);
         if (frame.seq !== undefined) this.liveSeq = frame.seq;
         this.queueStreamPaint();
@@ -821,7 +874,7 @@ struct Index {
       return;
     }
     if (frame.type === 'message/thinking') {
-      if (typeof frame.text === 'string' && frame.text && (frame.seq === undefined || frame.seq > this.liveThinkSeq)) {
+      if (typeof frame.text === 'string' && frame.text && (frame.cursor !== undefined || frame.seq === undefined || frame.seq > this.liveThinkSeq)) {
         this.pendingLiveThinking = (this.pendingLiveThinking + frame.text).slice(-MAX_LIVE_TEXT_LENGTH);
         if (frame.seq !== undefined) this.liveThinkSeq = frame.seq;
         this.queueStreamPaint();
@@ -847,9 +900,10 @@ struct Index {
       }
       return;
     }
+    const eventRun = frame.cursor ? frame.cursor.runId : frame.runId;
     if (frame.type === 'queue/status') {
       // steering 排队状态即时回传：不重置流式内容，只更新 runId 与 queued。
-      if (typeof frame.runId === 'string' && frame.runId) this.runId = frame.runId;
+      if (eventRun) this.runId = eventRun;
       if (frame.queued !== undefined) this.queued = frame.queued;
       return;
     }
@@ -857,14 +911,23 @@ struct Index {
       this.liveRevision += 1;
       if (frame.idle === true) {
         this.idle = true;
-        this.queued = false;
+        this.queued = frame.queued ?? false;
+        this.observeRun(this.currentId, this.chatTitle(), this.queued, frame.aborted === true);
         this.runId = '';
+        if (frame.cursor) {
+          this.flushStreamDeltas(false);
+          this.liveText = '';
+          this.liveThinking = '';
+          this.liveThinkingOpen = false;
+          this.liveTools = [];
+        }
         this.schedule(150);
       } else if (frame.idle === false) {
+        this.observeRun(this.currentId, this.chatTitle(), true);
         this.flushStreamDeltas(false);
         this.idle = false;
         // 运行开始即携带 runId，手机可立即引导，无需等 /chat 轮询。
-        if (typeof frame.runId === 'string' && frame.runId) this.runId = frame.runId;
+        if (eventRun) this.runId = eventRun;
         if (frame.queued !== undefined) this.queued = frame.queued;
         this.liveText = '';
         this.liveThinking = '';
@@ -877,15 +940,15 @@ struct Index {
     }
     if (frame.type === 'message/final') {
       this.liveRevision += 1;
-      if (frame.seq !== undefined && frame.seq >= this.liveSeq) {
+      if (frame.cursor || (frame.seq !== undefined && frame.seq >= this.liveSeq)) {
         this.pendingLiveText = '';
         this.liveText = '';
-        this.liveSeq = frame.seq;
+        this.liveSeq = frame.seq ?? 0;
       }
-      if (frame.thinkingSeq !== undefined && frame.thinkingSeq >= this.liveThinkSeq) {
+      if (frame.cursor || (frame.thinkingSeq !== undefined && frame.thinkingSeq >= this.liveThinkSeq)) {
         this.pendingLiveThinking = '';
         this.liveThinking = '';
-        this.liveThinkSeq = frame.thinkingSeq;
+        this.liveThinkSeq = frame.thinkingSeq ?? 0;
         this.liveThinkingOpen = false;
       }
       if (frame.reason === 'error') this.status = 'Pi 模型运行失败，请查看桌面中的错误详情。';
@@ -1034,6 +1097,8 @@ struct Index {
     this.chatCache.clear();
     this.runningSessionIds = [];
     this.runningSessions = [];
+    this.observedRuns.clear();
+    this.clearRunNotices();
     this.sessionView = 'all';
     this.loadedView = 'all';
     this.sessionCatalogFailed = false;
@@ -1162,11 +1227,13 @@ struct Index {
   private async poll(): Promise<void> {
     if (this.polling || this.openingSession) { this.schedule(350); return; }
     this.polling = true;
+    const streamGen = this.streamGen;
     const epoch = this.epoch;
     const liveRevision = this.liveRevision;
     try {
-      const result = await this.request('/chat');
+      const result = await this.requestSessionSnapshot(epoch);
       if (epoch !== this.epoch) return;
+      if (result.cursor && streamGen !== this.streamGen) return;
       const connected = !this.reachable;
       this.reachable = true;
       this.offlineDismissed = false;
@@ -1184,6 +1251,11 @@ struct Index {
         void this.loadSessionStatus();
       }
       if (!result.session) {
+        if (this.syncMode === 'sequenced') {
+          this.sessionSync.disconnect();
+          this.historyStream = '';
+          this.historyLeaf = undefined;
+        }
         this.flushStreamDeltas(false);
         this.closeToolDetails();
         this.noSession = result.state === 'session_closed' ? '原会话已关闭，请在会话列表选择历史记录或其他会话。' :
@@ -1214,9 +1286,25 @@ struct Index {
         return;
       }
       const moved = result.session.id !== this.currentId;
+      if (result.cursor) {
+        const applied = this.applySessionSnapshot(result);
+        if (applied || this.sessionSync.matches(result.cursor)) {
+          this.setInteraction(result.interaction);
+          if (connected && !moved) this.syncCommandPalette();
+          if (this.historyStream === result.cursor.streamId && this.historyLeaf === result.historyLeaf) {
+            this.reconcileSteering(this.idle && !this.queued);
+          } else {
+            void this.refreshSessionHistory(result);
+          }
+        }
+        return;
+      }
       const incoming = result.messages ?? [];
       const currentSnapshot = moved || liveRevision === this.liveRevision;
-      if (currentSnapshot) this.applySession(result.session);
+      if (currentSnapshot) {
+        this.observeSessionRun(result.session);
+        this.applySession(result.session);
+      }
       if (connected && !moved) this.syncCommandPalette();
       if (moved || incoming[incoming.length - 1]?.id !== this.messages[this.messages.length - 1]?.id) {
         this.pendingBottom = true;
@@ -1255,11 +1343,102 @@ struct Index {
       this.polling = false;
       if (epoch === this.epoch) {
         const delay = !this.reachable ? 1500 :
+          this.syncMode === 'sequenced' && this.sessionSync.needsSnapshot() ? 150 :
           this.streamAlive ? (this.idle ? 3000 : 1200) :
           this.idle ? 1500 : 650;
         this.schedule(delay);
       }
     }
+  }
+
+  private async requestSessionSnapshot(epoch: number): Promise<BridgeReply> {
+    if (this.syncMode === 'legacy') return await this.request('/chat');
+    try {
+      const result = await this.request('/session/snapshot');
+      if (epoch === this.epoch && this.syncMode === 'probe') {
+        this.syncMode = 'sequenced';
+        this.startStream();
+      }
+      return result;
+    } catch (error) {
+      if (epoch !== this.epoch || !(error instanceof BridgeFailure) || error.status !== 404) throw error as Error;
+      this.syncMode = 'legacy';
+      this.stopStream();
+      this.startStream();
+      return await this.request('/chat');
+    }
+  }
+
+  private applySessionSnapshot(snapshot: BridgeReply): boolean {
+    const cursor = snapshot.cursor;
+    const session = snapshot.session;
+    if (!cursor || !session || cursor.sessionId !== session.id) return false;
+    const applied = this.sessionSync.snapshot(cursor, (): void => {
+      this.observeSessionRun(session);
+      this.applySession(session);
+      this.runId = cursor.runId ?? '';
+      this.flushStreamDeltas(false);
+      this.liveSeq = 0;
+      this.liveThinkSeq = 0;
+      this.applyLiveSnapshot(snapshot, true);
+      if (this.selectedTool?.state === 'run' || this.selectedTool?.state === 'unknown') {
+        const selectedId = this.selectedTool.id;
+        const live = this.liveTools.find((tool: LiveTool): boolean => tool.id === selectedId);
+        if (live) this.refreshSelectedTool(live);
+      }
+      if (snapshot.promptError === 'unconfirmed') this.status = 'Pi 未确认这次发送。请查看桌面；不会自动重发。';
+      else if (snapshot.promptError === 'model_error') this.status = 'Pi 模型运行失败，请查看桌面中的错误详情。';
+    }, (frame: StreamFrame): void => this.applyStreamFrame(frame));
+    if (applied) this.cacheChat(session);
+    return applied;
+  }
+
+  private async refreshSessionHistory(snapshot: BridgeReply, initial: boolean = false): Promise<BridgeReply | undefined> {
+    const epoch = this.epoch;
+    const cursor = snapshot.cursor;
+    const session = snapshot.session;
+    if (!cursor || !session || (!initial && this.historyLoadingEpoch === epoch) ||
+        (!initial && this.historyStream === cursor.streamId && this.historyLeaf === snapshot.historyLeaf)) return undefined;
+    const revision = ++this.historyRequest;
+    this.historyLoadingEpoch = epoch;
+    try {
+      const page = await this.request(`/history?id=${encodeURIComponent(session.id)}&sync=2`);
+      if (epoch !== this.epoch || revision !== this.historyRequest ||
+          page.session?.id !== session.id || page.session?.cwd !== session.cwd ||
+          page.cursor?.streamId !== cursor.streamId) return undefined;
+      if (initial) return page;
+      if (this.currentId !== session.id || !this.sessionSync.matches(cursor)) return undefined;
+      this.applySessionHistory(page);
+      return page;
+    } catch (error) {
+      if (initial) throw error as Error;
+      if (epoch === this.epoch && error instanceof BridgeFailure && error.status === 401) this.leaveComputer(true);
+      return undefined;
+    } finally {
+      if (revision === this.historyRequest) this.historyLoadingEpoch = undefined;
+    }
+  }
+
+  private applySessionHistory(page: BridgeReply): void {
+    const incoming = page.messages ?? [];
+    if (incoming[incoming.length - 1]?.id !== this.messages[this.messages.length - 1]?.id) this.pendingBottom = true;
+    this.mergeTranscript(incoming, page.historyCursor);
+    this.historyStream = page.cursor?.streamId ?? '';
+    this.historyLeaf = page.historyLeaf;
+    this.reconcileSteering(this.idle && !this.queued);
+    if (this.selectedTool?.state === 'run' || this.selectedTool?.state === 'unknown') {
+      const selectedId = this.selectedTool.id;
+      for (let index = incoming.length - 1; index >= 0; index--) {
+        const message = incoming[index];
+        if (this.selectedToolMessageId && this.selectedToolMessageId !== message.id) continue;
+        const tool = message.tools?.find((item: LiveTool): boolean => item.id === selectedId);
+        if (tool) {
+          this.refreshSelectedTool(tool, message.id);
+          break;
+        }
+      }
+    }
+    if (page.session) this.cacheChat(page.session);
   }
 
   private applyLiveSnapshot(snapshot: BridgeReply, replaceTools: boolean): void {
@@ -1319,8 +1498,10 @@ struct Index {
     const before = this.historyCursor;
     this.busy = true;
     try {
-      const result = await this.request(`/history?id=${encodeURIComponent(id)}&before=${encodeURIComponent(before)}`);
-      if (epoch !== this.epoch || this.currentId !== id || result.session?.id !== id) return;
+      const sync = this.syncMode === 'sequenced' ? '&sync=2' : '';
+      const result = await this.request(`/history?id=${encodeURIComponent(id)}&before=${encodeURIComponent(before)}${sync}`);
+      if (epoch !== this.epoch || this.currentId !== id || result.session?.id !== id || this.historyCursor !== before) return;
+      if (this.syncMode === 'sequenced' && (!result.cursor || !this.sessionSync.matches(result.cursor))) return;
       const known = new Set<string>(this.messages.map((message: ChatMessage): string => message.id));
       this.messages = (result.messages ?? []).filter((message: ChatMessage): boolean => !known.has(message.id)).concat(this.messages);
       this.historyCursor = result.historyCursor;
@@ -1334,20 +1515,32 @@ struct Index {
   private async loadSessionStatus(): Promise<void> {
     if (!this.reachable || this.sessionStatusLoading) return;
     const epoch = this.epoch;
+    const selected = this.currentId;
     this.sessionStatusLoading = true;
     try {
       const result = await this.request('/sessions/status');
-      if (epoch === this.epoch) this.applyRunningStatus(result);
+      if (epoch === this.epoch) this.applyRunningStatus(result, selected);
     } catch {
       if (epoch === this.epoch) this.applyRunningStatus(undefined);
     } finally { this.sessionStatusLoading = false; }
   }
 
-  private applyRunningStatus(result?: BridgeReply): void {
+  private applyRunningStatus(result?: BridgeReply, selected: string = this.currentId): void {
     const rows = (result?.runningSessions ?? []).filter((row: RunningRow): boolean => !!row?.id);
     this.runningSessions = rows;
     const ids = rows.map((row: RunningRow): string => row.id).concat(result?.runningSessionIds ?? []);
     this.runningSessionIds = ids.filter((id: string, index: number): boolean => ids.indexOf(id) === index);
+    if (result?.idleSessionIds) {
+      for (const row of this.backgroundRunning()) {
+        if (row.id !== selected) this.observeRun(row.id, row.name || '后台任务', true);
+      }
+      const idle = new Set<string>(result.idleSessionIds);
+      for (const id of this.observedRuns.keys()) {
+        if (id === this.currentId || id === selected || this.runningSessionIds.includes(id)) continue;
+        if (idle.has(id)) this.observeRun(id, '', false);
+        else this.observedRuns.delete(id);
+      }
+    }
     // A background task unknown to the cached catalog needs its name for the header pill.
     const unknown = this.backgroundActive() && this.runningSessionIds.some((id: string): boolean =>
       id !== this.currentId && !this.sessions.some((session: SessionRow): boolean => session.id === id));
@@ -1355,6 +1548,36 @@ struct Index {
       this.runningCatalogAt = Date.now();
       void this.loadSessions();
     }
+  }
+
+  private observeSessionRun(session: SessionState): void {
+    const title = session.name || this.sessions.find((row: SessionRow): boolean => row.id === session.id)?.name ||
+      (session.id === this.currentId ? this.chatTitle() : '任务');
+    this.observeRun(session.id, title, !session.idle || session.queued === true);
+  }
+
+  private observeRun(id: string, title: string, active: boolean, stopped: boolean = false): void {
+    if (!id) return;
+    if (active) {
+      if (this.visible) this.observedRuns.set(id, title);
+      return;
+    }
+    const previousTitle = this.observedRuns.get(id);
+    if (!this.observedRuns.delete(id) || !this.visible) return;
+    this.pendingRunNotices.push({ title: title || previousTitle || '任务', stopped: stopped });
+    if (!this.runNotice) this.advanceRunNotice();
+  }
+
+  private advanceRunNotice(): void {
+    if (this.runNoticeTimer !== -1) clearTimeout(this.runNoticeTimer);
+    this.runNoticeTimer = -1;
+    this.runNotice = this.pendingRunNotices.shift();
+    if (this.runNotice) this.runNoticeTimer = setTimeout(() => { this.advanceRunNotice(); }, 4500);
+  }
+
+  private clearRunNotices(): void {
+    this.pendingRunNotices = [];
+    this.advanceRunNotice();
   }
 
   private backgroundActive(): boolean {
@@ -2299,7 +2522,7 @@ struct Index {
     if (this.busy || this.openingSession) { prompt.showToast({ message: '请等待当前操作结束后再移除空间。' }); return; }
     this.getUIContext().showAlertDialog({
       title: '移除空间',
-      message: `「${name}」将从 Pi Desktop 的侧边栏移除，进行中的任务会停止。文件和会话历史会保留。`,
+      message: `「${name}」将从电脑的 Pi Go 工作区列表移除，进行中的任务会停止。文件和会话历史会保留。`,
       autoCancel: true,
       alignment: DialogAlignment.Bottom,
       primaryButton: {
@@ -2348,6 +2571,11 @@ struct Index {
       this.openingSessionId = path === '/open' ? input?.id ?? '' : '';
       this.pendingSessionReveal = '';
       this.cancelSchedule();
+      if (this.syncMode === 'sequenced') {
+        this.stopStream();
+        this.historyStream = '';
+        this.historyLeaf = undefined;
+      }
       if (cached) this.presentChat(cached, true);
     } else this.busy = true;
     this.status = '';
@@ -2379,12 +2607,23 @@ struct Index {
         navigationConfirmed = true;
         // A cached transcript is already visible; refresh it after confirming the remote selection.
         const liveRevision = this.liveRevision;
-        const chat = await this.request('/chat');
+        const chat = await this.requestSessionSnapshot(epoch);
         if (epoch !== this.epoch) return false;
-        if (chat.session?.id !== result.session.id) throw new Error('session_changed');
-        this.presentChat(chat, !cached, liveRevision === this.liveRevision);
-        this.reconcileSteering(liveRevision === this.liveRevision && chat.session.idle);
-        this.cacheChat(chat.session);
+        if (chat.session?.id !== result.session.id || chat.session.cwd !== result.session.cwd) throw new Error('session_changed');
+        if (chat.cursor) {
+          const page = await this.refreshSessionHistory(chat, true);
+          if (epoch !== this.epoch) return false;
+          if (!page) throw new Error('session_changed');
+          if (!this.applySessionSnapshot(chat)) throw new Error('session_changed');
+          this.setInteraction(chat.interaction);
+          this.applySessionHistory(page);
+          this.revealChat(!cached);
+        } else {
+          if (liveRevision === this.liveRevision) this.observeSessionRun(chat.session);
+          this.presentChat(chat, !cached, liveRevision === this.liveRevision);
+          this.reconcileSteering(liveRevision === this.liveRevision && chat.session.idle);
+          this.cacheChat(chat.session);
+        }
       }
       return true;
     } catch (error) {
@@ -2395,16 +2634,16 @@ struct Index {
         this.showSessions = !this.dockedSessions();
       }
       if (error instanceof BridgeFailure && error.status === 401) this.leaveComputer(true);
-      else if (error instanceof BridgeFailure && error.message === 'desktop_handoff_required' && path === '/close-workspace') this.status = '此电脑的 Desktop 未启用 Pi Go 集成，无法远程关闭工作区。';
-      else if (error instanceof BridgeFailure && error.message === 'not_found' && path === '/close-workspace') this.status = '电脑端 Pi Go 版本过旧，请重新打包安装 Pi Desktop 后再远程关闭工作区。';
-      else if (error instanceof BridgeFailure && error.message === 'desktop_handoff_required') this.status = '此电脑的 Desktop 尚未启用历史恢复支持。先在 Desktop 打开该会话，手机会自动接入。';
+      else if (error instanceof BridgeFailure && error.message === 'desktop_handoff_required' && path === '/close-workspace') this.status = '电脑端 Pi Go 宿主未运行，暂时无法关闭工作区。';
+      else if (error instanceof BridgeFailure && error.message === 'not_found' && path === '/close-workspace') this.status = '当前电脑端 Pi Go 宿主不支持远程关闭工作区，请更新电脑端。';
+      else if (error instanceof BridgeFailure && error.message === 'desktop_handoff_required') this.status = '电脑端 Pi Go 宿主未运行。启动宿主后重试，或在电脑上打开并共享该会话。';
       else if (error instanceof BridgeFailure && error.message === 'desktop_workspace_unshared') this.status = '该工作区尚未共享给手机。';
-      else if (error instanceof BridgeFailure && error.message === 'desktop_workspace_not_registered') this.status = '该工作区不在 Pi Desktop 项目列表中，请在电脑上关闭。';
+      else if (error instanceof BridgeFailure && error.message === 'desktop_workspace_not_registered') this.status = '该工作区未在电脑端 Pi Go 的工作区列表中登记。';
       else if (error instanceof BridgeFailure && error.message === 'desktop_workspace_kind_unsupported') this.status = '该工作区是桌面管理的临时检出，请在电脑上关闭。';
       else if (error instanceof BridgeFailure && error.message === 'desktop_close_failed') this.status = '电脑端关闭工作区失败，请稍后重试。';
-      else if (error instanceof BridgeFailure && error.message === 'desktop_workspace_untrusted') this.status = '该工作区未在 Pi Desktop 中登记或信任。';
-      else if (error instanceof BridgeFailure && error.message === 'desktop_handoff_unconfirmed' && path === '/close-workspace') this.status = '请在 Pi Desktop 查看空间是否已移除。';
-      else if (error instanceof BridgeFailure && error.message === 'desktop_handoff_unconfirmed') this.status = '桌面未确认操作。请确认是否已打开标签，不要重复新建。';
+      else if (error instanceof BridgeFailure && error.message === 'desktop_workspace_untrusted') this.status = '该工作区未在电脑端 Pi Go 中登记或授权。';
+      else if (error instanceof BridgeFailure && error.message === 'desktop_handoff_unconfirmed' && path === '/close-workspace') this.status = '电脑端尚未确认，请刷新列表查看工作区是否已移除。';
+      else if (error instanceof BridgeFailure && error.message === 'desktop_handoff_unconfirmed') this.status = '电脑端尚未确认操作，请刷新会话列表查看结果。';
       else if (error instanceof BridgeFailure && error.message === 'session_occupied') this.status = '同一历史会话出现在多个桌面运行时，请关闭重复标签。';
       else if (error instanceof BridgeFailure && error.message === 'interaction_unavailable') {
         this.setInteraction();
@@ -2417,7 +2656,7 @@ struct Index {
       else if (error instanceof BridgeFailure && error.message === 'model_not_applied') this.status = '桌面未应用所选模型，请检查该模型的登录状态或 API 配置。';
       else if (error instanceof BridgeFailure && error.message === 'invalid_name') this.status = '名称须为 1–200 字且不含换行。';
       else if (error instanceof BridgeFailure && error.status === 409) this.status = 'Pi 正在处理任务或会话已变化，请刷新后再试。';
-      else this.status = '操作未确认，请查看桌面；不会自动重试。';
+      else this.status = '电脑端尚未确认操作，请刷新查看结果。';
       if (path === '/open' && this.showSessions && this.status) {
         this.getUIContext().getPromptAction().showToast({ message: this.status });
       }
@@ -2428,6 +2667,7 @@ struct Index {
         this.openingSessionId = '';
         if (epoch === this.epoch) {
           this.syncCommandPalette();
+          if (this.syncMode === 'sequenced') this.startStream();
           this.schedule(this.reachable && !this.idle ? 650 : 1500);
         }
       } else this.busy = false;
@@ -4425,9 +4665,13 @@ struct Index {
   private cacheChat(session: SessionState): void {
     const key = this.draftKey(session.id);
     const start = Math.max(0, this.messages.length - 60);
+    const current: SessionState = this.syncMode === 'sequenced'
+      ? { id: session.id, cwd: session.cwd, name: this.sessionName, idle: this.idle, runId: this.runId || null,
+        queued: this.queued, acceptsImage: this.acceptsImage, model: this.currentModel, thinkingLevel: this.currentLevel }
+      : session;
     this.chatCache.delete(key);
     this.chatCache.set(key, {
-      session: session, messages: this.messages.slice(start), liveText: this.liveText,
+      session: current, messages: this.messages.slice(start), liveText: this.liveText,
       liveSeq: this.liveSeq, liveThinking: this.liveThinking, liveThinkSeq: this.liveThinkSeq,
       tools: this.liveTools.slice(0),
       historyCursor: start > 0 ? this.messages[start].id : this.historyCursor,
@@ -4443,10 +4687,14 @@ struct Index {
     this.mergeTranscript(chat.messages ?? [], chat.historyCursor);
     if (currentSnapshot || moved) this.applyLiveSnapshot(chat, true);
     this.setInteraction(chat.interaction);
+    this.revealChat(reveal);
+  }
+
+  private revealChat(reveal: boolean): void {
     if (reveal) {
       this.pendingBottom = true;
       this.transcriptFollow = true;
-      this.pendingSessionReveal = chat.session.id;
+      this.pendingSessionReveal = this.currentId;
     }
     this.showFiles = false;
     this.showSettings = false;
@@ -5230,6 +5478,33 @@ struct Index {
     }.id('new-space-dialog').width('100%').height('100%')
   }
 
+  @Builder
+  runCompletionBanner(notice: RunNotice) {
+    Row() {
+      Row({ space: 12 }) {
+        Text(notice.stopped ? '■' : '✓').fontSize(18).fontWeight(FontWeight.Medium)
+          .fontColor(this.stateColor(notice.stopped ? 'waiting' : 'streaming'))
+          .width(32).height(32).borderRadius(16).textAlign(TextAlign.Center)
+          .backgroundColor($r('app.color.pigo_control')).accessibilityLevel('no')
+        Column({ space: 2 }) {
+          Text(notice.stopped ? '运行已停止' : '运行已结束')
+            .fontSize(15).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
+          Text(notice.title).fontSize(13).fontColor($r('app.color.pigo_muted'))
+            .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+        }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+        Button({ type: ButtonType.Normal }) {
+          Image($r('app.media.ic_close')).width(16).height(16).fillColor($r('app.color.pigo_muted'))
+        }.id('run-completion-dismiss').width(44).height(44).padding(0).backgroundColor(Color.Transparent)
+          .accessibilityText('关闭运行通知').onClick(() => { this.advanceRunNotice(); })
+      }.id('run-completion-banner').width('100%').constraintSize({ maxWidth: 440 })
+        .padding({ left: 14, right: 4, top: 6, bottom: 6 }).borderRadius(16)
+        .backgroundColor($r('app.color.pigo_panel')).border({ width: 1, color: $r('app.color.pigo_line') })
+        .shadow({ radius: 16, offsetY: 5, color: this.darkMode ? '#80200000' : '#25627085' })
+    }.width('100%').justifyContent(FlexAlign.Center).padding({ left: 16, right: 16 })
+      .margin({ top: this.statusBarHeight + 8 }).hitTestBehavior(HitTestMode.Transparent)
+      .transition(TransitionEffect.OPACITY.animation({ duration: 180, curve: Curve.EaseOut }))
+  }
+
   build() {
     Stack({ alignContent: Alignment.TopStart }) {
       Row() {
@@ -5311,6 +5586,7 @@ struct Index {
       }
       if (this.markdownTableReader) this.markdownTableReaderPage(this.markdownTableReader)
       if (this.showNewSpace) this.newSpaceDialog()
+      if (this.runNotice) this.runCompletionBanner(this.runNotice)
     }.width('100%').height('100%').padding({ left: this.leftInset, right: this.rightInset })
       .backgroundColor(this.drawerOpen() ? $r('app.color.pigo_sidebar') : $r('app.color.launch_background'))
       .clip(true)
