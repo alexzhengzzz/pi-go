@@ -352,61 +352,208 @@ export struct SakuraPetals {
   }
 }
 
+interface GirlReaction {
+  id: string;
+  symbol: string;
+  x: string;
+  y: string;
+  dx: number;
+  dy: number;
+  size: number;
+  delay: number;
+}
+
+@Component
+struct GirlReactionPop {
+  @Prop spec: GirlReaction;
+  @Prop darkMode: boolean = false;
+  @State private popped: boolean = false;
+  private timerId: number = -1;
+
+  aboutToDisappear(): void {
+    if (this.timerId !== -1) {
+      clearTimeout(this.timerId);
+      this.timerId = -1;
+    }
+  }
+
+  build() {
+    Text(this.spec.symbol)
+      .fontSize(this.spec.size)
+      .fontColor(this.darkMode ? '#FFB4D0' : '#E85A92')
+      .position({ x: this.spec.x, y: this.spec.y })
+      .translate({ x: this.popped ? this.spec.dx : 0, y: this.popped ? this.spec.dy : 0 })
+      .scale({ x: this.popped ? 1.15 : 0.45, y: this.popped ? 1.15 : 0.45 })
+      .opacity(this.popped ? 0 : 0.92)
+      .animation({
+        duration: 900,
+        delay: this.spec.delay,
+        curve: Curve.EaseOut
+      })
+      .onAppear(() => {
+        if (this.popped) return;
+        this.timerId = setTimeout(() => {
+          this.timerId = -1;
+          this.popped = true;
+        }, 20);
+      })
+  }
+}
+
 @Component
 export struct SakuraScene {
   @Prop darkMode: boolean = false;
   @Prop sceneOpacity: number = 0.92;
-  @State private breezeSway: boolean = false;
-  @State private sceneHeight: number = 840;
-  private swayTimer: number = -1;
+  @Prop @Watch('onGirlTap') girlTapSeq: number = 0;
+  @Prop @Watch('onCelebrate') celebrateSeq: number = 0;
+
+  @State private blinkOpacity: number = 0;
+  @State private blinkDuration: number = 180;
+  @State private happyOpacity: number = 0;
+  @State private happyDuration: number = 240;
+  @State private reactions: GirlReaction[] = [];
+
+  private blinkLoopTimer: number = -1;
+  private blinkStepTimers: number[] = [];
+  private happyTimers: number[] = [];
+  private reactionTimers: number[] = [];
+  private blinkCycle: number = 0;
 
   aboutToDisappear(): void {
-    if (this.swayTimer !== -1) {
-      clearTimeout(this.swayTimer);
-      this.swayTimer = -1;
+    if (this.blinkLoopTimer !== -1) {
+      clearTimeout(this.blinkLoopTimer);
+      this.blinkLoopTimer = -1;
+    }
+    for (const timer of this.blinkStepTimers) clearTimeout(timer);
+    this.blinkStepTimers = [];
+    for (const timer of this.happyTimers) clearTimeout(timer);
+    this.happyTimers = [];
+    for (const timer of this.reactionTimers) clearTimeout(timer);
+    this.reactionTimers = [];
+  }
+
+  private scheduleNextBlink(): void {
+    if (this.blinkLoopTimer !== -1) clearTimeout(this.blinkLoopTimer);
+    const intervals: number[] = [3400, 4300, 2900, 4700];
+    const waitMs = intervals[this.blinkCycle % intervals.length];
+    this.blinkLoopTimer = setTimeout(() => {
+      this.blinkLoopTimer = -1;
+      this.blinkCycle += 1;
+      if (this.happyOpacity < 0.1) {
+        this.playBlink(this.blinkCycle % 3 === 0);
+      }
+      this.scheduleNextBlink();
+    }, waitMs);
+  }
+
+  private playBlink(doubleBlink: boolean): void {
+    for (const timer of this.blinkStepTimers) clearTimeout(timer);
+    this.blinkStepTimers = [];
+    this.blinkDuration = 160;
+    this.blinkOpacity = 1;
+    const t1 = setTimeout(() => {
+      this.blinkDuration = 220;
+      this.blinkOpacity = 0;
+    }, 320);
+    this.blinkStepTimers.push(t1);
+    if (doubleBlink) {
+      const t2 = setTimeout(() => {
+        if (this.happyOpacity > 0.1) return;
+        this.blinkDuration = 140;
+        this.blinkOpacity = 1;
+      }, 640);
+      const t3 = setTimeout(() => {
+        this.blinkDuration = 220;
+        this.blinkOpacity = 0;
+      }, 900);
+      this.blinkStepTimers.push(t2, t3);
     }
   }
 
-  private imageSource(): Resource {
+  private triggerHappyExpression(withReactions: boolean): void {
+    for (const timer of this.happyTimers) clearTimeout(timer);
+    this.happyTimers = [];
+    // 先用极短的眨眼帧做自然过渡，再平滑淡入开心弯眼笑帧，避免生硬切图。
+    this.blinkDuration = 90;
+    this.blinkOpacity = 0.7;
+    const t1 = setTimeout(() => {
+      this.happyDuration = 240;
+      this.happyOpacity = 1;
+      this.blinkDuration = 160;
+      this.blinkOpacity = 0;
+    }, 85);
+    const t2 = setTimeout(() => {
+      this.happyDuration = 420;
+      this.happyOpacity = 0;
+    }, 1850);
+    this.happyTimers.push(t1, t2);
+
+    if (withReactions) {
+      const seq = this.girlTapSeq + this.celebrateSeq;
+      const batch: GirlReaction[] = [
+        { id: `gr-${seq}-0`, symbol: '✿', x: '70%', y: '58%', dx: -16, dy: -46, size: 17, delay: 40 },
+        { id: `gr-${seq}-1`, symbol: '♡', x: '84%', y: '56%', dx: 14, dy: -52, size: 15, delay: 110 },
+        { id: `gr-${seq}-2`, symbol: '✦', x: '60%', y: '65%', dx: -22, dy: -38, size: 13, delay: 160 }
+      ];
+      const ids = new Set<string>(batch.map((item: GirlReaction): string => item.id));
+      this.reactions = this.reactions.slice(-9).concat(batch);
+      const cleanup = setTimeout(() => {
+        this.reactionTimers = this.reactionTimers.filter((item: number): boolean => item !== cleanup);
+        this.reactions = this.reactions.filter((item: GirlReaction): boolean => !ids.has(item.id));
+      }, 1200);
+      this.reactionTimers.push(cleanup);
+    }
+  }
+
+  private onGirlTap(): void {
+    if (this.girlTapSeq <= 0) return;
+    this.triggerHappyExpression(true);
+  }
+
+  private onCelebrate(): void {
+    if (this.celebrateSeq <= 0) return;
+    this.triggerHappyExpression(true);
+  }
+
+  private idleSource(): Resource {
     return $rawfile(this.darkMode ? 'sakura_dark.jpg' : 'sakura_light.jpg');
+  }
+
+  private blinkSource(): Resource {
+    return $rawfile(this.darkMode ? 'sakura_dark_blink.jpg' : 'sakura_light_blink.jpg');
+  }
+
+  private happySource(): Resource {
+    return $rawfile(this.darkMode ? 'sakura_dark_happy.jpg' : 'sakura_light_happy.jpg');
   }
 
   build() {
     Stack() {
-      // 下半部分：少女与柔和天空，保持稳重不晃动。
-      Stack({ alignContent: Alignment.Bottom }) {
-        Image(this.imageSource())
-          .width('100%')
-          .height(this.sceneHeight)
-          .objectFit(ImageFit.Cover)
-      }
-      .width('100%')
-      .height('58%')
-      .align(Alignment.Bottom)
-      .position({ x: 0, y: '42%' })
-      .clip(true)
+      Image(this.idleSource())
+        .width('100%')
+        .height('100%')
+        .objectFit(ImageFit.Cover)
+        .syncLoad(true)
 
-      // 上半部分：右上角樱花树枝，以右上角为支点随春风轻轻摇曳。
-      Stack({ alignContent: Alignment.Top }) {
-        Image(this.imageSource())
-          .width('100%')
-          .height(this.sceneHeight)
-          .objectFit(ImageFit.Cover)
-          .scale({ x: 1.03, y: 1.03, centerX: '100%', centerY: '0%' })
-          .rotate({ angle: this.breezeSway ? 1.8 : -0.9, centerX: '100%', centerY: '0%' })
-          .translate({ x: this.breezeSway ? -3 : 2, y: this.breezeSway ? 2 : 0 })
-          .animation({
-            duration: 3600,
-            curve: Curve.EaseInOut,
-            iterations: -1,
-            playMode: PlayMode.Alternate
-          })
-      }
-      .width('100%')
-      .height('45%')
-      .align(Alignment.Top)
-      .position({ x: 0, y: 0 })
-      .clip(true)
+      Image(this.blinkSource())
+        .width('100%')
+        .height('100%')
+        .objectFit(ImageFit.Cover)
+        .syncLoad(true)
+        .opacity(this.blinkOpacity)
+        .animation({ duration: this.blinkDuration, curve: Curve.EaseInOut })
+
+      Image(this.happySource())
+        .width('100%')
+        .height('100%')
+        .objectFit(ImageFit.Cover)
+        .syncLoad(true)
+        .opacity(this.happyOpacity)
+        .animation({ duration: this.happyDuration, curve: Curve.EaseInOut })
+
+      ForEach(this.reactions, (item: GirlReaction) => {
+        GirlReactionPop({ spec: item, darkMode: this.darkMode })
+      }, (item: GirlReaction) => item.id)
     }
     .width('100%')
     .height('100%')
@@ -414,17 +561,8 @@ export struct SakuraScene {
     .opacity(this.sceneOpacity)
     .animation({ duration: 320, curve: Curve.EaseOut })
     .hitTestBehavior(HitTestMode.None)
-    .onAreaChange((_oldArea: Area, newArea: Area) => {
-      const h = Number(newArea.height);
-      if (h > 40 && Math.abs(h - this.sceneHeight) > 4) this.sceneHeight = h;
-    })
     .onAppear(() => {
-      if (this.breezeSway) return;
-      if (this.swayTimer !== -1) clearTimeout(this.swayTimer);
-      this.swayTimer = setTimeout(() => {
-        this.swayTimer = -1;
-        this.breezeSway = true;
-      }, 40);
+      this.scheduleNextBlink();
     })
   }
 }
