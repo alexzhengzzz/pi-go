@@ -257,6 +257,49 @@ test('daemon host serves native open, new, interactions and close', { timeout: 3
   assert.equal(phoneChat.data.session.id, a.sessionId);
   assert.equal(phoneChat.data.messages.some((message) => message.text === 'History from project A'), true);
 
+  await waitIdle(firstWorker);
+  await writeFile(join(first, 'existing.txt'), 'unchanged pre-existing edit\n');
+  await writeFile(join(first, 'example.txt'), 'old content\n');
+  const runPrompt = await phone('/prompt', { id: a.sessionId, requestId: 'result-test', text: 'Verify result capture' });
+  assert.equal(runPrompt.status, 202);
+  let liveRunId;
+  for (let i = 0; i < 20 && !liveRunId; i++) {
+    liveRunId = (await phone('/session/snapshot')).data.session?.runId;
+    if (!liveRunId) await new Promise((resolve) => setTimeout(resolve, 30));
+  }
+  assert.ok(liveRunId);
+  await writeFile(join(first, 'example.txt'), 'new content\n');
+  await writeFile(join(first, 'report.md'), '# Run report\n');
+
+  let results;
+  for (let i = 0; i < 80; i++) {
+    results = await phone(`/runs/results?session=${a.sessionId}`);
+    if (results.data.runEvents?.some(({ id }) => id === liveRunId)) break;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  assert.equal(results.status, 200);
+  const reviewed = results.data.runEvents.find(({ id }) => id === liveRunId);
+  assert.equal(reviewed?.status, 'completed');
+  assert.ok((await phone('/chat')).data.messages.some(({ id }) => id === reviewed.messageId));
+  assert.equal(reviewed.files.some(({ path }) => path === 'existing.txt'), false);
+  assert.ok(reviewed.files.some(({ path, artifact }) => path === 'report.md' && artifact));
+  const reviewedPath = `/runs/diff?session=${a.sessionId}&run=${reviewed.id}&path=example.txt`;
+  assert.equal((await fetch(`${pairing.url}${reviewedPath}`)).status, 401);
+  const patch = await phone(reviewedPath);
+  assert.match(patch.data.text, /-old content\n\+new content/);
+  assert.equal((await phone(reviewedPath.replace(a.sessionId, b.sessionId))).status, 404);
+  assert.ok((await phone('/runs/inbox')).data.runEvents.some(({ id }) => id === reviewed.id));
+
+  await waitIdle(firstWorker);
+  assert.equal((await prompt(firstWorker, a.sessionId, 'Pi Go fixture: ask for confirmation', 'inbox-pending')).status, 202);
+  const waiting = await pendingFor();
+  const inbox = await phone('/runs/inbox');
+  const pendingRow = inbox.data.runEvents.find(({ pendingId }) => pendingId === waiting.id);
+  assert.equal(pendingRow?.status, 'waiting');
+  assert.ok(pendingRow.finishedAt > 0);
+  assert.equal((await phone('/answer', { id: a.sessionId, pendingId: waiting.id, answer: true })).status, 200);
+  assert.equal((await phone('/runs/inbox')).data.runEvents.some(({ id }) => id === pendingRow.id), false);
+
   // Both restored history and an already-running session can return a first page on open.
   for (const [id, text] of [[b.sessionId, 'Project B message 64'], [a.sessionId, 'History from project A']]) {
     const opened = await phone('/open', { id, history: true });
@@ -304,6 +347,19 @@ test('daemon host serves native open, new, interactions and close', { timeout: 3
   const scheduledChat = await phone('/open', { id: scheduledRun.sessionId, history: true });
   assert.equal(scheduledChat.status, 200, JSON.stringify(scheduledChat));
   assert.ok(scheduledChat.data.messages.some(({ text }) => text === 'Summarize the workspace'));
+  const scheduledResults = await phone(`/runs/results?session=${scheduledRun.sessionId}`);
+  assert.equal(scheduledResults.data.runEvents[0]?.scheduled, true);
+  assert.equal((await phone('/runs/inbox')).data.runEvents.some(({ sessionId }) => sessionId === scheduledRun.sessionId), false);
+
+  assert.equal((await phone('/schedules/update', {
+    cwd: root, operation: 'delete-run', id: scheduledRun.id
+  })).status, 403);
+  const deletedRun = await phone('/schedules/update', {
+    cwd: first, operation: 'delete-run', id: scheduledRun.id
+  });
+  assert.equal(deletedRun.status, 200, JSON.stringify(deletedRun));
+  assert.deepEqual(deletedRun.data, { deleted: true });
+  assert.deepEqual((await phone('/schedules/sync', { includeJobs: false })).data.runs, []);
 
   const newChat = await phone('/new', { cwd: first });
   assert.equal(newChat.status, 200, JSON.stringify(newChat));

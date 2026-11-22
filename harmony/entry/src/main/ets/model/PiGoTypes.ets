@@ -1,3 +1,4 @@
+import type { RunEvent } from '../RunResults';
 import type { PromptFile } from '../PromptFile';
 import type { PromptImage } from '../PromptImage';
 import type { ScheduleJob, ScheduleRun } from '../ScheduledRuns';
@@ -197,6 +198,8 @@ export interface WorkspaceRow {
 }
 
 export interface BridgeReply {
+  runEvents?: RunEvent[];
+  pushAvailable?: boolean;
   source?: string;
   watching?: boolean;
   jobs?: ScheduleJob[];
@@ -250,6 +253,9 @@ export interface HistoryImage {
 }
 
 export interface Payload {
+  enabled?: boolean;
+  device?: string;
+  token?: string;
   includeJobs?: boolean;
   knownRuns?: string[];
   operation?: string;

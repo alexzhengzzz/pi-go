@@ -66,6 +66,19 @@ export default class EntryAbility extends UIAbility {
   }
 
   private applyLaunch(want: Want): void {
+    const pushDevice = want.parameters?.['pigoPushDevice'];
+    const pushEvent = want.parameters?.['pigoPushEvent'];
+    const pushSession = want.parameters?.['pigoPushSession'];
+    const pushPending = want.parameters?.['pigoPushPending'];
+    if (typeof pushDevice === 'string' && /^[a-f0-9]{64}$/.test(pushDevice) &&
+      typeof pushEvent === 'string' && /^[a-f0-9]{32,64}$/.test(pushEvent)) {
+      AppStorage.setOrCreate<string>('pigoPushDevice', pushDevice);
+      AppStorage.setOrCreate<string>('pigoPushSession', typeof pushSession === 'string' &&
+        /^[a-zA-Z0-9._-]{1,200}$/.test(pushSession) ? pushSession : '');
+      AppStorage.setOrCreate<string>('pigoPushPending', typeof pushPending === 'string' &&
+        /^[a-zA-Z0-9._:-]{1,200}$/.test(pushPending) ? pushPending : '');
+      AppStorage.setOrCreate<string>('pigoPushEvent', pushEvent);
+    }
     const liveSession = want.parameters?.['pigoLiveSession'];
     const liveAddress = want.parameters?.['pigoLiveAddress'];
     if (typeof liveSession === 'string' && /^[a-zA-Z0-9._-]{1,200}$/.test(liveSession) &&

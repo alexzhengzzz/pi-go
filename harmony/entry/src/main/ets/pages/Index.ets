@@ -11,7 +11,12 @@ import { WorkspaceFiles } from '../components/WorkspaceFiles';
 import { SessionSidebar } from '../components/SessionSidebar';
 import { ChatComposer } from '../components/ChatComposer';
 import { ChatTranscript } from '../components/ChatTranscript';
-import { KeyboardAvoidMode, promptAction, window } from '@kit.ArkUI';
+import { SakuraPetals } from '../components/SakuraPetals';
+import { RunResultView } from '../components/RunResultView';
+import { DiffLine, InboxRun, pushDeviceId, RunEvent, RunFile, RunScreenshot } from '../RunResults';
+import { notificationManager } from '@kit.NotificationKit';
+import { pushService } from '@kit.PushKit';
+import { KeyboardAvoidMode, window } from '@kit.ArkUI';
 import { inputMethod } from '@kit.IMEKit';
 import { ChatContent } from '../ChatContent';
 import { ChatImage } from '../ChatImage';
@@ -38,7 +43,7 @@ import { decodePairingBundle, validUsb } from '../PairingCode';
 import { connectionLabel, validCompanion } from '../CompanionCheck';
 import { ComputerGroup, computerGroupId, computerGroups, computerGroupTitle, moveComputerConnection, renameComputerGroup } from '../ComputerGroups';
 import { liveActivity } from '../LiveActivity';
-import { SessionShareFormat, SessionShareMeta, formatSessionMarkdown, shareSessionViaSystem } from '../SessionShare';
+import { SessionShareMeta, formatSessionMarkdown, shareSessionViaSystem } from '../SessionShare';
 import { ScheduleJob, ScheduleRun, ScheduleWatch, RunMessage, scheduleTime, parseScheduleTime, scheduleRunStatus, isCurrentScheduleComputer } from '../ScheduledRuns';
 
 import { ModelOption, BridgeEndpoint, SessionState, SessionRow, ChatMessage, DraftAttachment, AttachmentRef,
@@ -72,6 +77,11 @@ struct Index {
   @StorageLink('pigoTicket') @Watch('onLaunchTicket') launchTicket: string = '';
   @StorageLink('pigoLiveSession') @Watch('onLiveActivityLaunch') private liveLaunchSession: string = '';
   @StorageLink('pigoLiveAddress') private liveLaunchAddress: string = '';
+  @StorageLink('pigoPushEvent') @Watch('onPushLaunch') private pushLaunchEvent: string = '';
+  @StorageLink('pigoPushDevice') private pushLaunchDevice: string = '';
+  @StorageLink('pigoPushSession') private pushLaunchSession: string = '';
+  @StorageLink('pigoPushPending') private pushLaunchPending: string = '';
+  private openingPush: boolean = false;
   private restoreChain: Promise<void> = Promise.resolve();
   @StorageLink('pigoStatusBar') statusBarHeight: number = 38;
   @StorageLink('pigoNavBar') navBarHeight: number = 28;
@@ -96,6 +106,23 @@ struct Index {
   @State private computers: Companion[] = [];
   @State private schedulePage: string = '';
   @State private scheduleMessages: RunMessage[] = [];
+  @State private inboxRuns: InboxRun[] = [];
+  @State private pushEnabled: boolean = false;
+  @State private pushSaving: boolean = false;
+  @State private pushStatus: string = '';
+  private pushToken: string = '';
+  private runRead: string[] = [];
+  private runSyncTimer: number = -1;
+  private runSyncing: boolean = false;
+  private pushRegistrations: Map<string, string> = new Map<string, string>();
+  @State private sessionRuns: RunEvent[] = [];
+  @State private sessionRunKey: string = '';
+  @State private reviewedRun?: RunEvent = undefined;
+  @State private reviewedFile?: RunFile = undefined;
+  @State private reviewPatch: string = '';
+  @State private reviewLoading: boolean = false;
+  @State private reviewError: string = '';
+  private reviewRequest: number = 0;
   @State private scheduleActive: RunMessage[] = [];
   @State private scheduleOffline: string[] = [];
   @State private scheduleDetail?: RunMessage = undefined;
@@ -163,7 +190,7 @@ struct Index {
   @State private selectedModel: number = -1;
   @State private selectedLevel: string = 'off';
   @State private modelLabel: string = '';
-  @State private currentId: string = '';
+  @State @Watch('onRunSessionChanged') private currentId: string = '';
   @State private noSession: string = '';
   @State private status: string = '';
   @State private draft: string = '';
@@ -305,6 +332,7 @@ struct Index {
 
   onBackPress(): boolean {
     if (this.markdownTableReader) { this.closeMarkdownTableReader(); return true; }
+    if (this.reviewedRun) { this.backFromRunResult(); return true; }
     if (this.textFilePreview) {
       if (!this.savingPreview) this.textFilePreview = undefined;
       return true;
@@ -345,7 +373,11 @@ struct Index {
   }
   onPageShow(): void {
     this.visible = true;
-    void this.restoreChain.then(() => { this.queueScheduleSync(true); });
+    void this.restoreChain.then(() => {
+      this.queueScheduleSync(true);
+      this.queueRunSync(0);
+      void this.consumePushLaunch();
+    });
     this.schedule(0);
     this.startStream();
     this.syncLiveActivity();
@@ -354,6 +386,7 @@ struct Index {
   }
   onPageHide(): void {
     this.visible = false;
+    this.stopRunSync();
     this.stopScheduleSync();
     this.clearRunNotices();
     if (this.backgroundLiveActivity()) {
@@ -370,6 +403,7 @@ struct Index {
   aboutToDisappear(): void {
     if (this.markdownTableReader) this.closeMarkdownTableReader();
     this.visible = false;
+    this.stopRunSync();
     this.stopScheduleSync();
     this.clearRunNotices();
     this.cancelSchedule();
@@ -581,6 +615,269 @@ struct Index {
     return group ? computerGroupTitle(group) : connectionLabel(computer);
   }
 
+  private onRunSessionChanged(): void {
+    this.reviewedRun = undefined;
+    this.reviewedFile = undefined;
+    this.reviewRequest += 1;
+    this.queueRunSync(0);
+  }
+
+  private queueRunSync(delay: number): void {
+    this.stopRunSync();
+    if (!this.visible) return;
+    this.runSyncTimer = setTimeout(() => { void this.syncRunCenter(); }, delay);
+  }
+
+  private stopRunSync(): void {
+    if (this.runSyncTimer !== -1) clearTimeout(this.runSyncTimer);
+    this.runSyncTimer = -1;
+  }
+
+  private async syncRunCenter(): Promise<void> {
+    if (!this.visible || this.runSyncing) return;
+    this.runSyncing = true;
+    const computers = this.computers.filter((item: Companion): boolean => validCompanion(item));
+    const session = this.currentId;
+    const key = this.draftKey(session);
+    const endpoint = this.connection.endpoint();
+    try {
+      const work = computers.map((computer: Companion): Promise<void> => this.syncRunInbox(computer));
+      if (session && this.isPaired && this.reachable) work.push(this.syncRunResults(endpoint, session, key));
+      await Promise.all(work);
+      if (this.visible) {
+        this.inboxRuns = this.inboxRuns.filter((row: InboxRun): boolean =>
+          this.computers.some((computer: Companion): boolean => computer.address === row.address));
+      }
+    } finally {
+      this.runSyncing = false;
+      this.queueRunSync(9000);
+    }
+  }
+
+  private async syncRunInbox(computer: Companion): Promise<void> {
+    const endpoint = this.scheduleEndpoint(computer);
+    try {
+      const result = await this.request('/runs/inbox', undefined, endpoint);
+      if (!this.visible || !this.computers.some((item: Companion): boolean =>
+        item.address === computer.address && item.token === computer.token)) return;
+      const rows = (result.runEvents ?? []).map((run: RunEvent): InboxRun => ({
+        run: run, address: computer.address, computer: this.scheduleComputerName(computer),
+        unread: run.status === 'waiting' || !this.runRead.includes(run.id)
+      }));
+      this.inboxRuns = this.inboxRuns.filter((row: InboxRun): boolean => row.address !== computer.address).concat(rows);
+      await this.syncPushRegistration(computer, result.pushAvailable === true);
+    } catch { /* The next foreground sync can recover when the host is available. */ }
+  }
+
+  private async syncRunResults(endpoint: BridgeEndpoint, session: string, key: string): Promise<void> {
+    try {
+      const result = await this.request('/runs/results?session=' + encodeURIComponent(session), undefined, endpoint);
+      if (key !== this.draftKey(this.currentId) || endpoint.token !== this.connection.endpoint().token) return;
+      const rows = (result.runEvents ?? []).filter((row: RunEvent): boolean => row.cwd === this.workspaceCwd);
+      if (key !== this.sessionRunKey || rows.length !== this.sessionRuns.length ||
+          rows.some((row: RunEvent, index: number): boolean => row.id !== this.sessionRuns[index].id)) {
+        this.sessionRunKey = key;
+        this.sessionRuns = rows;
+      }
+    } catch { /* Old bridges can still display the session transcript. */ }
+  }
+
+  private displayedInboxRuns(): InboxRun[] {
+    const records = new Map<string, InboxRun>();
+    for (const row of this.inboxRuns) {
+      if (!records.has(row.run.id) || row.address === this.base) records.set(row.run.id, row);
+    }
+    return Array.from(records.values()).sort((a: InboxRun, b: InboxRun): number =>
+      Number(b.run.status === 'waiting') - Number(a.run.status === 'waiting') || b.run.finishedAt - a.run.finishedAt).slice(0, 100);
+  }
+
+  private async syncPushRegistration(computer: Companion, available: boolean): Promise<void> {
+    const endpoint = this.scheduleEndpoint(computer);
+    if (!available) {
+      this.pushRegistrations.delete(computer.address);
+      if (this.pushEnabled && computer.address === this.base) this.pushStatus = '这台电脑尚未配置 Push Kit';
+      return;
+    }
+    const registered = this.pushEnabled ? computer.token + ':' + this.pushToken : computer.token;
+    if (this.pushRegistrations.get(computer.address) === registered) return;
+    if (this.pushEnabled && !this.pushToken) {
+      try { this.pushToken = await pushService.getToken(); }
+      catch {
+        if (computer.address === this.base) this.pushStatus = '未能获取推送令牌，请检查应用的 Push Kit 权益';
+        return;
+      }
+    }
+    const enabled = this.pushEnabled;
+    const response = await this.request('/runs/push', enabled ?
+      { enabled: true, token: this.pushToken, device: pushDeviceId(computer.token) } : { enabled: false }, endpoint);
+    if (enabled !== this.pushEnabled) return;
+    if (!enabled || response.pushAvailable === true) {
+      this.pushRegistrations.set(computer.address, enabled ? computer.token + ':' + this.pushToken : computer.token);
+    }
+    if (computer.address === this.base && enabled) this.pushStatus = response.pushAvailable ? '当前电脑已注册后台通知' : '这台电脑尚未配置 Push Kit';
+  }
+
+  private async setPushEnabled(enabled: boolean): Promise<void> {
+    if (this.pushSaving) return;
+    this.pushSaving = true;
+    try {
+      if (enabled && !(await notificationManager.isNotificationEnabled())) {
+        const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+        await notificationManager.requestEnableNotification(context);
+        if (!(await notificationManager.isNotificationEnabled())) throw new Error('notifications_disabled');
+      }
+      await this.saveSetting('run_push_enabled', enabled);
+      this.pushEnabled = enabled;
+      this.pushStatus = enabled ? '正在连接电脑以启用后台通知…' : '';
+      this.pushRegistrations.clear();
+      this.queueRunSync(0);
+    } catch {
+      this.pushStatus = enabled ? '请在系统设置中允许 Pi Go 通知后重试' : '未能保存通知设置';
+    } finally { this.pushSaving = false; }
+  }
+
+  private markRunRead(id: string): void {
+    this.runRead = [id].concat(this.runRead.filter((value: string): boolean => value !== id)).slice(0, 240);
+    this.inboxRuns = this.inboxRuns.map((row: InboxRun): InboxRun => row.run.id === id ? {
+      run: row.run, address: row.address, computer: row.computer, unread: false
+    } : row);
+    void this.saveSetting('run_inbox_read', JSON.stringify(this.runRead)).catch(() => {});
+  }
+
+  private async openInboxRun(row: InboxRun): Promise<void> {
+    const target = this.computers.find((item: Companion): boolean => item.address === row.address && validCompanion(item));
+    if (!target || !await this.openNotifiedSession(target, row.run.sessionId, row.run.pendingId ?? '', row.run.id)) return;
+    this.markRunRead(row.run.id);
+  }
+
+  private onPushLaunch(): void { void this.consumePushLaunch(); }
+
+  private async consumePushLaunch(): Promise<void> {
+    if (!this.pushLaunchEvent || this.openingPush) return;
+    this.openingPush = true;
+    try {
+      await this.restoreChain;
+      for (let attempt = 0; attempt < 40 && this.pushLaunchEvent; attempt++) {
+        if (this.visible && !this.loading && !this.busy && !this.openingSession) {
+          const event = this.pushLaunchEvent;
+          const device = this.pushLaunchDevice;
+          const session = this.pushLaunchSession;
+          const pending = this.pushLaunchPending;
+          this.pushLaunchEvent = '';
+          const target = this.computers.find((item: Companion): boolean =>
+            validCompanion(item) && pushDeviceId(item.token) === device);
+          let opened = false;
+          if (target && session) {
+            const alternatives = this.computers.filter((item: Companion): boolean =>
+              item.address !== target.address && computerGroupId(item) === computerGroupId(target) && validCompanion(item));
+            for (const connection of [target].concat(alternatives)) {
+              if (await this.openNotifiedSession(connection, session, pending, event)) {
+                opened = true;
+                break;
+              }
+            }
+          }
+          if (opened) this.markRunRead(event);
+          else this.showScheduleInbox();
+          if (!this.pushLaunchEvent) return;
+        }
+        await new Promise<void>((resolve: () => void) => { setTimeout(resolve, 300); });
+      }
+    } finally { this.openingPush = false; }
+  }
+
+  private async openNotifiedSession(target: Companion, id: string, pendingId: string, eventId: string): Promise<boolean> {
+    if (this.busy || this.openingSession) return false;
+    if (target.address !== this.base) this.chooseComputer(target);
+    if (!this.isPaired || this.base !== target.address) return false;
+    if (this.currentId !== id || !this.reachable) {
+      if (!await this.requestAction('/open', { id: id, history: true })) {
+        this.scheduleError = this.status || '暂时无法打开会话，请检查来源电脑。';
+        return false;
+      }
+    }
+    this.activeTab = 'tasks';
+    this.showFiles = false;
+    this.showSettings = false;
+    this.showSessions = false;
+    this.schedulePage = '';
+    const key = this.draftKey(id);
+    if (pendingId) {
+      try {
+        const result = await this.request('/session/snapshot');
+        if (key !== this.draftKey(this.currentId)) return false;
+        if (result.session?.id === id) {
+          this.setInteraction(result.interaction);
+          if (result.interaction?.id !== pendingId) {
+            this.getUIContext().getPromptAction().showToast({ message: '这条待处理请求已结束或在其他设备上处理。' });
+          }
+        }
+      } catch { this.schedule(0); }
+    }
+    await this.syncRunResults(this.connection.endpoint(), id, key);
+    if (!pendingId && key === this.draftKey(this.currentId) && this.sessionRunKey === key) {
+      const run = this.sessionRuns.find((row: RunEvent): boolean => row.id === eventId);
+      if (run) this.openRunResult(run);
+    }
+    return true;
+  }
+
+  private openRunResult(run: RunEvent): void {
+    if (run.sessionId !== this.currentId) return;
+    this.dismissKeyboard();
+    this.reviewedRun = run;
+    this.reviewedFile = undefined;
+    this.reviewError = '';
+  }
+
+  private backFromRunResult(): void {
+    this.reviewRequest += 1;
+    if (this.reviewedFile) this.reviewedFile = undefined;
+    else this.reviewedRun = undefined;
+    this.reviewPatch = '';
+    this.reviewLoading = false;
+    this.reviewError = '';
+  }
+
+  private async openRunDiff(file: RunFile): Promise<void> {
+    const run = this.reviewedRun;
+    if (!run || run.sessionId !== this.currentId) return;
+    const request = ++this.reviewRequest;
+    const epoch = this.epoch;
+    this.reviewedFile = file;
+    this.reviewPatch = '';
+    this.reviewError = '';
+    this.reviewLoading = true;
+    try {
+      const response = await this.request('/runs/diff?session=' + encodeURIComponent(run.sessionId) +
+        '&run=' + encodeURIComponent(run.id) + '&path=' + encodeURIComponent(file.path));
+      if (request !== this.reviewRequest || epoch !== this.epoch) return;
+      if (!response.text) throw new Error('diff_unavailable');
+      this.reviewPatch = response.text;
+    } catch {
+      if (request === this.reviewRequest && epoch === this.epoch) this.reviewError = '暂时无法读取本轮 Diff。';
+    } finally {
+      if (request === this.reviewRequest) this.reviewLoading = false;
+    }
+  }
+
+  private citeRunLine(line: DiffLine): void {
+    const file = this.reviewedFile;
+    if (!file || this.reviewedRun?.sessionId !== this.currentId || line.line < 1) return;
+    const reference = `请检查 ${file.path}:${line.line}（本轮 Diff）：\n${line.text.slice(1, 501)}`;
+    this.draft = this.draft ? this.draft + '\n\n' + reference : reference;
+    this.rememberDraft(this.currentId);
+    this.backFromRunResult();
+    this.backFromRunResult();
+  }
+
+  private async openRunArtifact(file: RunFile): Promise<void> {
+    const run = this.reviewedRun;
+    if (!run || run.sessionId !== this.currentId) return;
+    this.reviewedRun = undefined;
+    await this.openReferencedFile(run.cwd, file.path, false);
+  }
+
   private scheduleEndpoint(computer: Companion): BridgeEndpoint {
     return { address: computer.address, token: computer.token, ca: computer.ca, pin: computer.pin };
   }
@@ -705,11 +1002,59 @@ struct Index {
     });
   }
 
+  private removeScheduleMessage(message: RunMessage): void {
+    this.scheduleMessages = this.scheduleMessages.filter((item: RunMessage): boolean => item.key !== message.key);
+    if (this.scheduleBanner?.key === message.key) this.scheduleBanner = undefined;
+    if (this.scheduleDetail?.key === message.key) this.scheduleDetail = undefined;
+    const read = this.readScheduleRuns(message.source);
+    if (read.includes(message.run.id)) {
+      const nextRead = read.filter((id: string): boolean => id !== message.run.id);
+      this.scheduleRead.set(message.source, nextRead);
+      void this.saveSetting(`schedule_read_${message.source}`, JSON.stringify(nextRead)).catch(() => {});
+    }
+    const dismissed = this.readScheduleRuns(message.source, true);
+    if (dismissed.includes(message.run.id)) {
+      const nextDismissed = dismissed.filter((id: string): boolean => id !== message.run.id);
+      this.scheduleDismissed.set(message.source, nextDismissed);
+      void this.saveSetting(`schedule_dismissed_${message.source}`, JSON.stringify(nextDismissed)).catch(() => {});
+    }
+  }
+
+  private async deleteScheduleRun(message: RunMessage): Promise<void> {
+    if (this.scheduleSaving) return;
+    const computer = this.computers.find((item: Companion): boolean => item.address === this.base)
+      ?? this.computers.find((item: Companion): boolean => item.address === message.address);
+    if (!computer) {
+      this.getUIContext().getPromptAction().showToast({ message: '请先连接电脑。' });
+      return;
+    }
+    const generation = this.scheduleComputerGeneration;
+    this.scheduleSaving = true;
+    this.scheduleError = '';
+    try {
+      const payload: Payload = { operation: 'delete-run', cwd: message.run.cwd, id: message.run.id };
+      await this.request('/schedules/update', payload, this.scheduleEndpoint(computer));
+      this.scheduleMutation += 1;
+      if (generation !== this.scheduleComputerGeneration) return;
+      this.removeScheduleMessage(message);
+      this.queueScheduleSync(true);
+    } catch (error) {
+      if (generation === this.scheduleComputerGeneration) {
+        const failure = error as Error;
+        const text = failure.message === 'schedule_missing' ? '请先更新电脑端 Pi Go。' : this.scheduleFailure(failure);
+        this.getUIContext().getPromptAction().showToast({ message: text });
+      }
+    } finally {
+      if (generation === this.scheduleComputerGeneration) this.scheduleSaving = false;
+    }
+  }
+
   private showScheduleInbox(): void {
     this.dismissKeyboard();
     this.scheduleBanner = undefined;
     this.schedulePage = 'inbox';
     this.queueScheduleSync(true);
+    this.queueRunSync(0);
   }
 
   private showScheduleDetail(message: RunMessage): void {
@@ -1212,6 +1557,11 @@ struct Index {
     if (this.removeTarget !== address || this.busy || this.openingSession) return;
     this.removeTarget = '';
     if (this.huaweiProfile) this.updateCloudComputer(address, '');
+    const removed = this.computers.find((item: Companion): boolean => item.address === address);
+    if (removed) {
+      void this.request('/runs/push', { enabled: false }, this.scheduleEndpoint(removed)).catch(() => {});
+      this.pushRegistrations.delete(address);
+    }
     this.computers = this.computers.filter((record: Companion): boolean => record.address !== address);
     if (this.isPaired && this.base === address) {
       this.leaveComputer();
@@ -2411,27 +2761,6 @@ struct Index {
     this.getUIContext().getPromptAction().showToast({ message });
   }
 
-  private openShareMenu(anchor: string = 'session-settings'): void {
-    if (this.sharingSession || this.openingSession) return;
-    if (!this.currentId) {
-      this.getUIContext().getPromptAction().showToast({ message: '请先打开一个会话' });
-      return;
-    }
-    this.dismissKeyboard();
-    void this.getUIContext().getPromptAction().showActionMenu({
-      title: '分享会话',
-      buttons: [
-        { text: '系统分享（Markdown 文件）', color: $r('app.color.pigo_text') },
-        { text: '系统分享（纯文本）', color: $r('app.color.pigo_text') },
-        { text: '复制会话内容', color: $r('app.color.pigo_text') }
-      ]
-    }).then((result: promptAction.ActionMenuSuccessResponse) => {
-      if (result.index === 0) void this.shareCurrentSession('markdown', anchor);
-      else if (result.index === 1) void this.shareCurrentSession('text', anchor);
-      else if (result.index === 2) void this.shareCurrentSession('copy', anchor);
-    }).catch(() => {});
-  }
-
   private async fetchFullMessageText(sessionId: string, messageId: string, epoch: number): Promise<string | undefined> {
     const path = `/message-text?id=${encodeURIComponent(sessionId)}&message=${encodeURIComponent(messageId)}`;
     const pages: string[] = [];
@@ -2450,7 +2779,7 @@ struct Index {
 
   private async collectCurrentSessionMessages(sessionId: string, epoch: number): Promise<ChatMessage[]> {
     let collected: ChatMessage[] = this.messages.slice();
-    let cursor = this.historyCursor;
+    let cursor: string | undefined = this.historyCursor;
     const seenCursors = new Set<string>();
     if (this.reachable && cursor) {
       const sync = this.syncMode === 'sequenced' ? '&sync=2' : '';
@@ -2458,10 +2787,10 @@ struct Index {
         if (seenCursors.has(cursor)) break;
         seenCursors.add(cursor);
         try {
-          const result = await this.request(`/history?id=${encodeURIComponent(sessionId)}&before=${encodeURIComponent(cursor)}${sync}`);
+          const result: BridgeReply = await this.request(`/history?id=${encodeURIComponent(sessionId)}&before=${encodeURIComponent(cursor)}${sync}`);
           if (epoch !== this.epoch || this.currentId !== sessionId || result.session?.id !== sessionId) break;
           const known = new Set<string>(collected.map((item: ChatMessage): string => item.id));
-          const older = (result.messages ?? []).filter((item: ChatMessage): boolean => !known.has(item.id));
+          const older: ChatMessage[] = (result.messages ?? []).filter((item: ChatMessage): boolean => !known.has(item.id));
           collected = older.concat(collected);
           cursor = result.historyCursor;
         } catch {
@@ -2496,8 +2825,13 @@ struct Index {
     return expanded;
   }
 
-  private async shareCurrentSession(mode: SessionShareFormat | 'copy', anchor?: string): Promise<void> {
-    if (this.sharingSession || !this.currentId) return;
+  private async shareCurrentSession(anchor: string = 'session-settings'): Promise<void> {
+    if (this.sharingSession || this.openingSession) return;
+    if (!this.currentId) {
+      this.getUIContext().getPromptAction().showToast({ message: '请先打开一个会话' });
+      return;
+    }
+    this.dismissKeyboard();
     const epoch = this.epoch;
     const id = this.currentId;
     this.sharingSession = true;
@@ -2514,23 +2848,16 @@ struct Index {
         this.getUIContext().getPromptAction().showToast({ message: '当前会话暂无可分享的内容' });
         return;
       }
-      if (mode === 'copy') {
-        await this.copyText(markdown);
-        return;
-      }
       const host = this.getUIContext().getHostContext();
       if (!host) throw new Error('no_context');
-      const result = await shareSessionViaSystem(
+      await shareSessionViaSystem(
         host as common.UIAbilityContext,
         markdown,
         meta,
         fullMessages.length,
-        mode,
+        'markdown',
         anchor
       );
-      if (epoch === this.epoch && result.fallbackToFile) {
-        this.getUIContext().getPromptAction().showToast({ message: '会话内容较长，已转为 Markdown 文件分享' });
-      }
     } catch {
       if (epoch === this.epoch) {
         this.getUIContext().getPromptAction().showToast({ message: '暂时无法调起系统分享，请重试' });
@@ -2544,7 +2871,7 @@ struct Index {
     if (this.sharingSession || this.openingSession) return;
     if (session.id === this.currentId) {
       this.setDrawer(false);
-      this.openShareMenu('session-settings');
+      await this.shareCurrentSession('session-settings');
       return;
     }
     if (!this.reachable) {
@@ -2556,7 +2883,7 @@ struct Index {
     this.showFiles = false;
     const opened = await this.requestAction('/open', { id: session.id });
     if (opened && this.currentId === session.id) {
-      this.openShareMenu('session-settings');
+      await this.shareCurrentSession('session-settings');
     }
   }
 
@@ -2565,7 +2892,7 @@ struct Index {
     if (this.currentId && !this.noSession && this.activeTab === 'tasks') {
       items.push({
         value: '分享会话',
-        action: () => { this.openShareMenu('session-settings'); }
+        action: () => { void this.shareCurrentSession('session-settings'); }
       });
     }
     items.push(
@@ -3527,6 +3854,9 @@ struct Index {
     try {
       const settings = openSettings(context);
       this.settings = settings;
+      this.pushEnabled = settings.getSync('run_push_enabled', false) === true;
+      const runRead = JSON.parse(settings.getSync('run_inbox_read', '[]') as string) as string[];
+      if (Array.isArray(runRead)) this.runRead = runRead.slice(0, 240);
       this.themeId = themeStyle(settings.getSync('theme_style', 'mint') as string).id;
       this.modeId = appearanceMode(settings.getSync('appearance_mode', 'system') as string).id;
       this.runNoticesEnabled = settings.getSync(RUN_NOTICE_SETTING, true) !== false;
@@ -4120,20 +4450,12 @@ struct Index {
         }.width('100%').padding(14).attributeModifier(glassCardSurface(this.darkMode, 16))
         Column({ space: 10 }) {
           Text('会话分享').fontSize(15).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text')).width('100%')
-          Text('通过鸿蒙系统分享将当前会话发送给其他应用，或复制为 Markdown 文本。')
+          Text('将当前会话整理为 Markdown 文件，通过系统分享发送给其他应用。')
             .fontSize(12).fontColor($r('app.color.pigo_muted')).width('100%')
-          Button(this.sharingSession ? '正在准备分享…' : '系统分享（Markdown 文件）').chatAction().id('session-share-markdown')
+          Button(this.sharingSession ? '正在准备分享…' : '分享会话').chatAction().id('session-share')
             .width('100%').height(42).backgroundColor(this.accent()).fontColor(this.accentForeground())
             .enabled(!this.sharingSession && !!this.currentId)
-            .onClick(() => { void this.shareCurrentSession('markdown', 'session-share-markdown'); })
-          Row({ space: 8 }) {
-            Button('系统分享（纯文本）').chatAction().id('session-share-text').layoutWeight(1).height(40)
-              .enabled(!this.sharingSession && !!this.currentId)
-              .onClick(() => { void this.shareCurrentSession('text', 'session-share-text'); })
-            Button('复制内容').chatAction().id('session-share-copy').layoutWeight(1).height(40)
-              .enabled(!this.sharingSession && !!this.currentId)
-              .onClick(() => { void this.shareCurrentSession('copy'); })
-          }.width('100%')
+            .onClick(() => { void this.shareCurrentSession('session-share'); })
         }.width('100%').padding(14).attributeModifier(glassCardSurface(this.darkMode, 16))
       }.width('100%').padding({ left: 16, right: 16, top: this.topContentClearance(), bottom: this.bottomPad() + 16 })
     }.layoutWeight(1).width('100%').align(Alignment.TopStart).scrollBar(BarState.Off)
@@ -4231,6 +4553,8 @@ struct Index {
       loadMarkdownImage: (target: string, cwd: string, documentPath: string): Promise<string> => this.loadMarkdownImage(target, cwd, documentPath),
       loadingMessageText: this.loadingMessageText,
       messages: this.$messages,
+      runResults: this.sessionRunKey === this.draftKey(this.currentId) ? this.sessionRuns : [],
+      openRunResult: (run: RunEvent): void => this.openRunResult(run),
       openMarkdownLink: (target: string, cwd: string, documentPath: string): Promise<void> => this.openMarkdownLink(target, cwd, documentPath),
       openMarkdownTableReader: (source: string, cwd: string, documentPath: string): void => this.openMarkdownTableReader(source, cwd, documentPath),
       openReferencedFile: (cwd: string, path: string, lookupName: boolean): Promise<void> => this.openReferencedFile(cwd, path, lookupName),
@@ -5209,13 +5533,13 @@ struct Index {
         Stack() {
           headerSymbol($r('sys.symbol.inbox'), $r('app.color.pigo_text'), 19)
         }.width('100%').height('100%')
-        if (this.scheduleMessages.some((item: RunMessage): boolean => item.unread)) {
+        if (this.scheduleMessages.some((item: RunMessage): boolean => item.unread) || this.inboxRuns.some((item: InboxRun): boolean => item.unread)) {
           Blank().width(8).height(8).borderRadius(4).backgroundColor(this.accent())
             .margin({ top: 9, right: 9 })
         }
       }.width('100%').height('100%')
     }.id('schedule-inbox').headerAction().attributeModifier(immersiveSurface(this.darkMode)).accessibilityText(this.scheduleMessages.some((item: RunMessage): boolean =>
-      item.unread) ? '收件箱，有未读消息' : '收件箱')
+      item.unread) || this.inboxRuns.some((item: InboxRun): boolean => item.unread) ? '收件箱，有未读消息' : '收件箱')
       .onClick(() => { this.showScheduleInbox(); })
   }
 
@@ -5226,11 +5550,18 @@ struct Index {
       base: this.base,
       busy: this.busy,
       computers: this.$computers,
+      deleteScheduleRun: (message: RunMessage): Promise<void> => this.deleteScheduleRun(message),
       dismissScheduleMessage: (message: RunMessage): void => this.dismissScheduleMessage(message),
       isPaired: this.isPaired,
       openScheduleTimePicker: (): void => this.openScheduleTimePicker(),
       openScheduledSession: (message: RunMessage): Promise<void> => this.openScheduledSession(message),
       openingSession: this.openingSession,
+      inboxRuns: this.displayedInboxRuns(),
+      openInboxRun: (row: InboxRun): Promise<void> => this.openInboxRun(row),
+      pushEnabled: this.pushEnabled,
+      pushSaving: this.pushSaving,
+      pushStatus: this.pushStatus,
+      setPushEnabled: (enabled: boolean): Promise<void> => this.setPushEnabled(enabled),
       projects: this.$projects,
       scheduleCatchUp: this.$scheduleCatchUp,
       scheduleCwd: this.$scheduleCwd,
@@ -5296,6 +5627,9 @@ struct Index {
           radius: '74%',
           colors: [[this.palette().auraBottom, 0], ['#00000000', 1]]
         })
+      if (this.themeId === 'sakura') {
+        SakuraPetals({ darkMode: this.darkMode })
+      }
     }.width('100%').height('100%').hitTestBehavior(HitTestMode.None)
   }
 
@@ -5374,6 +5708,23 @@ struct Index {
           .margin({ top: this.statusBarHeight + this.headerHeight() + 10 }).hitTestBehavior(HitTestMode.Transparent)
       }
       if (this.schedulePage) this.scheduleOverlay()
+      if (this.reviewedRun) {
+        RunResultView({
+          result: this.reviewedRun, file: this.reviewedFile, patch: this.reviewPatch,
+          loading: this.reviewLoading, error: this.reviewError,
+          canvas: this.themeCanvas(), top: this.statusBarHeight, bottom: this.bottomPad(),
+          back: (): void => this.backFromRunResult(),
+          openDiff: (file: RunFile): void => { void this.openRunDiff(file); },
+          openArtifact: (file: RunFile): void => { void this.openRunArtifact(file); },
+          loadScreenshot: (image: RunScreenshot): Promise<string> =>
+            this.loadHistoryImage(this.reviewedRun?.sessionId ?? '', image.messageId, 0, image.toolId),
+          openScreenshot: (source: string, label: string): void => {
+            this.reviewedRun = undefined;
+            this.showChatImage(source, label);
+          },
+          citeLine: (line: DiffLine): void => this.citeRunLine(line)
+        })
+      }
     }.width('100%').height('100%').padding({ left: this.leftInset, right: this.rightInset })
       .backgroundColor(this.drawerOpen() ? $r('app.color.pigo_sidebar') : this.themeCanvas())
       .clip(true)

@@ -27,7 +27,7 @@ const environment = {
   TMPDIR: tmpdir(),
   PIGO_PI_BIN: pi,
 };
-for (const name of ['PI_CODING_AGENT_DIR', 'PIGO_IPC_DIR', 'PIGO_STATE_DIR', 'PIGO_PI_ARGS']) {
+for (const name of ['PI_CODING_AGENT_DIR', 'PIGO_IPC_DIR', 'PIGO_STATE_DIR', 'PIGO_PI_ARGS', 'PIGO_PUSH_ACCOUNT_FILE']) {
   if (process.env[name] !== undefined) environment[name] = process.env[name];
 }
 writeFileSync(file, JSON.stringify({

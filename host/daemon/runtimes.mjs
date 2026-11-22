@@ -37,7 +37,7 @@ const admissible = (event) => {
 };
 
 export class RpcRuntime {
-  constructor(pool, cwd, sessionPath) {
+  constructor(pool, cwd, sessionPath, scheduled = false) {
     this.pool = pool;
     this.cwd = cwd;
     this.sessionPath = sessionPath;
@@ -48,7 +48,8 @@ export class RpcRuntime {
     this.sequence = 0;
     const bin = process.env.PIGO_PI_BIN || 'pi';
     const args = ['--mode', 'rpc', ...(sessionPath ? ['--session', sessionPath] : []), ...extraArgs()];
-    this.child = spawn(bin, args, { cwd, env: { ...process.env }, stdio: ['pipe', 'pipe', 'pipe'] });
+    const env = scheduled ? { ...process.env, PIGO_SCHEDULED_RESULTS: '1' } : process.env;
+    this.child = spawn(bin, args, { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
     this.startedAt = Date.now();
     createInterface({ input: this.child.stdout }).on('line', (line) => this.onLine(line));
     let stderr = '';
@@ -89,7 +90,7 @@ export class RpcRuntime {
       typeof event.id === 'string' && admissible(event)) {
       const expires = typeof event.timeout === 'number' && event.timeout > 0 ? Date.now() + event.timeout : undefined;
       this.uiQueue = this.uiQueue.filter((item) => item.event.id !== event.id);
-      this.uiQueue.push({ event, expires });
+      this.uiQueue.push({ event, expires, requestedAt: Date.now() });
       if (this.uiQueue.length > 8) this.uiQueue.shift();
     }
   }
@@ -173,7 +174,7 @@ export class RpcRuntime {
     const entry = this.uiQueue.find((item) => item.expires === undefined || item.expires > now);
     const event = entry?.event;
     if (!event) return undefined;
-    return { id: event.id, method: event.method, title: event.title, message: event.message,
+    return { id: event.id, method: event.method, requestedAt: entry.requestedAt, title: event.title, message: event.message,
       options: event.method === 'select' ? event.options : undefined,
       placeholder: event.method === 'input' ? event.placeholder : undefined,
       prefill: event.method === 'editor' ? event.prefill : undefined };
@@ -217,8 +218,8 @@ export class RuntimePool {
 
   // Spawn a fresh runtime. The caller validates readiness and triggers
   // /pi-go-share so the extension's worker socket appears for the broker.
-  start(cwd, sessionPath) {
-    const runtime = new RpcRuntime(this, cwd, sessionPath);
+  start(cwd, sessionPath, scheduled = false) {
+    const runtime = new RpcRuntime(this, cwd, sessionPath, scheduled);
     this.runtimes.set(`${runtime.pid}`, runtime);
     return runtime;
   }

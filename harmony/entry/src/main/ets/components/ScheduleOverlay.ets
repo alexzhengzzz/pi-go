@@ -3,6 +3,7 @@ import { workspaceName } from '../model/SessionStore';
 import { immersiveSurface } from '../Immersive';
 import { Companion } from '../CredentialVault';
 import { ScheduleJob, RunMessage, scheduleTime, scheduleRunStatus, scheduleRunReason, isCurrentScheduleComputer } from '../ScheduledRuns';
+import { InboxRun, runStatus } from '../RunResults';
 import { WorkspaceRow } from '../model/PiGoTypes';
 import { headerSymbol } from './HeaderSymbol';
 import { canvasFadeStops } from '../Appearance';
@@ -28,11 +29,18 @@ export struct ScheduleOverlay {
   @Prop base: string;
   @Prop busy: boolean;
   @Link computers: Companion[];
+  @Require deleteScheduleRun: (message: RunMessage) => Promise<void> = unboundAction;
   @Require dismissScheduleMessage: (message: RunMessage) => void = unboundAction;
   @Prop isPaired: boolean;
   @Require openScheduleTimePicker: () => void = unboundAction;
   @Require openScheduledSession: (message: RunMessage) => Promise<void> = unboundAction;
   @Prop openingSession: boolean;
+  @Prop inboxRuns: InboxRun[] = [];
+  @Prop pushEnabled: boolean = false;
+  @Prop pushSaving: boolean = false;
+  @Prop pushStatus: string = '';
+  @Require openInboxRun: (row: InboxRun) => Promise<void> = unboundAction;
+  @Require setPushEnabled: (enabled: boolean) => Promise<void> = unboundAction;
   @Link projects: string[];
   @Link scheduleCatchUp: string;
   @Link scheduleCwd: string;
@@ -82,6 +90,8 @@ export struct ScheduleOverlay {
       Column({ space: 10 }) {
         if (this.schedulePage === 'inbox') {
           this.scheduleInboxList()
+        } else if (this.schedulePage === 'history') {
+          this.scheduleHistoryList()
         } else {
           Scroll() {
             Column({ space: 12 }) {
@@ -90,14 +100,6 @@ export struct ScheduleOverlay {
                 this.scheduledRunDetail(this.scheduleDetail)
               } else if (this.schedulePage === 'editor') {
                 this.scheduleEditor()
-              } else if (this.schedulePage === 'history') {
-                Text(this.computerTitle).fontSize(13).fontColor($r('app.color.pigo_muted'))
-                if (!this.scheduleMessages.some((item: RunMessage): boolean => isCurrentScheduleComputer(this.computers, this.base, item))) {
-                  Text('暂无运行记录').fontSize(14).fontColor($r('app.color.pigo_muted'))
-                }
-                ForEach(this.scheduleMessages.filter((item: RunMessage): boolean => isCurrentScheduleComputer(this.computers, this.base, item)),
-                  (message: RunMessage) => { this.scheduledMessageRow(message) },
-                  (message: RunMessage) => `${message.key}:${message.unread}`)
               }
             }.width('100%').alignItems(HorizontalAlign.Start)
               .padding({ left: 16, right: 16, top: this.statusBarHeight + this.headerHeight + 14, bottom: 16 })
@@ -131,13 +133,40 @@ export struct ScheduleOverlay {
       ListItem() {
         Text('所有电脑').fontSize(13).fontColor($r('app.color.pigo_muted'))
       }
+      ListItem() {
+        Column({ space: 4 }) {
+          Row() {
+            Text('后台系统通知').fontSize(14).fontColor($r('app.color.pigo_text')).layoutWeight(1)
+            Toggle({ type: ToggleType.Switch, isOn: this.pushEnabled }).enabled(!this.pushSaving)
+              .selectedColor(this.accent).onChange((enabled: boolean) => { void this.setPushEnabled(enabled); })
+          }.width('100%')
+          if (this.pushStatus) Text(this.pushStatus).fontSize(12).fontColor($r('app.color.pigo_muted'))
+        }.width('100%').alignItems(HorizontalAlign.Start)
+      }
+      ForEach(this.inboxRuns, (row: InboxRun) => {
+        ListItem() {
+          Button({ type: ButtonType.Normal }) {
+            Row({ space: 8 }) {
+              if (row.unread) Blank().width(7).height(7).borderRadius(4).backgroundColor(this.accent)
+              Column({ space: 4 }) {
+                Text(row.run.title || 'Pi 会话').fontSize(15).fontWeight(FontWeight.Medium)
+                  .fontColor($r('app.color.pigo_text')).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+                Text(`${row.computer} · ${runStatus(row.run.status)} · ${scheduleTime(row.run.finishedAt)}`)
+                  .fontSize(12).fontColor($r('app.color.pigo_muted')).maxLines(2)
+              }.alignItems(HorizontalAlign.Start).layoutWeight(1)
+              SymbolGlyph($r('sys.symbol.chevron_right')).fontSize(14).fontColor([$r('app.color.pigo_muted')])
+            }.width('100%').padding(10)
+          }.width('100%').chatAction().enabled(!this.busy && !this.openingSession)
+            .onClick(() => { void this.openInboxRun(row); })
+        }
+      }, (row: InboxRun) => `${row.run.id}:${row.address}:${row.unread}`)
       if (this.scheduleOffline.length) {
         ListItem() {
           Text('部分电脑暂时无法连接，恢复连接后可补收结果。').fontSize(13).fontColor($r('app.color.pigo_muted'))
         }
-      } else if (!this.scheduleMessages.some((message: RunMessage): boolean => !message.dismissed)) {
+      } else if (!this.inboxRuns.length && !this.scheduleMessages.some((message: RunMessage): boolean => !message.dismissed)) {
         ListItem() {
-          Text('暂无定时任务消息').fontSize(14).fontColor($r('app.color.pigo_muted'))
+          Text('暂无任务消息').fontSize(14).fontColor($r('app.color.pigo_muted'))
         }
       }
       ForEach(this.scheduleMessages.filter((message: RunMessage): boolean => !message.dismissed), (message: RunMessage) => {
@@ -156,6 +185,41 @@ export struct ScheduleOverlay {
       .fontColor(Color.White).backgroundColor($r('app.color.pigo_error')).borderRadius(14)
       .accessibilityText(`删除收件箱消息 ${message.run.name}`)
       .onClick(() => { this.dismissScheduleMessage(message); })
+  }
+  @Builder
+  scheduleHistoryList() {
+    List({ space: 12 }) {
+      if (this.scheduleError) {
+        ListItem() {
+          Text(this.scheduleError).fontSize(14).fontColor($r('app.color.pigo_error'))
+        }
+      }
+      ListItem() {
+        Text(this.computerTitle).fontSize(13).fontColor($r('app.color.pigo_muted'))
+      }
+      if (!this.scheduleMessages.some((item: RunMessage): boolean => isCurrentScheduleComputer(this.computers, this.base, item))) {
+        ListItem() {
+          Text('暂无运行记录').fontSize(14).fontColor($r('app.color.pigo_muted'))
+        }
+      }
+      ForEach(this.scheduleMessages.filter((item: RunMessage): boolean => isCurrentScheduleComputer(this.computers, this.base, item)),
+        (message: RunMessage) => {
+          ListItem() {
+            this.scheduledMessageRow(message)
+          }.swipeAction({ end: this.scheduleHistoryDelete.bind(this, message), edgeEffect: SwipeEdgeEffect.None })
+        }, (message: RunMessage) => `${message.key}:${message.unread}`)
+    }.layoutWeight(1).width('100%').scrollBar(BarState.Off).edgeEffect(EdgeEffect.Spring)
+      .contentStartOffset(this.statusBarHeight + this.headerHeight + 14)
+      .contentEndOffset(this.bottomPad + 16)
+      .padding({ left: 16, right: 16 })
+  }
+  @Builder
+  scheduleHistoryDelete(message: RunMessage) {
+    Button('删除').id(`schedule-delete-run-${message.run.id}`).width(72).height('100%').padding(0)
+      .fontColor(Color.White).backgroundColor($r('app.color.pigo_error')).borderRadius(14)
+      .accessibilityText(`删除运行记录 ${message.run.name}`)
+      .enabled(!this.scheduleSaving)
+      .onClick(() => { void this.deleteScheduleRun(message); })
   }
   @Builder
   scheduleEditor() {

@@ -2,8 +2,8 @@ import { createHash, randomBytes, randomInt, timingSafeEqual } from "node:crypto
 import { spawn } from "node:child_process";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { SessionManager, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { ipcDirectory, localRequest, workerSocket } from "./local-ipc.mjs";
@@ -14,6 +14,9 @@ import { maxPromptBody, validPromptImage, validPromptImageBuffer, stageAttachmen
 import { generatedSessionTitle, imageParts, messageText, messageTextSlice, reply, replyImage, sessionAttachmentMarker,
   sessionPromptText, sessionTitlePreview, toolDetail, toolDetails, toolResultText } from "./message-view.mjs";
 
+import { captureWorkspace, describeChanges, saveRunResult } from "./run-results.mjs";
+
+const profile = resolve(process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent"));
 const host = "127.0.0.1";
 const maxBody = 16 * 1024;
 const messagePreviewLength = 8000;
@@ -156,6 +159,10 @@ function createProbe() {
   let activePrompt: string | undefined;
   let promptError: string | undefined;
   let runId: string | undefined;
+  let baseline: ReturnType<typeof captureWorkspace> | undefined;
+  let lastStopReason: string | undefined;
+  let baselineLeaf: string | null = null;
+  const scheduled = process.env.PIGO_SCHEDULED_RESULTS === "1";
   let streamId = "";
   let syncSeq = 0;
   const requests = new Map<string, string>();
@@ -604,6 +611,9 @@ function createProbe() {
       } catch { historyDirectory = undefined; }
       streamId = randomBytes(16).toString("hex");
       syncSeq = 0;
+      baseline = undefined;
+      lastStopReason = undefined;
+      baselineLeaf = null;
       runId = ctx.isIdle() ? undefined : randomBytes(16).toString("hex");
       liveText = "";
       liveSeq = 0;
@@ -627,6 +637,12 @@ function createProbe() {
     agentStarted() {
       clearDispatch();
       runId = randomBytes(16).toString("hex");
+      baseline = undefined;
+      lastStopReason = undefined;
+      baselineLeaf = historyLeaf();
+      if ((worker.listening || scheduled) && runtime) {
+        try { baseline = captureWorkspace(runtime.ctx.cwd); } catch { /* The run can continue without a diff. */ }
+      }
       liveText = "";
       liveSeq = 0;
       liveThinking = "";
@@ -659,6 +675,45 @@ function createProbe() {
     },
     settled(aborted: boolean) {
       const settledRunId = runId;
+      const current = status();
+      if (settledRunId && (worker.listening || scheduled) && runtime && current) {
+        try {
+          const manager = runtime.ctx.sessionManager;
+          const recent = historyPage(manager, toolLog, null, 60);
+          const messages = [];
+          const rows = new Map(recent?.messages.map((row) => [row.id, row]));
+          let remaining = 500;
+          for (let entry = manager.getLeafEntry(); entry && entry.id !== baselineLeaf && remaining-- > 0;
+            entry = entry.parentId ? manager.getEntry(entry.parentId) : undefined) {
+            const message = rows.get(entry.id);
+            if (message) messages.push(message);
+          }
+          messages.reverse();
+          const anchor = [...messages].reverse().find((message) =>
+            message.role === "assistant" && (message.text || message.imageCount)) ?? messages.at(-1);
+          const screenshots = Array.from(toolLog.values()).flatMap(({ summary, result }) => {
+            if (!imageParts((result as { content?: unknown })?.content).length) return [];
+            const message = messages.find((item) => item.tools?.some(({ id }) => id === summary.id));
+            return message ? [{ toolId: summary.id, messageId: message.id }] : [];
+          }).slice(0, 6);
+          const checks = Array.from(toolLog.values()).flatMap(({ summary, args }) => {
+            const command = (args as { command?: unknown })?.command;
+            if (summary.name !== "bash" || typeof command !== "string" ||
+              !/(^|[\s/])(tests?|pytest|vitest|jest|ctest|mocha|xctest|xcodebuild|check|lint|typecheck|build)([\s:;]|$)/i.test(command)) return [];
+            return [{ id: summary.id, command: command.slice(0, 240), state: summary.state, ms: summary.ms }];
+          }).slice(0, 8);
+          const finishedAt = Date.now();
+          let changes: ReturnType<typeof describeChanges>;
+          try { changes = describeChanges(current.cwd, baseline); }
+          catch { changes = { files: [], patches: {}, partial: true }; }
+          const { files, patches, partial } = changes;
+          saveRunResult(profile, { id: settledRunId, sessionId: current.id, cwd: current.cwd,
+            title: current.name, messageId: anchor?.id, finishedAt, files, checks, screenshots, partial, scheduled,
+            status: aborted || lastStopReason === "aborted" ? "stopped" : lastStopReason === "error" ? "failed" : "completed" }, patches);
+        } catch { /* Results are supplemental to the Pi session. */ }
+      }
+      baseline = undefined;
+      lastStopReason = undefined;
       runId = undefined;
       liveText = "";
       liveSeq = 0;
@@ -669,6 +724,7 @@ function createProbe() {
       emit("session/status", { idle: true, aborted, queued: status()?.queued ?? false }, settledRunId);
     },
     final(reason: string) {
+      lastStopReason = reason;
       if (activePrompt && reason === "error") promptError = "model_error";
       liveText = "";
       liveThinking = "";

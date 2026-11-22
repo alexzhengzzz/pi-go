@@ -17,6 +17,8 @@
     "host/bridge/broker.mjs",
     "host/bridge/attachments.mjs",
     "host/bridge/message-view.mjs",
+    "host/bridge/run-results.mjs",
+    "host/bridge/run-push.mjs",
     "host/bridge/session-metadata.mjs",
     "host/bridge/workspace-files.mjs",
     "host/bridge/lan-tls.mjs",

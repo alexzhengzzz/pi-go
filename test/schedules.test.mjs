@@ -74,3 +74,42 @@ test('restart recovers the claimed run without repeating its prompt', async (con
   assert.equal(prompts, 1);
   assert.equal(resumed.snapshot([cwd], false, [snapshot.runs[0].id]).watching, false);
 });
+
+test('delete-run removes finished runs even after job deletion and rejects running ones', async (context) => {
+  const cwd = realpathSync(mkdtempSync(join(tmpdir(), 'pigo-schedules-')));
+  context.after(() => rmSync(cwd, { force: true, recursive: true }));
+  const file = join(cwd, 'schedules.json');
+  let now = Date.UTC(2026, 10, 23, 8);
+  let resolveRun;
+  const service = new ScheduleService(file, {
+    registry: { list: () => [{ path: cwd }] },
+    runtimes: {
+      start: () => ({
+        awaitReady: async () => ({ sessionId: 'fixture' }),
+        runScheduledPrompt: () => new Promise((resolve) => { resolveRun = resolve; })
+      }),
+      stop: async () => {}
+    },
+    now: () => now
+  });
+  const [, created] = service.update({ ...settings, cwd, kind: 'once', at: now + minute, catchUp: 0 });
+  now += minute;
+  service.tick();
+  await new Promise((resolve) => setImmediate(resolve));
+  const [activeRun] = service.snapshot([cwd], false, []).activeRuns;
+  assert.ok(activeRun);
+  assert.deepEqual(service.update({ operation: 'delete-run', cwd, id: activeRun.id }), [409, { error: 'schedule_busy' }]);
+  assert.deepEqual(service.update({ operation: 'delete-run', cwd, id: 'bad id' }), [400, { error: 'invalid_schedule' }]);
+
+  resolveRun({ summary: 'Done' });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(service.snapshot([cwd], false, []).runs.length, 1);
+
+  assert.equal(service.update({ operation: 'delete', cwd, id: created.job.id, version: created.job.version })[0], 200);
+  assert.deepEqual(service.update({ operation: 'delete-run', cwd, id: activeRun.id }), [200, { deleted: true }]);
+  assert.deepEqual(service.snapshot([cwd], false, []).runs, []);
+  assert.deepEqual(service.update({ operation: 'delete-run', cwd, id: activeRun.id }), [200, { deleted: false }]);
+
+  const reloaded = new ScheduleService(file, { registry: { list: () => [{ path: cwd }] }, runtimes: {}, now: () => now });
+  assert.deepEqual(reloaded.snapshot([cwd], false, []).runs, []);
+});

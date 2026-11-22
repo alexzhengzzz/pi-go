@@ -1,4 +1,5 @@
 import { glassCardSurface, themedCardSurface } from '../Immersive';
+import { SakuraPetals } from './SakuraPetals';
 import { unboundAction } from './ComponentAction';
 import { Companion } from '../CredentialVault';
 import { APPEARANCE_MODES, AppearanceMode, THEME_STYLES, ThemePalette, ThemeStyle, appearanceMode, themePalette, themeStyle } from '../Appearance';
@@ -399,6 +400,21 @@ export struct SettingsView {
       .onClick(() => { this.minePage = page; })
   }
   @Builder
+  miniSakuraPetal(x: string, y: string, w: number, h: number, angle: number, alpha: number) {
+    Blank()
+      .width(w).height(h)
+      .borderRadius({ topLeft: Math.round(h * 0.72), topRight: Math.round(h * 0.95), bottomLeft: Math.round(h * 0.95), bottomRight: Math.round(h * 0.22) })
+      .linearGradient({
+        angle: 135,
+        colors: this.darkMode
+          ? [['#FFA8C8', 0], ['#F06B9E', 1]]
+          : [['#FFE0EC', 0], ['#FF9EC4', 1]]
+      })
+      .opacity(this.darkMode ? alpha * 0.78 : alpha)
+      .rotate({ angle: angle })
+      .position({ x: x, y: y })
+  }
+  @Builder
   themePreviewCard() {
     Column({ space: 10 }) {
       Row({ space: 8 }) {
@@ -421,9 +437,13 @@ export struct SettingsView {
             radius: '78%',
             colors: [[this.activePalette().auraBottom, 0], ['#00000000', 1]]
           })
+        if (this.themeId === 'sakura') {
+          SakuraPetals({ darkMode: this.darkMode, compact: true })
+        }
         Column({ space: 8 }) {
           Row() {
-            Text('帮我切换到一个更有氛围的主题').fontSize(13).fontColor($r('app.color.pigo_text'))
+            Text(this.themeId === 'sakura' ? '今天也要像樱花一样元气满满 ✿' : '帮我切换到一个更有氛围的主题')
+              .fontSize(13).fontColor($r('app.color.pigo_text'))
               .padding({ left: 12, right: 12, top: 7, bottom: 7 })
               .backgroundColor(themeStyle(this.themeId).bubble === 'gradient' ? Color.Transparent : this.activePalette().bubbleStart)
               .linearGradient(themeStyle(this.themeId).bubble === 'gradient' ? {
@@ -437,7 +457,7 @@ export struct SettingsView {
                 bottomRight: themeStyle(this.themeId).bubbleRadius
               })
               .border({
-                width: themeStyle(this.themeId).bubble === 'outline' ? 1.2 : 0.6,
+                width: themeStyle(this.themeId).bubble === 'outline' ? 1.2 : (this.themeId === 'sakura' ? 1 : 0.6),
                 radius: {
                   topLeft: themeStyle(this.themeId).bubbleRadius,
                   topRight: Math.max(4, Math.round(themeStyle(this.themeId).bubbleRadius * 0.35)),
@@ -446,6 +466,9 @@ export struct SettingsView {
                 },
                 color: this.activePalette().bubbleBorder
               })
+              .shadow(this.themeId === 'sakura'
+                ? { radius: 10, offsetY: 2, color: this.darkMode ? '#33FF7EB3' : '#2CE86A98' }
+                : undefined)
           }.width('100%').justifyContent(FlexAlign.End)
           Column() {
             Row() {
@@ -492,6 +515,14 @@ export struct SettingsView {
               radius: '85%',
               colors: [[this.paletteFor(style).auraBottom, 0], ['#00000000', 1]]
             })
+          if (style.id === 'sakura') {
+            Stack() {
+              this.miniSakuraPetal('12%', '16%', 10, 7, -28, 0.8)
+              this.miniSakuraPetal('28%', '28%', 7, 5, 36, 0.65)
+              Text('✿').fontSize(12).fontColor(this.darkMode ? '#FFA8C8' : '#FF8FB8')
+                .opacity(this.darkMode ? 0.45 : 0.62).position({ x: '6%', y: '4%' })
+            }.width('100%').height('100%').hitTestBehavior(HitTestMode.None)
+          }
           Column({ space: 5 }) {
             Row() {
               Blank().width(44).height(13)

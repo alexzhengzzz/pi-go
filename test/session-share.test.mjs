@@ -218,6 +218,7 @@ test('Index page collects paginated history and full truncated replies before in
     reachable: true,
     syncMode: 'sequenced',
     sharingSession: false,
+    openingSession: false,
     historyCursor: 'cursor-1',
     project: 'pi-go',
     liveText: '',
@@ -226,10 +227,9 @@ test('Index page collects paginated history and full truncated replies before in
     ],
     chatTitle: () => '完整会话',
     computerTitle: () => 'My Mac',
-    openShareMenu: () => {},
+    dismissKeyboard: () => {},
     openComputers: () => {},
     requestAction: async () => true,
-    copyText: async () => {},
     getUIContext: () => ({
       getHostContext: () => ({ cacheDir: '/cache' }),
       getPromptAction: () => ({ showToast: () => {} })
@@ -253,9 +253,10 @@ test('Index page collects paginated history and full truncated replies before in
   const menu = state.chatHeaderMenu();
   assert.equal(menu[0].value, '分享会话');
 
-  await state.shareCurrentSession('markdown', 'session-settings');
+  await state.shareCurrentSession('session-settings');
   assert.equal(requests.length, 2);
   assert.equal(shareCalls.length, 1);
+  assert.equal(shareCalls[0].mode, 'markdown');
   assert.equal(shareCalls[0].count, 2);
   assert.match(shareCalls[0].content, /最早的一条提问/);
   assert.match(shareCalls[0].content, /这是完整的助手回复内容。/);

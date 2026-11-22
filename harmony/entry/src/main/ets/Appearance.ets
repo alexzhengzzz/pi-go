@@ -145,27 +145,27 @@ export const THEME_STYLES: ThemeStyle[] = [
   },
   {
     id: 'sakura',
-    label: '柔雾落樱',
-    subtitle: '樱粉浪漫 · 圆润轻盈',
-    styleTag: '柔雾',
+    label: '落樱粉雪',
+    subtitle: '樱瓣飘落 · 粉嫩甜软',
+    styleTag: '樱花',
     surface: 'soft',
     bubble: 'gradient',
-    bubbleRadius: 22,
-    cardRadius: 20,
-    codeRadius: 14,
+    bubbleRadius: 24,
+    cardRadius: 22,
+    codeRadius: 16,
     light: {
-      accent: '#B0385A', accentForeground: '#FFFFFF', accentTint: '#FDE6EE',
-      canvas: '#FDF5F7', auraTop: '#44FFAEC7', auraBottom: '#36D8B8FA',
-      bubbleStart: '#FDE4EC', bubbleEnd: '#F7E4F8', bubbleBorder: '#F4C6D6',
-      codeBg: '#FFFBFD', codeBorder: '#EED6DF', codeHeaderBg: '#FAEDF2',
-      cardBg: '#F4FFFFFF', cardBorder: '#F2DCE4', cardShadow: '#12702944'
+      accent: '#D84B84', accentForeground: '#FFFFFF', accentTint: '#FFE3EE',
+      canvas: '#FFF6F9', auraTop: '#6EFFB7D5', auraBottom: '#5EFFD8E8',
+      bubbleStart: '#FFDCEB', bubbleEnd: '#FFF0F6', bubbleBorder: '#FFAEC9',
+      codeBg: '#FFF9FB', codeBorder: '#FAD0E0', codeHeaderBg: '#FFEBF3',
+      cardBg: '#F4FFFBFD', cardBorder: '#FCD4E4', cardShadow: '#24EC689E'
     },
     dark: {
-      accent: '#FFA6BE', accentForeground: '#15191C', accentTint: '#462431',
-      canvas: '#1A1115', auraTop: '#388A294B', auraBottom: '#2C5B2466',
-      bubbleStart: '#482331', bubbleEnd: '#3C2240', bubbleBorder: '#6E374C',
-      codeBg: '#24181E', codeBorder: '#3E2933', codeHeaderBg: '#2D1E26',
-      cardBg: '#E024181E', cardBorder: '#4D2F3D', cardShadow: '#44000000'
+      accent: '#FFA8C8', accentForeground: '#26101B', accentTint: '#472335',
+      canvas: '#1C1217', auraTop: '#52D95B8E', auraBottom: '#40C4749C',
+      bubbleStart: '#4F253A', bubbleEnd: '#412138', bubbleBorder: '#944A6E',
+      codeBg: '#251820', codeBorder: '#4F2E40', codeHeaderBg: '#321F2A',
+      cardBg: '#E6261821', cardBorder: '#63374E', cardShadow: '#44000000'
     }
   },
   {

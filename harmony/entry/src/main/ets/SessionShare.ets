@@ -168,7 +168,7 @@ export async function shareSessionViaSystem(
   content: string,
   meta: SessionShareMeta,
   messageCount: number,
-  format: SessionShareFormat,
+  format: SessionShareFormat = 'markdown',
   anchor?: string
 ): Promise<SystemShareResult> {
   const title = normalizeShareTitle(meta.title);

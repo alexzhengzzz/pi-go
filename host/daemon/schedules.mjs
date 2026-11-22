@@ -129,6 +129,14 @@ export class ScheduleService {
   update(input) {
     const { cwd, operation } = input;
     if (!this.workspaceAvailable(cwd)) return [403, { error: 'desktop_workspace_unshared' }];
+    if (operation === 'delete-run') {
+      if (typeof input.id !== 'string' || !/^[\w:-]{1,117}$/.test(input.id)) return [400, { error: 'invalid_schedule' }];
+      const run = this.state.runs.find((row) => row.id === input.id && row.cwd === cwd);
+      if (!run) return [200, { deleted: false }];
+      if (run.status === 'running') return [409, { error: 'schedule_busy' }];
+      this.save({ ...this.state, runs: this.state.runs.filter((row) => row.id !== run.id || row.cwd !== cwd) });
+      return [200, { deleted: true }];
+    }
     const job = this.state.jobs.find((row) => row.id === input.id && row.cwd === cwd);
     if (operation !== 'create' && !job) return [404, { error: 'schedule_missing' }];
     if (job && job.version !== input.version) return [409, { error: 'schedule_changed' }];
@@ -215,7 +223,7 @@ export class ScheduleService {
     let runtime;
     let result;
     try {
-      runtime = this.runtimes.start(job.cwd);
+      runtime = this.runtimes.start(job.cwd, undefined, true);
       const { sessionId } = await runtime.awaitReady();
       this.save({ ...this.state, runs: this.state.runs.map((row) => row.id === run.id ? { ...row, sessionId } : row) });
       result = await runtime.runScheduledPrompt(job.prompt, runTimeout);

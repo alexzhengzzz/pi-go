@@ -12,6 +12,8 @@ import { startDiscovery } from './lan-discovery.mjs';
 import { listFiles, previewFile, saveFile, openWorkspaceDownload, findWorkspaceFileByName } from './workspace-files.mjs';
 import { SessionMetadata, stateDirectory } from './session-metadata.mjs';
 import { computerSessions, findComputerSession } from './computer-sessions.mjs';
+import { readRuns, readRunPatch } from './run-results.mjs';
+import { RunPush } from './run-push.mjs';
 import { maxFileBytes, maxHistoryImageBase64, maxImageBytes, maxPromptBody, safeAttachmentName } from './attachments.mjs';
 
 const remote = process.argv[3] === '--remote';
@@ -56,6 +58,10 @@ const streams = new Set();
 let remoteRequests = 0;
 let remoteBudget = 40;
 let remoteBudgetAt = performance.now();
+
+const runPush = new RunPush(pairingFile);
+let pushTimer;
+let pollingPush = false;
 
 const registry = createSocketRegistry({ shouldShare: () => computerAccess && Boolean(bearer) && !closing });
 
@@ -346,6 +352,46 @@ async function pendingInteraction(worker) {
   if (pending?.status === 200) return pending.data.interaction;
 }
 
+async function runInbox(live, context, sessionId) {
+  const visible = (row) => context.granted.includes(row.cwd) ||
+    live.some(({ session }) => session.id === row.sessionId && session.cwd === row.cwd);
+  const finished = readRuns(pairingProfile).filter((row) => visible(row) && (sessionId ? row.sessionId === sessionId : !row.scheduled));
+  if (sessionId) return finished;
+  const pending = await Promise.all(live.slice(0, 32).map(async (worker) => {
+    const interaction = await pendingInteraction(worker);
+    if (!interaction || typeof interaction.id !== 'string') return;
+    const session = worker.session;
+    return { id: digest(JSON.stringify([session.id, interaction.id])).toString('hex'),
+      sessionId: session.id, cwd: session.cwd, title: session.name, status: 'waiting',
+      pendingId: interaction.id, finishedAt: interaction.requestedAt || Date.now() };
+  }));
+  return [...pending.filter(Boolean), ...finished];
+}
+
+async function pollRunPush() {
+  const paired = bearer;
+  const identity = paired?.toString('hex');
+  if (!identity || !runPush.subscription(identity) || pollingPush) return;
+  pollingPush = true;
+  try {
+    const context = await hostContext();
+    const rows = await runInbox(registry.workers(), context);
+    if (context.schedules && context.granted.length) {
+      const reply = await localRequest(context.socket, 'POST', '/schedules/sync', {
+        paths: context.granted, knownRuns: [], includeJobs: false
+      }).catch(() => undefined);
+      for (const run of reply?.data?.runs ?? []) {
+        if (['succeeded', 'failed', 'interrupted'].includes(run.status)) {
+          rows.push({ id: digest(run.id).toString('hex'), sessionId: run.sessionId, finishedAt: run.finishedAt,
+            status: run.status === 'succeeded' ? 'completed' : 'failed' });
+        }
+      }
+    }
+    await runPush.deliver(rows, identity, () => bearer === paired && !closing);
+  } catch { /* The application can still recover its inbox over the bridge. */ }
+  finally { pollingPush = false; }
+}
+
 async function replyOpen(request, response, worker, includeHistory) {
   select(worker);
   const opened = { session: worker.session };
@@ -429,6 +475,34 @@ const publicHandler = async (request, response) => {
     if (remote && !acceptRemoteRequest(response)) return;
     lastSeen = Date.now();
     if (route === 'GET /health') return reply(response, 200, { protocol: 'pi-go-bridge/1' });
+    if (route === 'POST /runs/push') {
+      const input = await body(request, 2048);
+      if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
+      const [status, result] = runPush.register(bearer.toString('hex'), input);
+      return reply(response, status, result);
+    }
+    if (route === 'GET /runs/inbox' || route === 'GET /runs/results' || route === 'GET /runs/diff') {
+      const params = new URL(request.url ?? '/', 'http://pi-go').searchParams;
+      const sessionId = params.get('session');
+      if (route !== 'GET /runs/inbox' && (!sessionId || !/^[\w.-]{1,200}$/.test(sessionId))) {
+        return error(response, 400, 'invalid_session');
+      }
+      const context = await hostContext();
+      const rows = await runInbox(registry.workers(), context, route === 'GET /runs/inbox' ? undefined : sessionId);
+      if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
+      if (route === 'GET /runs/diff') {
+        const run = rows.find(({ id }) => id === params.get('run'));
+        const file = params.get('path');
+        if (!run || !run.files?.some(({ path, diff }) => path === file && diff)) return error(response, 404, 'diff_not_found');
+        const text = readRunPatch(pairingProfile, run, file);
+        return text === undefined ? error(response, 404, 'diff_not_found') : reply(response, 200, { text });
+      }
+      if (route === 'GET /runs/inbox') {
+        return reply(response, 200, { runEvents: rows.slice(0, 80).map(({ files, checks, screenshots, ...row }) => row),
+          pushAvailable: Boolean(runPush.account) });
+      }
+      return reply(response, 200, { runEvents: rows.slice(0, 50) });
+    }
     if (route === 'POST /schedules/sync' || route === 'POST /schedules/update') {
       return await scheduleRequest(request, response, path);
     }
@@ -777,6 +851,7 @@ function stop() {
   if (closing) return;
   closing = true;
   clearTicket();
+  clearInterval(pushTimer);
   bearer = undefined;
   stopDiscovery?.();
   registry.stop();
@@ -799,6 +874,7 @@ process.once('SIGINT', stop);
 process.once('SIGTERM', stop);
 try {
   await registry.start();
+  if (runPush.account) pushTimer = setInterval(() => void pollRunPush(), 6000).unref();
   await listen(publicServer, port, host);
   try {
     const previous = lstatSync(adminPath);

@@ -3,6 +3,7 @@ import { glassButtonSurface } from '../Immersive';
 import { ChatContent } from '../ChatContent';
 import { ChatImage } from '../ChatImage';
 import { markdownWorkspacePath, messageFileChips, normalizeWorkspacePath } from '../ChatPaths';
+import { RunEvent, runStatus } from '../RunResults';
 import { ChatMessage, LiveTool, QueuedSteering } from '../model/PiGoTypes';
 import {
   buildTranscriptTurns,
@@ -51,6 +52,8 @@ export struct ChatTranscript {
   @Require loadMarkdownImage: (target: string, cwd: string, documentPath: string) => Promise<string> = unboundAction;
   @Prop loadingMessageText: string;
   @Link messages: ChatMessage[];
+  @Prop runResults: RunEvent[] = [];
+  @Require openRunResult: (run: RunEvent) => void = unboundAction;
   @Require openMarkdownLink: (target: string, cwd: string, documentPath: string) => Promise<void> = unboundAction;
   @Require openMarkdownTableReader: (source: string, cwd: string, documentPath: string) => void = unboundAction;
   @Require openReferencedFile: (cwd: string, path: string, lookupName: boolean) => Promise<void> = unboundAction;
@@ -145,6 +148,10 @@ export struct ChatTranscript {
               } else {
                 this.assistantTurn(turn)
               }
+              ForEach(this.resultsForTurn(turn), (run: RunEvent) => {
+                Button(`本轮结果 · ${runStatus(run.status)} · ${run.files?.length ?? 0} 个文件`).chatAction()
+                  .id(`turn-result-${run.id}`).onClick(() => { this.openRunResult(run); })
+              }, (run: RunEvent) => run.id)
             }, (turn: TranscriptTurn) => this.turnKey(turn))
             if (this.needsWaitingPulse()) {
               Row({ space: 8 }) {
@@ -251,10 +258,13 @@ export struct ChatTranscript {
         } : undefined)
         .borderRadius(this.bubbleCorners())
         .border({
-          width: this.currentTheme().bubble === 'outline' ? 1.2 : 0.6,
+          width: this.currentTheme().bubble === 'outline' ? 1.2 : (this.themeId === 'sakura' ? 1 : 0.6),
           radius: this.bubbleCorners(),
           color: this.currentPalette().bubbleBorder
         })
+        .shadow(this.themeId === 'sakura'
+          ? { radius: 12, offsetY: 3, color: this.darkMode ? '#33FF7EB3' : '#2CE86A98' }
+          : undefined)
     }.width('100%').justifyContent(FlexAlign.End).padding({ top: 14, bottom: 4 })
   }
 
@@ -561,16 +571,24 @@ export struct ChatTranscript {
     return `${step.id}:${step.text.length}`;
   }
 
+  private resultsForTurn(turn: TranscriptTurn): RunEvent[] {
+    return this.runResults.filter((run: RunEvent): boolean => !!run.messageId &&
+      (run.messageId === turn.message?.id ||
+        turn.steps.some((step: ProcessStep): boolean => step.messageId === run.messageId) ||
+        turn.extraImageMessages.some((message: ChatMessage): boolean => message.id === run.messageId)));
+  }
+
   private turnKey(turn: TranscriptTurn): string {
+    const results = this.resultsForTurn(turn).map((run: RunEvent): string => run.id).join(',');
     if (turn.kind === 'user' && turn.message) {
-      return `u:${turn.message.id}:${turn.message.text.length}:${turn.message.imageCount ?? 0}`;
+      return `u:${turn.message.id}:${turn.message.text.length}:${turn.message.imageCount ?? 0}:${results}`;
     }
     const open = this.isProcessOpen(turn.processId) ? '1' : '0';
     const stepSig = turn.steps.map((step: ProcessStep): string => this.stepKey(step)).join('|');
     const finalSig = turn.message
       ? `${turn.message.id}:${turn.message.text.length}:${turn.message.textTruncated ?? false}:${turn.message.imageCount ?? 0}`
       : '';
-    return `a:${turn.id}:${open}:${this.idle ? 1 : 0}:${turn.liveText.length}:${finalSig}:${stepSig}`;
+    return `a:${turn.id}:${open}:${this.idle ? 1 : 0}:${turn.liveText.length}:${finalSig}:${stepSig}:${results}`;
   }
 
   private unlistedLiveTools(): LiveTool[] {
