@@ -4,7 +4,7 @@ import { networkInterfaces } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { ipcDirectory, localRequest } from './local-ipc.mjs';
+import { desktopHosts, ipcDirectory, localRequest } from './local-ipc.mjs';
 import { localLanAddress, publicAddress } from './lan-tls.mjs';
 import { createAppServices } from './app-services.mjs';
 const run = promisify(execFile);
@@ -71,7 +71,47 @@ export async function usbLaunch(args, port, ticket) {
   } catch { return warning; }
   return undefined;
 }
+const workspaceErrors = {
+  desktop_busy: 'Pi Go 宿主正在处理另一项操作，请稍后重试。',
+  desktop_workspace_not_registered: '该工作区已移除，请刷新。',
+  desktop_session_not_found: '该会话已移除或无法定位，请刷新。',
+  invalid_workspace_name: '请输入 1–80 个字符的名称，且不要使用路径分隔符。',
+  session_occupied: '会话可能仍被 Pi 使用。请退出对应会话以及终端中的 Pi 后重试。',
+  session_changed: '会话文件在操作期间已更改，请刷新后重试。',
+  desktop_trash_failed: '无法将会话移入废纸篓，请检查文件权限。',
+  desktop_handoff_failed: 'Pi Go 宿主未能完成操作，请刷新后重试。',
+};
+
+const workspaceActions = new Map([
+  ['workspace-library', '/workspace-library'],
+  ['rename-workspace', '/rename-workspace'],
+  ['remove-workspace', '/remove-workspace'],
+  ['delete-session', '/delete-session'],
+]);
+
+async function workspaceControl(input, route) {
+  let hosts = await desktopHosts();
+  if (hosts.length === 1 && route === '/workspace-library') {
+    const health = await localRequest(hosts[0], 'GET', '/health', undefined, 700).catch(() => undefined);
+    if (health?.data?.workspaceLibrary !== true && appServices) {
+      await appServices.startHost({ requireWorkspaceLibrary: true });
+      hosts = await desktopHosts();
+    }
+  } else if (hosts.length === 0 && route === '/workspace-library' && appServices) {
+    await appServices.startHost({ requireWorkspaceLibrary: true });
+    hosts = await desktopHosts();
+  }
+  if (hosts.length !== 1) throw new Error('无法连接唯一的 Pi Go 宿主，请检查后台服务。');
+  const { status, data } = await localRequest(hosts[0], 'POST', route,
+    { id: input.id, cwd: input.cwd, name: input.name }, 14000, 16 * 1024 * 1024);
+  if (status === 404 && data.error === 'not_found') throw new Error('请更新并重启 Pi Go 后台服务。');
+  if (status !== 200) throw new Error(workspaceErrors[data.error] ?? '工作区操作失败，请刷新后重试。');
+  return data;
+}
+
 export async function control(input) {
+  const workspaceRoute = workspaceActions.get(input.action);
+  if (workspaceRoute) return workspaceControl(input, workspaceRoute);
   const mode = input.mode ?? 'usb';
   if (!['usb', 'lan', 'remote'].includes(mode)) throw new Error('invalid_transport');
   const port = input.port ?? (mode === 'remote' ? 18982 : mode === 'lan' ? 18981 : 18977);

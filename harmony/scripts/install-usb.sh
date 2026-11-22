@@ -1,9 +1,9 @@
 #!/bin/zsh
 set -euo pipefail
-project_root="${0:A:h:h}"
+harmony_root="${0:A:h:h}"
 studio="${DEVECO_STUDIO_HOME:-/Applications/DevEco-Studio.app/Contents}"
 hdc="${HDC_BIN:-$studio/sdk/default/openharmony/toolchains/hdc}"
-hap="${PIGO_HAP:-$project_root/harmony/entry/build/default/outputs/default/entry-default-signed.hap}"
+hap="${PIGO_HAP:-$harmony_root/entry/build/default/outputs/default/entry-default-signed.hap}"
 port="${PIGO_USB_PORT:-18977}"
 bundle="${PIGO_BUNDLE:-com.alex.pigo}"
 target_flags=()

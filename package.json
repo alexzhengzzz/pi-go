@@ -4,51 +4,44 @@
   "private": true,
   "type": "module",
   "files": [
-    "daemon/README.md",
-    "daemon/daemon.mjs",
-    "daemon/host.mjs",
-    "daemon/runtimes.mjs",
-    "daemon/registry.mjs",
-    "daemon/catalog.mjs",
-    "desktop/phase0.ts",
-    "desktop/local-ipc.mjs",
-    "desktop/broker.mjs",
-    "desktop/attachments.mjs",
-    "desktop/message-view.mjs",
-    "desktop/session-metadata.mjs",
-    "desktop/workspace-files.mjs",
-    "desktop/lan-tls.mjs",
-    "desktop/lan-discovery.mjs",
-    "scripts/pair-qr.swift",
-    "desktop/pairing-runtime.mjs",
-    "desktop/pairing-control.mjs",
-    "desktop/app-services.mjs",
-    "desktop/usb-watch.mjs",
-    "scripts/run-remote-tunnel.py",
-    "macos/PairingApp.swift",
-    "scripts/build-pairing-app.sh",
-    "desktop/computer-sessions.mjs",
-    "desktop/pi-go-host.ts",
-    "desktop/pi-desktop-v0.2.2-alpha.patch",
-    "scripts/prepare-desktop-host.sh",
-    "scripts/build-desktop-host-app.sh",
-    "scripts/install-desktop-host-app.sh",
-    "scripts/install-daemon-launchd.sh"
+    "host/daemon/README.md",
+    "host/daemon/daemon.mjs",
+    "host/daemon/host.mjs",
+    "host/daemon/runtimes.mjs",
+    "host/daemon/registry.mjs",
+    "host/daemon/catalog.mjs",
+    "host/bridge/phase0.ts",
+    "host/bridge/local-ipc.mjs",
+    "host/bridge/broker.mjs",
+    "host/bridge/attachments.mjs",
+    "host/bridge/message-view.mjs",
+    "host/bridge/session-metadata.mjs",
+    "host/bridge/workspace-files.mjs",
+    "host/bridge/lan-tls.mjs",
+    "host/bridge/lan-discovery.mjs",
+    "host/scripts/pair-qr.swift",
+    "host/bridge/pairing-runtime.mjs",
+    "host/bridge/pairing-control.mjs",
+    "host/bridge/app-services.mjs",
+    "host/bridge/usb-watch.mjs",
+    "host/scripts/run-remote-tunnel.py",
+    "host/macos/PairingApp.swift",
+    "host/scripts/build-pairing-app.sh",
+    "host/bridge/computer-sessions.mjs",
+    "host/scripts/install-daemon-launchd.sh"
   ],
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*"
   },
   "pi": {
     "extensions": [
-      "./desktop/phase0.ts"
+      "./host/bridge/phase0.ts"
     ]
   },
   "scripts": {
     "test": "node --test test/*.test.mjs",
-    "build:macos": "zsh scripts/build-pairing-app.sh",
+    "build:macos": "zsh host/scripts/build-pairing-app.sh",
     "build:pairing": "npm run build:macos",
-    "build:desktop-host": "zsh scripts/build-desktop-host-app.sh",
-    "install:desktop-host": "zsh scripts/install-desktop-host-app.sh",
-    "install:daemon": "zsh scripts/install-daemon-launchd.sh"
+    "install:daemon": "zsh host/scripts/install-daemon-launchd.sh"
   }
 }

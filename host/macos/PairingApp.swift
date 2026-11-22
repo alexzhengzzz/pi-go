@@ -11,6 +11,27 @@ struct Session: Decodable, Identifiable {
     var model: Model?
     struct Model: Decodable { var name: String; var provider: String }
 }
+struct Workspace: Decodable, Identifiable {
+    var id: String { cwd }
+    let registrationID: String?
+    let name: String
+    let cwd: String
+    let registered: Bool
+    let sessions: [HistorySession]
+
+    enum CodingKeys: String, CodingKey {
+        case registrationID = "id"
+        case name, cwd, registered, sessions
+    }
+}
+
+struct HistorySession: Decodable, Identifiable {
+    let id: String
+    let name: String?
+    let modified: String?
+    let active: Bool
+}
+
 struct Bridge: Decodable {
     var running: Bool
     var paired: Bool?
@@ -26,6 +47,7 @@ struct Services: Decodable {
     var usbAuto: Bool?
 }
 struct Payload: Decodable {
+    var workspaces: [Workspace]?
     var sessions: [Session]?
     var addresses: [String]?
     var bridge: Bridge?
@@ -61,7 +83,7 @@ struct Result: Decodable { var ok: Bool; var data: Payload?; var error: String? 
     @Published var busy = false
     private var polling = false
 
-    func request(_ input: [String: String]) async throws -> Payload {
+    static func request(_ input: [String: String]) async throws -> Payload {
         let encoded = try JSONSerialization.data(withJSONObject: input)
         return try await Task.detached {
             let resources = Bundle.main.resourceURL!
@@ -94,7 +116,7 @@ struct Result: Decodable { var ok: Bool; var data: Payload?; var error: String? 
         let selectedMode = mode
         defer { polling = false }
         do {
-            let payload = try await request(["action": "refresh", "mode": selectedMode])
+            let payload = try await Self.request(["action": "refresh", "mode": selectedMode])
             guard selectedMode == mode && !busy else { return }
             sessions = payload.sessions ?? []; addresses = payload.addresses ?? []
             bridge = payload.bridge ?? Bridge(running: false)
@@ -124,7 +146,7 @@ struct Result: Decodable { var ok: Bool; var data: Payload?; var error: String? 
         if mode == "usb" && action == "takeover" { input["enabled"] = String(autoUSB) }
         if let usbEnabled { input["enabled"] = String(usbEnabled) }
         do {
-            let payload = try await request(input)
+            let payload = try await Self.request(input)
             if action == "pair" || action == "connect" {
                 notice = payload.warning ?? ""
                 code = payload.code ?? ""
@@ -257,7 +279,7 @@ struct PairingView: View {
             if model.sessions.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("暂未发现运行中的会话")
-                    Text("从手机打开历史记录，或在 Mac 的 Pi CLI 使用 /pi-go-share 共享当前会话。").font(.callout).foregroundStyle(.secondary)
+                    Text("从手机打开历史记录，或直接接入已加载 Pi Go 扩展的 Mac 会话。").font(.callout).foregroundStyle(.secondary)
                 }.frame(maxWidth: .infinity, alignment: .leading).padding().background(.quaternary, in: RoundedRectangle(cornerRadius: 10))
             } else {
                 ScrollView {
@@ -284,9 +306,209 @@ struct PairingView: View {
     }
 }
 
+@MainActor final class WorkspaceModel: ObservableObject {
+    @Published var workspaces: [Workspace] = []
+    @Published var busy = false
+    @Published var error = ""
+    @Published var loaded = false
+
+    func run(_ action: String = "workspace-library", fields: [String: String] = [:]) async {
+        guard !busy else { return }
+        busy = true
+        error = ""
+        defer { busy = false }
+        do {
+            if action != "workspace-library" {
+                var input = fields
+                input["action"] = action
+                _ = try await PairingModel.request(input)
+            }
+            let response = try await PairingModel.request(["action": "workspace-library"])
+            workspaces = response.workspaces ?? []
+            loaded = true
+        } catch {
+            self.error = error.localizedDescription
+        }
+    }
+}
+
+struct WorkspaceView: View {
+    @StateObject private var model = WorkspaceModel()
+    @State private var selection: String?
+    @State private var pendingRename: Workspace?
+    @State private var nameDraft = ""
+    @State private var pendingDeletion: Deletion?
+
+    private enum Deletion {
+        case workspace(Workspace, String)
+        case session(Workspace, HistorySession)
+
+        var title: String {
+            switch self {
+            case .workspace: "移除工作区？"
+            case .session: "删除会话？"
+            }
+        }
+
+        var detail: String {
+            switch self {
+            case .workspace(let workspace, _):
+                "将移除「\(workspace.name)」的登记并关闭 Pi Go 托管的会话。项目文件和会话历史会保留。"
+            case .session(let workspace, let session):
+                "将「\(workspace.name)」中的「\(session.name ?? "未命名会话")」移入废纸篓。"
+            }
+        }
+
+        @MainActor func perform(using model: WorkspaceModel) async {
+            switch self {
+            case .workspace(_, let id):
+                await model.run("remove-workspace", fields: ["id": id])
+            case .session(let workspace, let session):
+                await model.run("delete-session", fields: ["cwd": workspace.cwd, "id": session.id])
+            }
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("工作区").font(.title2.bold())
+                Spacer()
+                if model.busy { ProgressView().controlSize(.small) }
+                Button("刷新", systemImage: "arrow.clockwise") { Task { await model.run() } }
+                    .disabled(model.busy)
+            }.padding(16)
+            if !model.error.isEmpty {
+                Text(model.error).foregroundStyle(.red).frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled).padding(.horizontal, 16).padding(.bottom, 12)
+            }
+            Divider()
+            HSplitView {
+                List(selection: $selection) {
+                    workspaceSection("已登记", workspaces: model.workspaces.filter(\.registered))
+                    workspaceSection("其他目录", workspaces: model.workspaces.filter { !$0.registered })
+                }
+                .listStyle(.sidebar)
+                .frame(minWidth: 170, idealWidth: 235, maxWidth: 280, maxHeight: .infinity)
+                Group {
+                    if let workspace = model.workspaces.first(where: { $0.id == selection }) {
+                        workspaceDetails(workspace)
+                    } else if model.loaded {
+                        ContentUnavailableView(model.workspaces.isEmpty ? "还没有工作区或会话" : "选择工作区",
+                                               systemImage: "folder")
+                    } else if model.busy {
+                        ProgressView("正在读取工作区")
+                    } else {
+                        ContentUnavailableView("无法读取工作区", systemImage: "folder.badge.questionmark")
+                    }
+                }
+                .frame(minWidth: 350, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            }
+        }
+        .task { await model.run() }
+        .onChange(of: model.workspaces.map(\.id)) { _, ids in
+            if let selection, ids.contains(selection) { return }
+            selection = ids.first
+        }
+        .alert("编辑工作区名称", isPresented: Binding(get: { pendingRename != nil }, set: {
+            if !$0 { pendingRename = nil }
+        }), presenting: pendingRename) { workspace in
+            TextField("显示名称", text: $nameDraft)
+            Button("保存") {
+                guard let id = workspace.registrationID else { return }
+                let name = nameDraft
+                Task { await model.run("rename-workspace", fields: ["id": id, "name": name]) }
+            }.disabled(nameDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            Button("取消", role: .cancel) {}
+        }
+        .alert(pendingDeletion?.title ?? "", isPresented: Binding(get: { pendingDeletion != nil }, set: {
+            if !$0 { pendingDeletion = nil }
+        }), presenting: pendingDeletion) { deletion in
+            Button("确认", role: .destructive) { Task { await deletion.perform(using: model) } }
+            Button("取消", role: .cancel) {}
+        } message: { deletion in
+            Text(deletion.detail)
+        }
+    }
+
+    @ViewBuilder private func workspaceSection(_ title: String, workspaces: [Workspace]) -> some View {
+        if !workspaces.isEmpty {
+            Section(title) {
+                ForEach(workspaces) { workspace in
+                    Label(workspace.name, systemImage: "folder").tag(workspace.id)
+                }
+            }
+        }
+    }
+
+    private func workspaceDetails(_ workspace: Workspace) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(workspace.name).font(.title2.bold())
+                Spacer()
+                if let id = workspace.registrationID {
+                    Menu("工作区操作") {
+                        Button("编辑名称") {
+                            nameDraft = workspace.name
+                            pendingRename = workspace
+                        }
+                        Button("移除工作区", role: .destructive) {
+                            pendingDeletion = .workspace(workspace, id)
+                        }
+                    }.disabled(model.busy)
+                }
+            }
+            Text(workspace.cwd).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+            if workspace.sessions.isEmpty {
+                ContentUnavailableView("还没有会话", systemImage: "bubble")
+            } else {
+                List(workspace.sessions) { session in
+                    HStack {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(session.name ?? "未命名会话")
+                            if let modified = session.modified, let date = ISO8601DateFormatter.sessionDate.date(from: modified) {
+                                Text(date.formatted(date: .abbreviated, time: .shortened))
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                        Spacer()
+                        if session.active {
+                            Text("已打开").font(.caption).foregroundStyle(.secondary)
+                        } else {
+                            Menu {
+                                Button("删除会话", role: .destructive) {
+                                    pendingDeletion = .session(workspace, session)
+                                }
+                            } label: {
+                                Image(systemName: "ellipsis.circle")
+                            }.menuStyle(.borderlessButton).fixedSize()
+                                .accessibilityLabel("会话操作").disabled(model.busy)
+                        }
+                    }
+                    .padding(.vertical, 5)
+                }
+                .listStyle(.plain)
+            }
+        }.padding(16)
+    }
+}
+
+private extension ISO8601DateFormatter {
+    static let sessionDate: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+}
+
 @main struct PiGoApp: App {
     var body: some Scene {
-        Window("Pi Go — 连接手机", id: "pairing") { PairingView() }
-            .defaultSize(width: 800, height: 700)
+        Window("Pi Go", id: "pairing") {
+            TabView {
+                WorkspaceView().tabItem { Label("工作区", systemImage: "folder") }
+                PairingView().tabItem { Label("连接手机", systemImage: "iphone.and.arrow.forward") }
+            }.frame(minWidth: 760, minHeight: 620)
+        }
+        .defaultSize(width: 800, height: 700)
     }
 }

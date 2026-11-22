@@ -35,7 +35,7 @@ writeFileSync(file, JSON.stringify({
   ProgramArguments: [node, ...args],
   RunAtLoad: true,
   KeepAlive: true,
-  ProcessType: 'Background',
+  ProcessType: label === 'dev.pi.go.daemon' ? 'Interactive' : 'Background',
   StandardErrorPath: join(logs, label + '.log'),
   EnvironmentVariables: environment,
 }));
@@ -48,7 +48,7 @@ JS
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 const [root, port] = process.argv.slice(2);
-const { ipcDirectory, localRequest } = await import(pathToFileURL(join(root, 'desktop/local-ipc.mjs')));
+const { ipcDirectory, localRequest } = await import(pathToFileURL(join(root, 'bridge/local-ipc.mjs')));
 try {
   const stopped = await localRequest(join(ipcDirectory(), `bridge-${port}.sock`), 'POST', '/stop');
   if (stopped.status !== 200) throw new Error(`Existing bridge refused to stop (${stopped.status})`);
@@ -70,5 +70,5 @@ fi
 
 install_agent dev.pi.go.daemon "$root/daemon/daemon.mjs"
 if [[ -n "${PIGO_USB_PORT:-}" ]]; then
-  install_agent "dev.pi.go.bridge.usb.$PIGO_USB_PORT" "$root/desktop/broker.mjs" "$PIGO_USB_PORT"
+  install_agent "dev.pi.go.bridge.usb.$PIGO_USB_PORT" "$root/bridge/broker.mjs" "$PIGO_USB_PORT"
 fi

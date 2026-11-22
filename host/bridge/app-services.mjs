@@ -10,6 +10,7 @@ import { desktopHosts, ipcDirectory, localRequest, workers } from './local-ipc.m
 
 const run = promisify(execFile);
 const hostLabel = 'dev.pi.go.daemon';
+const hostProcessType = 'Interactive';
 const remoteLabel = 'com.alex.pigo.remote.broker';
 const tunnelLabel = 'com.alex.pigo.remote.tunnel';
 const domain = `gui/${process.getuid()}`;
@@ -105,12 +106,14 @@ export function createAppServices(root) {
     const current = await readFile(file).catch((error) => { if (error.code !== 'ENOENT') throw error; });
     const previous = current && await parsePlist(file);
     const loaded = Boolean(await jobInfo(label));
+    const processType = label === hostLabel ? hostProcessType : 'Background';
     const config = {
-      Label: label, ProgramArguments: args, RunAtLoad: true, KeepAlive: true, ProcessType: 'Background',
+      Label: label, ProgramArguments: args, RunAtLoad: true, KeepAlive: true, ProcessType: processType,
       StandardErrorPath: join(logs, `${label}.log`),
       EnvironmentVariables: { ...previous?.EnvironmentVariables, ...env },
     };
-    if (loaded && JSON.stringify(previous?.ProgramArguments) === JSON.stringify(args) && await ready()) return;
+    if (loaded && previous?.ProcessType === processType &&
+      JSON.stringify(previous.ProgramArguments) === JSON.stringify(args) && await ready()) return;
     const draft = join(agents, `.${label}.${randomUUID()}`);
     try {
       await writeFile(draft, JSON.stringify(config), { mode: 0o600, flag: 'wx' });
@@ -134,7 +137,7 @@ export function createAppServices(root) {
     }
   }
 
-  async function startHost() {
+  async function startHost({ requireWorkspaceLibrary = false } = {}) {
     await run(env.PIGO_PI_BIN, ['--version'], { env: { ...process.env, ...env }, timeout: 5000 });
     const info = await jobInfo(hostLabel);
     const pid = jobPID(info);
@@ -145,10 +148,17 @@ export function createAppServices(root) {
     const args = [process.execPath, join(root, 'daemon', 'daemon.mjs')];
     const ready = async () => {
       const active = jobPID(await jobInfo(hostLabel));
-      return active && (await desktopHosts()).includes(join(ipcDirectory(), `host-${active}.sock`));
+      const socket = join(ipcDirectory(), `host-${active}.sock`);
+      if (!active || !(await desktopHosts()).includes(socket)) return false;
+      if (!requireWorkspaceLibrary) return true;
+      const response = await localRequest(socket, 'GET', '/health', undefined, 700).catch(() => undefined);
+      return response?.data?.workspaceLibrary === true;
     };
     // Wait for hosted work to finish before replacing the old runtime parent.
-    if (pid && (await parsePlist(plist(hostLabel))).ProgramArguments?.[1] !== args[1]) {
+    const installed = pid ? await parsePlist(plist(hostLabel)) : undefined;
+    if (pid && (installed.ProcessType !== hostProcessType ||
+      JSON.stringify(installed.ProgramArguments) !== JSON.stringify(args) ||
+      (requireWorkspaceLibrary && !await ready()))) {
       const { stdout } = await run('/bin/ps', ['-axo', 'pid=,ppid=']);
       const children = new Set(stdout.trim().split('\n').map((line) => line.trim().split(/\s+/))
         .filter(([, parent]) => Number(parent) === pid).map(([child]) => child));
@@ -174,7 +184,7 @@ export function createAppServices(root) {
       async () => {
         if (!jobPID(await jobInfo(label))) return false;
         const state = await bridgeStatus(port);
-        return state && (!current?.paired || state.paired);
+        return state?.workspaceLibrary === true && (!current?.paired || state.paired);
       },
       async () => { if (mayStopLegacy) await stopBridge(port); });
     const status = await bridgeStatus(port);

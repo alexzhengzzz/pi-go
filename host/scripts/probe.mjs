@@ -4,7 +4,7 @@ import { createInterface } from "node:readline";
 import { Readable } from "node:stream";
 
 async function main(file) {
-  if (!file) throw new Error("用法：node scripts/probe.mjs <pair.json 路径>");
+  if (!file) throw new Error("用法：node host/scripts/probe.mjs <pair.json 路径>");
   const { url, ticket } = JSON.parse(await readFile(file, "utf8"));
   if (typeof url !== "string" || !/^http:\/\/127\.0\.0\.1:\d{1,5}$/.test(url) || !/^[a-f0-9]{64}$/.test(ticket)) {
     throw new Error("无效的本机配对文件");

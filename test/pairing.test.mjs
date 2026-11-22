@@ -13,10 +13,10 @@ import { randomUUID } from 'node:crypto';
 import { request as secureRequest } from 'node:https';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { localRequest } from '../desktop/local-ipc.mjs';
-import { localLanAddress } from '../desktop/lan-tls.mjs';
+import { localRequest } from '../host/bridge/local-ipc.mjs';
+import { localLanAddress } from '../host/bridge/lan-tls.mjs';
 const project = fileURLToPath(new URL('../', import.meta.url));
-const helper = fileURLToPath(new URL('../desktop/pairing-control.mjs', import.meta.url));
+const helper = fileURLToPath(new URL('../host/bridge/pairing-control.mjs', import.meta.url));
 
 test('phone accepts pairing bundles only in the matching network mode', async () => {
   const pairingSource = await readFile(new URL('../harmony/entry/src/main/ets/PairingCode.ets', import.meta.url), 'utf8');

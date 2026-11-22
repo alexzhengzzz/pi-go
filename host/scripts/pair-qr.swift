@@ -37,6 +37,6 @@ func makeCode() throws -> URL {
 do {
     print(try makeCode().path)
 } catch {
-    FileHandle.standardError.write(Data("Usage: swift scripts/pair-qr.swift <unused LAN pair.json> (one PNG per ticket)\n".utf8))
+    FileHandle.standardError.write(Data("Usage: swift host/scripts/pair-qr.swift <unused LAN pair.json> (one PNG per ticket)\n".utf8))
     exit(1)
 }

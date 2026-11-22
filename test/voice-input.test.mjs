@@ -158,9 +158,10 @@ test('default session lexicon satisfies Core Speech Kit constraints', () => {
 test('normalizeLexicon validates, dedupes and falls back to defaults', () => {
   assert.deepEqual(normalizeLexicon(undefined), DEFAULT_SESSION_LEXICON);
   assert.deepEqual(normalizeLexicon([]), DEFAULT_SESSION_LEXICON);
-  assert.deepEqual(normalizeLexicon([' 智能体 ', '智能体', 'x', '超过二十个字符的超长词汇一定不行'.repeat(2), '自定义词']),
+  assert.deepEqual(normalizeLexicon([' 智能体 ', '智能体', 'x', '超过二十个字符的超长词汇一定不行'.repeat(2),
+    'Pi Go', 'Core Speech Kit', 'DevEco Studio', '自定义词']),
     ['智能体', '自定义词']);
-  const many = Array.from({ length: 300 }, (_, i) => `词条${i}`);
+  const many = Array.from({ length: 300 }, (_, i) => `词条${String.fromCharCode(0x4e00 + i)}`);
   assert.equal(normalizeLexicon(many).length, 200);
 });
 
@@ -195,7 +196,8 @@ test('continuous dictation uses long mode, microphone input and session hot word
   assert.equal(engine.startParams.extraParams.recognitionMode, 0);
   assert.equal(engine.startParams.extraParams.maxAudioDuration, 60000);
   assert.equal(engine.startParams.extraParams.vadEnd, undefined);
-  assert.deepEqual(engine.startParams.extraParams.sessionGeneralLexicon, DEFAULT_SESSION_LEXICON);
+  assert.deepEqual(engine.startParams.extraParams.sessionGeneralLexicon, normalizeLexicon());
+  assert.ok(engine.startParams.extraParams.sessionGeneralLexicon.every(word => /^[\u4e00-\u9fffA-Za-z]+$/.test(word)));
 });
 
 test('preview spans finalized clauses and shows the latest revision of the current clause', async () => {

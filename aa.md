@@ -36,6 +36,6 @@ private revealLibraryAnchor(): void {
 
 ---
 
-工程文档见 [PLAN.md](PLAN.md),桌面端桥接见 `desktop/broker.mjs`。
+工程文档见 [PLAN.md](PLAN.md),桌面端桥接见 `host/bridge/broker.mjs`。
 
 Emoji 测试:🚀 📱 ✅ 🔧(如果你在预览里能看到这些,说明 UTF-8 解码正常)

@@ -142,7 +142,7 @@ test('the drawer groups default task rows by space and retains the recent filter
   assert.ok(page.includes('this.expandedSpaces.includes(path) ? 0 : -90'),
     'folder chevrons must render collapsed unless the folder was opened');
   assert.match(method(page, 'sessionLibrary'), /LazyForEach\(this\.sidebarRows/);
-  assert.match(method(page, 'updateSidebarRows'), /for \(const path of this\.projects\)[\s\S]*?bySpace\.get\(path\)/);
+  assert.match(method(page, 'updateSidebarRows'), /new Set<string>\(this\.projects\)[\s\S]*?for \(const path of paths\)[\s\S]*?bySpace\.get\(path\)/);
 });
 
 test('the vault roundtrips sidebar state through the store', async () => {

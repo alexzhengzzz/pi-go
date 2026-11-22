@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { promisify } from "node:util";
-import { localRequest } from "../desktop/local-ipc.mjs";
+import { localRequest } from "../host/bridge/local-ipc.mjs";
 
 const project = new URL("../", import.meta.url).pathname;
 const provider = new URL("./offline-provider.ts", import.meta.url).pathname;
@@ -18,7 +18,7 @@ const pi = process.env.PI_BIN ?? "pi";
 function start(agentDir, cwd, env = {}) {
   const child = spawn(pi, ["--offline", "--mode", "rpc", "--no-tools",
     "--no-mcp", "--no-approve", "--no-skills", "--no-context-files", "-e", provider,
-    "--provider", "pi-go-test", "--model", "fixture"], { cwd, env: { ...process.env, ...env, PI_CODING_AGENT_DIR: agentDir } });
+    "--provider", "pi-go-test", "--model", "fixture"], { cwd, env: { ...process.env, ...env, PI_CODING_AGENT_DIR: agentDir, PIGO_TEST_COMMANDS: "1" } });
   const exit = once(child, "exit");
   const messages = [];
   let stderr = "";

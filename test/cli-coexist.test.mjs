@@ -2,8 +2,8 @@
 // the same session without stopping it" scenario.
 //
 // The resident CLI is simulated with a real `pi --mode rpc` process (same
-// engine, same extension loading as TUI). The phone pairs through the bridge
-// the CLI extension starts (/pi-go-bridge), then POST /open must SELECT the
+// engine, same extension loading as TUI). The phone pairs through an independent
+// bridge, which discovers the CLI session automatically. POST /open must SELECT the
 // live worker instead of spawning a second engine process: both sides share
 // one engine, and a phone prompt while the CLI is streaming is queued by the
 // engine's native steering instead of racing on the session file.
@@ -17,7 +17,7 @@ import { createInterface } from 'node:readline';
 import { join } from 'node:path';
 import { createServer } from 'node:net';
 import { promisify } from 'node:util';
-import { localRequest } from '../desktop/local-ipc.mjs';
+import { localRequest } from '../host/bridge/local-ipc.mjs';
 
 const project = new URL('../', import.meta.url).pathname;
 const provider = new URL('./offline-provider.ts', import.meta.url).pathname;
@@ -31,7 +31,7 @@ test('phone joins the resident CLI session: one engine, two clients, steering wo
   const root = await realpath(await mkdtemp('/private/tmp/pigo-cli-coexist-'));
   const agent = join(root, 'agent'), ipc = join(root, 'ipc'), work = join(root, 'project');
   await Promise.all([agent, ipc, work].map((path) => mkdir(path, { mode: 0o700 })));
-  const env = { ...process.env, PI_CODING_AGENT_DIR: agent, PIGO_IPC_DIR: ipc, PI_OFFLINE: '1' };
+  const env = { ...process.env, PI_CODING_AGENT_DIR: agent, PIGO_IPC_DIR: ipc, PI_OFFLINE: '1', PIGO_TEST_COMMANDS: '0' };
   await promisify(execFile)(pi, ['install', project], { cwd: work, env });
   let settings = {};
   for (let attempt = 0; attempt < 30; attempt++) {
@@ -66,29 +66,36 @@ test('phone joins the resident CLI session: one engine, two clients, steering wo
     }
     throw new Error(`CLI event missing: ${cliStderr}\n${JSON.stringify(events.slice(-6))}`);
   };
+  let broker;
   context.after(async () => {
     try { cli.kill('SIGTERM'); } catch {}
-    // Stop the bridge the CLI extension spawned, or it leaks the port.
-    await localRequest(join(ipc, `bridge-${port}.sock`), 'POST', '/stop').catch(() => {});
+    broker?.kill('SIGTERM');
     await new Promise((resolve) => setTimeout(resolve, 300));
     await rm(root, { recursive: true, force: true });
   });
 
+  const commands = await rpc('get_commands');
+  assert.equal(commands.success, true);
+  assert.ok(commands.data.commands.every(({ name }) => !name.startsWith('pi-go')));
   const seeded = await rpc('prompt', { message: 'Seeded from the CLI side' });
   assert.equal(seeded.success, true);
   const state = await rpc('get_state');
   const sessionId = state.data.sessionId;
 
-  // The user starts the bridge from the CLI: share + broker + pairing ticket.
   const reservation = createServer().listen(0, '127.0.0.1');
   await once(reservation, 'listening');
   const port = reservation.address().port;
   await promisify(reservation.close.bind(reservation))();
-  await rpc('prompt', { message: `/pi-go-bridge ${port}` });
-  const notification = await cliWait((event) => event.type === 'extension_ui_request' &&
-    event.method === 'notify' && event.message?.startsWith('Pi Go ticket file: '));
-  const ticketFile = notification.message.slice('Pi Go ticket file: '.length);
-  const pairing = JSON.parse(await readFile(ticketFile, 'utf8'));
+  const admin = join(ipc, `bridge-${port}.sock`);
+  broker = spawn(process.execPath, [join(project, 'host/bridge/broker.mjs'), String(port)], { env, stdio: 'ignore' });
+  let issued;
+  for (let attempt = 0; attempt < 80 && !issued; attempt++) {
+    const enabled = await localRequest(admin, 'POST', '/computer-access').catch(() => undefined);
+    if (enabled?.status === 200) issued = await localRequest(admin, 'POST', '/ticket');
+    else await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  assert.equal(issued?.status, 200);
+  const pairing = JSON.parse(await readFile(issued.data.file, 'utf8'));
 
   const phone = async (path, value) => {
     const response = await fetch(pairing.url + path, { method: value ? 'POST' : 'GET', signal: AbortSignal.timeout(15000),
@@ -114,6 +121,9 @@ test('phone joins the resident CLI session: one engine, two clients, steering wo
   const chat = await phone('/chat');
   assert.equal(chat.data.session.id, sessionId);
   assert.equal(chat.data.messages.some((message) => message.text === 'Seeded from the CLI side'), true);
+  const phoneCommands = await phone('/commands');
+  assert.equal(phoneCommands.status, 200);
+  assert.ok(phoneCommands.data.commands.every(({ name }) => !name.startsWith('pi-go')));
 
   // Dual-client concurrency: CLI is streaming a long answer; the phone steers.
   cli.stdin.write(JSON.stringify({ type: 'prompt', id: 'cli-long', message: 'Pi Go fixture: long answer' }) + '\n');

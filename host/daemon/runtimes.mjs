@@ -1,16 +1,12 @@
 // Pi RPC runtime pool for the Pi Go daemon.
 //
 // Each managed runtime is one `pi --mode rpc [--session <file>]` child process
-// spawned with the workspace as cwd — the same engine invocation the patched
-// Desktop used per tab. The daemon speaks the public JSON-lines RPC protocol
+// spawned in the workspace. The daemon speaks the public JSON-lines RPC protocol
 // over the child's stdio: commands on stdin, responses and events on stdout.
 // Extension UI requests (`extension_ui_request`, methods confirm/select/input/
 // editor) are surfaced so the phone can answer them through the host's
 // /pending and /answer routes; answers are written back as
 // `extension_ui_response` lines.
-//
-// Validation semantics mirror the patched Desktop's PiEventRouter
-// (pendingForPiGo / respondFromPiGo) so the phone sees identical behavior.
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 
@@ -134,8 +130,7 @@ export class RpcRuntime {
     throw new Error(`runtime_not_ready:${JSON.stringify(last ?? null)}`);
   }
 
-  // Snapshot of the currently pending interaction, skipping expired entries —
-  // the RPC-level twin of the Desktop router's pendingForPiGo.
+  // Snapshot of the currently pending interaction, skipping expired entries.
   pendingInteraction() {
     const now = Date.now();
     const entry = this.uiQueue.find((item) => item.expires === undefined || item.expires > now);
@@ -155,9 +150,8 @@ export class RpcRuntime {
     } catch { return false; }
   }
 
-  // Answer the pending interaction; validation matches the patched Desktop's
-  // respondFromPiGo (confirm wants a boolean, select an offered option, input a
-  // single-line string, editor any string — all ≤1024 chars, false = cancel).
+  // Confirm accepts a boolean, select accepts an offered option, and input
+  // and editor accept up to 1024 characters. False cancels select, input, or editor.
   respondFromPiGo(pendingId, answer) {
     const interaction = this.pendingInteraction();
     if (!interaction || interaction.id !== pendingId) return false;

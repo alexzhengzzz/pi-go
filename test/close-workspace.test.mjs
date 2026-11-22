@@ -1,14 +1,16 @@
-// Closing a workspace from the phone must remove it from Desktop's project list
+// Closing a workspace from the phone must remove it from the host's project list
 // (via the host), forget the phone-side grant, and drop it from the next listing.
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, readFile, realpath } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, readFile, realpath, rename, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { localRequest } from "../desktop/local-ipc.mjs";
+import { localRequest } from "../host/bridge/local-ipc.mjs";
+import { createDaemonHost } from "../host/daemon/host.mjs";
+import { WorkspaceRegistry } from "../host/daemon/registry.mjs";
 
 const project = new URL("../", import.meta.url).pathname;
 const profile = "a".repeat(64);
@@ -30,7 +32,7 @@ function fakeWorker(context, ipc, { id, cwd, idle, name }) {
   return { ready, close: stop };
 }
 
-// A Pi Desktop host that records close requests and shuts the matching fake workers down,
+// A test host that records close requests and shuts the matching fake workers down,
 // mirroring how removing a workspace stops its Pi processes.
 function fakeHost(context, ipc, workers, onClosed, onCreated) {
   const path = join(ipc, `host-${process.pid}.sock`);
@@ -61,7 +63,7 @@ function fakeHost(context, ipc, workers, onClosed, onCreated) {
 }
 
 async function pairBroker(context, ipc, port) {
-  const bridge = spawn(process.execPath, [join(project, "desktop/broker.mjs"), String(port)], { env: { ...process.env, PIGO_IPC_DIR: ipc } });
+  const bridge = spawn(process.execPath, [join(project, "host/bridge/broker.mjs"), String(port)], { env: { ...process.env, PIGO_IPC_DIR: ipc } });
   context.after(async () => {
     await localRequest(join(ipc, `bridge-${port}.sock`), "POST", "/stop").catch(() => bridge.kill());
     await once(bridge, "exit").catch(() => {});
@@ -93,7 +95,7 @@ async function reservePort() {
   return port;
 }
 
-test("creating a space requires pairing, computer access and Desktop support", { timeout: 30000 }, async (context) => {
+test("creating a space requires pairing, computer access and host support", { timeout: 30000 }, async (context) => {
   const ipc = await mkdtemp(join(tmpdir(), "pigo-create-"));
   context.after(async () => { await rm(ipc, { force: true, recursive: true }); });
   const port = await reservePort();
@@ -197,7 +199,7 @@ test("host refusals and outages surface their own errors instead of pretending s
   const granted = await realpath("/tmp");
   assert.deepEqual(new Set((await phone.get("/sessions")).projects), new Set([granted]));
 
-  // Desktop-side refusals pass their status and code straight through to the phone.
+  // Host refusals pass their status and code straight through to the phone.
   refusals.set(granted, { status: 404, error: "desktop_workspace_not_registered" });
   assert.deepEqual(await phone.post("/close-workspace", { cwd: granted }), { status: 404, data: { error: "desktop_workspace_not_registered" } });
   refusals.set(granted, { status: 409, error: "desktop_workspace_kind_unsupported" });
@@ -205,7 +207,117 @@ test("host refusals and outages surface their own errors instead of pretending s
   // A failed close keeps the grant so the workspace stays reachable for the next attempt.
   assert.deepEqual(new Set((await phone.get("/sessions")).projects), new Set([granted]));
 
-  // Without a reachable Desktop host the close is refused instead of silently skipped.
+  // Without a reachable host the close is refused instead of silently skipped.
   await host.stop();
   assert.deepEqual(await phone.post("/close-workspace", { cwd: granted }), { status: 409, data: { error: "desktop_handoff_required" } });
+});
+
+test("desktop edits and removes registrations and deletes only unoccupied history, updating the phone catalog", { timeout: 30000 }, async (context) => {
+  const root = await realpath(await mkdtemp("/tmp/pigo-library-"));
+  const cwd = join(root, "project");
+  const empty = join(root, "empty");
+  const agent = join(root, "agent");
+  const ipc = join(root, "ipc");
+  const store = join(agent, "sessions", "project");
+  const trash = join(root, "trash");
+  await Promise.all([cwd, empty, store, ipc, trash].map((path) => mkdir(path, { recursive: true, mode: 0o700 })));
+  context.after(async () => rm(root, { recursive: true, force: true }));
+  for (const [key, value] of Object.entries({ PI_CODING_AGENT_DIR: agent, PIGO_IPC_DIR: ipc, PIGO_STATE_DIR: join(root, "state") })) {
+    const previous = process.env[key];
+    process.env[key] = value;
+    context.after(() => {
+      if (previous === undefined) delete process.env[key];
+      else process.env[key] = previous;
+    });
+  }
+
+  const id = "aaaaaaaa-0000-4000-8000-000000000001";
+  const otherId = "aaaaaaaa-0000-4000-8000-000000000002";
+  const history = (sessionId) => JSON.stringify({ type: "session", id: sessionId, cwd }) + "\n" +
+    JSON.stringify({ type: "message", message: { role: "user", content: "History" } }) + "\n";
+  const file = join(store, `dated_${id}.jsonl`);
+  const otherFile = join(store, `${otherId}.jsonl`);
+  await Promise.all([writeFile(file, history(id)), writeFile(otherFile, history(otherId))]);
+
+  const registryFile = join(root, "registry", "workspaces.json");
+  const registry = new WorkspaceRegistry(registryFile);
+  const registration = registry.create("Original", cwd);
+  const emptyRegistration = registry.create("Empty", empty);
+  let externalPi = false;
+  const closed = [];
+  const active = [];
+  let finishTrash;
+  let signalTrash;
+  const trashStarted = new Promise((resolve) => { signalTrash = resolve; });
+  const trashGate = new Promise((resolve) => { finishTrash = resolve; });
+  const host = createDaemonHost({
+    registry,
+    runtimes: { list: () => active, killFor: async (path) => closed.push(path) },
+    hasExternalPi: async () => externalPi,
+    trash: async (path) => {
+      signalTrash();
+      await trashGate;
+      await rename(path, join(trash, `${id}.jsonl`));
+    },
+  });
+  host.server.listen(host.path);
+  await once(host.server, "listening");
+  context.after(() => { finishTrash(); host.shutdown(); });
+  const desktop = (path, input = {}) => localRequest(host.path, "POST", path, input);
+
+  const library = await desktop("/workspace-library");
+  assert.deepEqual(library.data.workspaces.find((row) => row.cwd === empty).sessions, []);
+  assert.equal(library.data.workspaces.find((row) => row.cwd === cwd).sessions.length, 2);
+  assert.equal((await desktop("/rename-workspace", { id: registration.id, name: "../bad" })).status, 400);
+  assert.equal((await desktop("/rename-workspace", { id: registration.id, name: "Renamed" })).status, 200);
+  assert.equal(new WorkspaceRegistry(registryFile).list().find((row) => row.id === registration.id).name, "Renamed");
+
+  const port = await reservePort();
+  const phone = await pairBroker(context, ipc, port);
+  const admin = join(ipc, `bridge-${port}.sock`);
+  assert.equal((await localRequest(admin, "POST", "/grant", { cwd: empty })).status, 200);
+  assert.ok((await phone.get("/sessions")).projects.includes(empty));
+  assert.equal((await desktop("/remove-workspace", { id: emptyRegistration.id })).status, 200);
+  assert.deepEqual(closed, [empty]);
+  assert.ok((await stat(empty)).isDirectory());
+  assert.ok(!(await phone.get("/sessions")).projects.includes(empty));
+
+  await localRequest(admin, "POST", "/computer-access");
+  const before = await phone.get("/sessions");
+  assert.deepEqual(before.workspaces, [{ cwd, name: "Renamed" }]);
+  assert.ok(before.sessions.some((row) => row.id === id));
+
+  // A session selected on the phone can close before its history is deleted.
+  const worker = fakeWorker(context, ipc, { id, cwd, idle: true, name: "History" });
+  await worker.ready;
+  assert.equal((await phone.post("/open", { id })).status, 200);
+  assert.equal((await desktop("/delete-session", { cwd, id })).data.error, "session_occupied");
+  await worker.close();
+  active.push({ sessionId: id, cwd, pid: 1 });
+  assert.equal((await desktop("/delete-session", { cwd, id })).data.error, "session_occupied");
+  active.pop();
+  externalPi = true;
+  assert.equal((await desktop("/delete-session", { cwd, id })).data.error, "session_occupied");
+  externalPi = false;
+  assert.equal((await desktop("/delete-session", { cwd: empty, id })).status, 404);
+  assert.equal((await phone.post("/delete-session", { cwd, id })).status, 404);
+
+  const deletion = desktop("/delete-session", { cwd, id });
+  await trashStarted;
+  assert.equal((await desktop("/open", { cwd, id })).data.error, "desktop_busy");
+  finishTrash();
+  assert.deepEqual(await deletion, { status: 200, data: { deleted: true } });
+  assert.equal((await desktop("/delete-session", { cwd, id })).status, 404);
+  assert.equal(await readFile(join(trash, `${id}.jsonl`), "utf8"), history(id));
+  assert.equal(await readFile(otherFile, "utf8"), history(otherId));
+  assert.deepEqual((await phone.get("/sessions")).sessions.map((row) => row.id), [otherId]);
+  const snapshot = await phone.get("/session/snapshot");
+  assert.equal(snapshot.state, "session_deleted");
+  assert.equal(snapshot.deletedSessionId, id);
+
+  assert.equal((await desktop("/remove-workspace", { id: registration.id })).status, 200);
+  const remaining = (await desktop("/workspace-library")).data.workspaces.find((row) => row.cwd === cwd);
+  assert.equal(remaining.registered, false);
+  assert.deepEqual(remaining.sessions.map((row) => row.id), [otherId]);
+  assert.deepEqual(new WorkspaceRegistry(registryFile).list(), []);
 });

@@ -1,9 +1,8 @@
 // Pi Go daemon entry point.
 //
-// A small, dependency-free Node daemon that replaces the patched Pi Desktop as
-// the always-on host for the Pi Go bridge:
+// The always-on host for the Pi Go bridge:
 //   - serves the `pi-go-desktop-host/1` protocol on a host socket in the Pi Go
-//     IPC directory, so the existing broker/extension/phone stack is unchanged;
+//     IPC directory for the broker;
 //   - spawns and supervises `pi --mode rpc` child processes per workspace
 //     session (native open / new / close);
 //   - bridges extension UI requests (confirm/select/input/editor) from the RPC
@@ -11,12 +10,12 @@
 //
 // Lifecycle: run under launchd (RunAtLoad + KeepAlive) or directly. SIGTERM
 // stops every managed runtime and exits. A second instance refuses to start
-// while a live host socket (this daemon or a patched Desktop) still answers.
+// while a live host socket still answers.
 import { unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { once } from 'node:events';
-import { desktopHosts } from '../desktop/local-ipc.mjs';
-import { stateDirectory } from '../desktop/session-metadata.mjs';
+import { desktopHosts } from '../bridge/local-ipc.mjs';
+import { stateDirectory } from '../bridge/session-metadata.mjs';
 import { WorkspaceRegistry } from './registry.mjs';
 import { RuntimePool } from './runtimes.mjs';
 import { createDaemonHost } from './host.mjs';

@@ -54,7 +54,7 @@ async function sessionFiles(root, matches) {
   return files;
 }
 
-// Match the same filename forms that Desktop accepts when restoring an ID.
+// Match the supported native session filename forms when restoring an ID.
 export async function findComputerSession(id) {
   if (!idPattern.test(id)) return;
   const root = await sessionRoot();
@@ -67,12 +67,12 @@ export async function findComputerSession(id) {
   }
 }
 
-// Read Pi's native store, including projects that have no open Desktop tab.
-export async function computerSessions() {
+// Read Pi's native store, including projects without an active session.
+export async function computerSessions(revision) {
   const root = await sessionRoot();
   if (!root) return [];
-  if (cached?.root === root && Date.now() - cached.time < 5000) return cached.rows;
-  if (pending?.root === root) return pending.promise;
+  if (cached?.root === root && cached.revision === revision && Date.now() - cached.time < 5000) return cached.rows;
+  if (pending?.root === root && pending.revision === revision) return pending.promise;
   const promise = (async () => {
     const files = await sessionFiles(root, (name) => name.endsWith('.jsonl'));
     const entries = new Map();
@@ -92,9 +92,9 @@ export async function computerSessions() {
       }
     }));
     rows.sort((a, b) => b.modified.localeCompare(a.modified));
-    cached = { root, time: Date.now(), rows, entries };
+    cached = { root, revision, time: Date.now(), rows, entries };
     return rows;
   })();
-  pending = { root, promise };
+  pending = { root, revision, promise };
   try { return await promise; } finally { if (pending?.promise === promise) pending = undefined; }
 }

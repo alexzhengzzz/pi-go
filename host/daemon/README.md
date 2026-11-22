@@ -1,0 +1,55 @@
+# Pi Go daemon
+
+Pi Go 的常驻宿主。它启动并管理 Pi CLI RPC 会话，供手机打开历史、新建会话、管理工作区和应答扩展交互。
+
+```
+鸿蒙手机 ──HTTP(S)/SSE── broker.mjs ── worker socket ── Pi Go 扩展
+                             │                           （运行在 Pi CLI 会话中）
+                             └── host socket ── daemon ── pi --mode rpc
+```
+
+- `daemon.mjs` 提供常驻入口，由 launchd 或终端启动。收到 SIGTERM 时停止托管会话。
+- `host.mjs` 通过本机 Unix socket 提供会话接续、工作区登记和扩展交互接口。
+- `runtimes.mjs` 在工作区中运行 `pi --mode rpc [--session <file>]`，通过 stdin/stdout 处理 RPC。手机可应答 `confirm`、`select`、`input` 和 `editor`。
+- `catalog.mjs` 扫描原生会话存储，按工作区真实路径匹配历史，支持 `<id>.jsonl` 和 `<slug>_<id>.jsonl`。
+- `registry.mjs` 把工作区登记持久化到 `PIGO_STATE_DIR/daemon/workspaces.json`。关闭工作区会停止托管进程、移除登记并保留文件。
+
+## macOS 无界面安装
+
+日常使用由 [Pi Go.app](../../docs/pairing-gui.md) 统一接管宿主和连接。以下命令适用于开发调试或无界面运行。
+
+1. 在仓库根目录执行以下命令。已有 USB 配对可以继续使用，桥接端口保持一致。
+
+   ```sh
+   pi install "$PWD"
+   PIGO_USB_PORT=18977 npm run install:daemon
+   ```
+
+   daemon 和 USB 桥由 launchd 登录自启，并在退出后重启。仅需安装宿主时可省略 `PIGO_USB_PORT`。日志在
+   `~/Library/Logs/dev.pi.go.daemon.log` 与 `~/Library/Logs/dev.pi.go.bridge.usb.18977.log`。
+   已配置的 LAN 和公网桥可以继续发现同一个 daemon。
+2. USB 调试和反向端口配置见 [USB 真机联调](../../docs/usb.md)。手机连接后可打开现有历史，daemon 会登记该会话所在的工作区。启用整机访问后，已配对的桥会自动发现加载了 Pi Go 扩展的活跃 Pi CLI 会话。
+
+前台调试可在无后台宿主运行时执行 `node host/daemon/daemon.mjs`。
+
+## 环境变量
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `PIGO_IPC_DIR` | `$TMPDIR/pigo-<uid>` | host/worker socket 目录（与 broker、扩展共享） |
+| `PIGO_STATE_DIR` | `<ipc>/state` 或 `~/.pi-go` | 注册表等持久化状态 |
+| `PI_CODING_AGENT_DIR` | `~/.pi/agent` | Pi 会话存储与会话历史来源 |
+| `PIGO_PI_BIN` | `pi` | pi 可执行文件 |
+| `PIGO_PI_ARGS` | `[]` | JSON 字符串数组，追加到每个 RPC 子进程的启动参数 |
+
+## Pi CLI 配置与共享会话
+
+daemon 托管的 RPC 会话沿用 Pi CLI 的用户配置。可通过 `PIGO_PI_ARGS` 附加启动参数。手机打开桥已发现的活跃会话时，broker 复用既有进程。这些会话的终端交互仍在 Mac 上处理，daemon 托管会话的扩展交互可在手机上应答。
+
+## 测试
+
+全量回归使用 `npm test`，使用隔离的 Pi 配置和 IPC 目录。
+
+`PIGO_LIVE_PORT=<端口> node host/scripts/live-smoke.mjs` 使用真实模型验证 LAN 入口。先在独立端口启动 LAN 桥；脚本要求该桥尚未配对，测试结束后可停止测试桥并撤销测试凭证。
+
+`node --test test/daemon.test.mjs` 用真实 `pi --mode rpc` + 离线 fixture provider 跑完整链路：open/new/authorize/catalog/projects/close-workspace、UI 请求应答（confirm/select/input/editor 含非法应答分支）、broker 配对后手机端 `/open` `/chat` 端到端、单实例互斥、SIGTERM 清理。

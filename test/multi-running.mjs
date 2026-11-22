@@ -7,7 +7,7 @@ import { once } from "node:events";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { localRequest } from "../desktop/local-ipc.mjs";
+import { localRequest } from "../host/bridge/local-ipc.mjs";
 
 const project = new URL("../", import.meta.url).pathname;
 
@@ -31,7 +31,7 @@ function fakeWorker(context, ipc, { id, cwd, idle, queued = false, name }) {
   return ready;
 }
 
-// A Pi Desktop host that reports one pending interaction for a chosen session.
+// A test host that reports one pending interaction for a chosen session.
 function fakeHost(context, ipc, pendingFor) {
   const path = join(ipc, `host-${process.pid}.sock`);
   const server = createServer(async (req, res) => {
@@ -67,7 +67,7 @@ test("sessions/status reports every running session with names, independent of t
     "aaaaaaa1-0000-4000-8000-00000000000a": { id: "ask-1", method: "select", title: "选择方案", options: ["A", "B"] },
   });
 
-  const bridge = spawn(process.execPath, [join(project, "desktop/broker.mjs"), String(port)], { env: { ...process.env, PIGO_IPC_DIR: ipc } });
+  const bridge = spawn(process.execPath, [join(project, "host/bridge/broker.mjs"), String(port)], { env: { ...process.env, PIGO_IPC_DIR: ipc } });
   context.after(async () => {
     await localRequest(join(ipc, `bridge-${port}.sock`), "POST", "/stop").catch(() => bridge.kill());
     await once(bridge, "exit").catch(() => {});

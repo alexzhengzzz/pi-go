@@ -24,19 +24,31 @@ methods.push('cacheChat', 'presentChat', 'revealChat', 'send', 'mergeTranscript'
   'applySessionHistory', 'stopStream', 'streamDown', 'queueStreamPaint', 'flushStreamDeltas', 'finishSend', 'reconcileSteering');
 methods.push('chooseComputer', 'leaveComputer', 'persistComputers', 'pair', 'resetFileTree', 'closeFileEditor');
 methods.push('appendFileTreeRows', 'updateFileTree', 'toggleFileDirectory', 'loadFileDirectory');
-methods.push('newTaskOptions', 'closeNewSpace', 'createWorkspaceTask', 'createSpaceTask', 'confirmCloseSpace', 'closeWorkspace', 'armTranscriptFollow', 'onKeyboardChange');
+methods.push('workspaceName', 'newTaskOptions', 'closeNewSpace', 'createWorkspaceTask', 'createSpaceTask', 'confirmCloseSpace', 'closeWorkspace', 'armTranscriptFollow', 'onKeyboardChange');
 methods.push('dockedSessions', 'sessionPaneWidth', 'compactSessionPane', 'onWindowWidthChange');
 methods.push('chatTitle', 'observeSessionRun', 'observeRun', 'advanceRunNotice', 'clearRunNotices');
+methods.push('restoreSettings', 'saveSetting', 'setRunNoticesEnabled', 'setLiveViewsEnabled');
+methods.push('backgroundLiveActivity', 'syncLiveActivity');
 const dataSource = page.slice(page.indexOf('class SidebarRows '), page.indexOf('interface ChatMessage'));
 const splitWidth = page.match(/^const SPLIT_WINDOW_WIDTH = \d+;$/m)[0];
-const Page = new Function('Curve', 'BridgeFailure', 'validUsb', 'MAX_COMPUTERS', 'Edge', '$r', 'DialogAlignment', stripTypeScriptTypes(`${splitWidth}\nconst STREAM_PAINT_INTERVAL_MS = 32;\nconst MAX_LIVE_TEXT_LENGTH = 16000;\n${dataSource}\nclass Harness {\nsidebarRows = new SidebarRows();\n${methods.map(method).join('\n')}\n}`) + '; return Harness;')(
+const runNoticeSetting = page.match(/^const RUN_NOTICE_SETTING = .*;$/m)[0];
+const liveViewSetting = page.match(/^const LIVE_VIEW_SETTING = .*;$/m)[0];
+const liveViewCalls = [];
+const liveActivity = { sync: snapshot => liveViewCalls.push(snapshot) };
+const Page = new Function('Curve', 'BridgeFailure', 'validUsb', 'MAX_COMPUTERS', 'Edge', '$r', 'DialogAlignment',
+  'openSettings', 'themeStyle', 'appearanceMode', 'liveActivity',
+  stripTypeScriptTypes(`${splitWidth}\n${runNoticeSetting}\n${liveViewSetting}\nconst STREAM_PAINT_INTERVAL_MS = 32;\nconst MAX_LIVE_TEXT_LENGTH = 16000;\n${dataSource}\nclass Harness {\nsidebarRows = new SidebarRows();\n${methods.map(method).join('\n')}\n}`) + '; return Harness;')(
   { EaseOut: 0 },
   BridgeFailure,
   (address) => address === 'http://127.0.0.1:18977',
   12,
   { Bottom: 'bottom' },
   resource => resource,
-  { Bottom: 'bottom' }
+  { Bottom: 'bottom' },
+  (context) => context.settings,
+  (id) => ({ id }),
+  (id) => ({ id }),
+  liveActivity
 );
 function fixture() {
   const state = new Page();
@@ -45,7 +57,8 @@ function fixture() {
     fileDirectories: new Map(),
     syncMode: 'legacy', busy: false, sessionLoading: false, epoch: 1, reachable: true,
     runningSessionIds: [], runningSessions: [], sessionStatusAt: 0, runningCatalogAt: 0, currentId: '', idle: true, queued: false,
-    observedRuns: new Map(), pendingRunNotices: [], runNoticeTimer: -1, messages: [],
+    observedRuns: new Map(), pendingRunNotices: [], runNoticeTimer: -1, runNoticesEnabled: true, messages: [],
+    settingsWrite: Promise.resolve(), liveViewsEnabled: true, syncLiveActivity: () => {},
     liveText: '', liveThinking: '', liveThinkSeq: 0, liveThinkingOpen: false, thinkingOpenIds: [],
     liveTools: [], liveSeq: 0, liveRevision: 0, streamAlive: false, queuedSteering: [],
     deltaPaintTimer: -1, pendingLiveText: '', pendingLiveThinking: '',
@@ -310,6 +323,19 @@ test('sidebar rows only include tasks from expanded spaces, with an anchor for a
   assert.equal(state.sidebarRows.getData(2).session.id, 'offscreen');
 });
 
+test('the sidebar uses registered names and keeps discovered history expandable', () => {
+  const state = fixture();
+  state.hasWorkspaceDetails = true;
+  state.workspaces = [{ cwd: '/project', name: 'Renamed workspace' }];
+  state.expandedSpaces = ['/history'];
+  state.sessions = [{ id: 'history', cwd: '/history', name: 'Previous task' }];
+  state.updateSidebarRows();
+  assert.equal(state.workspaceName('/project'), 'Renamed workspace');
+  assert.equal(state.sidebarRows.getData(0).key, 'space:/project:Renamed workspace');
+  assert.equal(state.sidebarRows.getData(1).path, '/history');
+  assert.equal(state.sidebarRows.getData(2).session.id, 'history');
+});
+
 test('a cold drawer shows the first page while later pages are pending', async () => {
   const state = fixture();
   state.sessions = [];
@@ -352,7 +378,7 @@ test('a failed catalog page keeps the cached spaces and tasks and can be retried
 test('the space plus creates a task directly in that space', () => {
   const state = fixture();
   const requests = [];
-  state.desktopHandoff = true;
+  state.hostAvailable = true;
   state.requestAction = async (...args) => { requests.push(args); return false; };
 
   state.createSpaceTask('/project');
@@ -362,7 +388,7 @@ test('the space plus creates a task directly in that space', () => {
 
 test('the empty new-task menu can create one space and open its first task', async () => {
   const state = fixture();
-  Object.assign(state, { projects: [], expandedSpaces: [], desktopHandoff: true, scheduleSidebarSave: () => {} });
+  Object.assign(state, { projects: [], expandedSpaces: [], hostAvailable: true, scheduleSidebarSave: () => {} });
   assert.deepEqual(state.newTaskOptions(), []);
   state.canCreateWorkspace = true;
   const [option] = state.newTaskOptions();
@@ -699,6 +725,99 @@ test('background banners require a previously running task to be confirmed idle'
   state.applyRunningStatus({ runningSessionIds: [], idleSessionIds: ['one', 'two', 'three'] });
   state.advanceRunNotice();
   assert.equal(state.runNotice, undefined);
+});
+
+test('disabling run notices clears existing banners and persists across app restarts', async (context) => {
+  const saved = new Map();
+  const pending = new Map();
+  const settings = {
+    getSync: (key, fallback) => saved.get(key) ?? fallback,
+    putSync: (key, value) => pending.set(key, value),
+    flush: async () => { for (const [key, value] of pending) saved.set(key, value); }
+  };
+  const openPage = () => {
+    const state = fixture();
+    Object.assign(state, { visible: true, getUIContext: () => ({ getHostContext: () => ({ settings }) }) });
+    state.restoreSettings();
+    context.after(() => state.clearRunNotices());
+    return state;
+  };
+  const state = openPage();
+  assert.equal(state.runNoticesEnabled, true);
+  for (const id of ['one', 'two']) {
+    state.observeRun(id, id, true);
+    state.observeRun(id, id, false);
+  }
+  assert.equal(state.runNotice.title, 'one');
+  assert.equal(state.pendingRunNotices.length, 1);
+  const disabled = state.setRunNoticesEnabled(false);
+  assert.equal(state.runNotice, undefined);
+  assert.equal(state.runNoticeTimer, -1);
+  assert.equal(state.pendingRunNotices.length, 0);
+  await disabled;
+
+  const reopened = openPage();
+  assert.equal(reopened.runNoticesEnabled, false);
+  reopened.observeRun('one', 'Finished while muted', true);
+  reopened.observeRun('one', '', false);
+  reopened.observeRun('two', 'Still running', true);
+  await reopened.setRunNoticesEnabled(true);
+  assert.equal(reopened.runNotice, undefined);
+  reopened.observeRun('two', '', false);
+  assert.equal(reopened.runNotice.title, 'Still running');
+  assert.equal(openPage().runNoticesEnabled, true);
+});
+
+test('live activity follows the selected run and clears when it becomes idle', () => {
+  const state = fixture();
+  Object.assign(state, {
+    syncLiveActivity: Page.prototype.syncLiveActivity,
+    visible: true, isPaired: true, currentId: 'one', idle: false, queued: false,
+    reachable: true, base: 'http://127.0.0.1:18977', project: 'pi-go', sessionName: 'Fix live view',
+    cancelSchedule: () => assert.fail('foreground sync must not cancel polling'),
+    stopStream: () => assert.fail('foreground sync must not stop the event stream')
+  });
+  liveViewCalls.length = 0;
+  state.syncLiveActivity();
+  assert.deepEqual(liveViewCalls.at(-1), {
+    sessionId: 'one', address: 'http://127.0.0.1:18977', title: 'Fix live view',
+    project: 'pi-go', state: '运行中', foreground: true
+  });
+  state.interaction = { id: 'approval' };
+  state.syncLiveActivity();
+  assert.equal(liveViewCalls.at(-1).state, '等待处理');
+  state.interaction = undefined;
+  state.queued = true;
+  state.syncLiveActivity();
+  assert.equal(liveViewCalls.at(-1).state, '排队中');
+  state.reachable = false;
+  state.syncLiveActivity();
+  assert.equal(liveViewCalls.at(-1).state, '重新连接中');
+  state.idle = true;
+  state.queued = false;
+  state.syncLiveActivity();
+  assert.equal(liveViewCalls.at(-1), undefined);
+});
+
+test('background live activity keeps syncing only while the selected run is active', () => {
+  const state = fixture();
+  let cancelled = 0, stopped = 0;
+  Object.assign(state, {
+    syncLiveActivity: Page.prototype.syncLiveActivity,
+    visible: false, isPaired: true, currentId: 'one', idle: false, queued: false,
+    reachable: true, base: 'http://127.0.0.1:18977', project: 'pi-go',
+    cancelSchedule: () => { cancelled++; }, stopStream: () => { stopped++; }
+  });
+  liveViewCalls.length = 0;
+  state.syncLiveActivity();
+  assert.equal(liveViewCalls.at(-1).foreground, false);
+  assert.equal(cancelled, 0);
+  assert.equal(stopped, 0);
+  state.idle = true;
+  state.syncLiveActivity();
+  assert.equal(liveViewCalls.at(-1), undefined);
+  assert.equal(cancelled, 1);
+  assert.equal(stopped, 1);
 });
 
 test('running badges use current chat state and disappear when disconnected', () => {
@@ -1124,6 +1243,27 @@ test('reconnect restores a new baseline and rejects old runs and worker bindings
   assert.equal(state.liveText, 'recovered tail');
   assert.equal(state.idle, false);
   assert.equal(state.runId, 'run-2');
+});
+
+test('opening with bundled history shows the transcript without another request', async () => {
+  for (const mode of ['probe', 'sequenced']) {
+    const state = syncFixture();
+    state.syncMode = mode;
+    const requests = [];
+    const current = snapshot(syncCursor(11, 'two', 'second-worker'), 'partial reply');
+    state.request = async (path, input) => {
+      requests.push([path, input]);
+      return { ...current, messages: [{ id: 'latest' }], historyCursor: 'older' };
+    };
+    assert.equal(await state.requestAction('/open', { id: 'two' }), true);
+    assert.deepEqual(requests, [['/open', { id: 'two', history: true }]]);
+    assert.equal(state.syncMode, 'sequenced');
+    assert.equal(state.currentId, 'two');
+    assert.deepEqual(state.messages, [{ id: 'latest' }]);
+    assert.equal(state.historyCursor, 'older');
+    assert.equal(state.historyStream, 'second-worker');
+    assert.equal(state.liveText, 'partial reply');
+  }
 });
 
 test('switching away and back ignores earlier snapshots and history for the same session', async () => {

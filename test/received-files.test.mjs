@@ -179,7 +179,7 @@ test('an older bridge without the download endpoint prompts for an update', asyn
     return 404;
   });
   await state.openWorkspaceFile('/workspace', 'exports/report.pdf');
-  assert.match(state.status, /桌面桥缺少文件下载接口/);
+  assert.match(state.status, /Pi Go 服务缺少文件下载接口/);
   assert.deepEqual([...files.values()], [[99]]);
   assert.deepEqual(previews, []);
 });

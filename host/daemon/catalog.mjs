@@ -1,8 +1,6 @@
 // Session history scanning for the Pi Go daemon.
 //
-// Mirrors what the patched Pi Desktop host did via engineProjectSessionDirs /
-// readSessionMetadata, but with zero dependencies outside Node: it scans the
-// native Pi session store (PI_CODING_AGENT_DIR/sessions) and filters rows by
+// Scan the native Pi session store (PI_CODING_AGENT_DIR/sessions) and filter rows by
 // the header's project cwd. Filename forms follow computer-sessions.mjs:
 // "<id>.jsonl" and "<slug>_<id>.jsonl" are both accepted when restoring an ID.
 import { createReadStream } from 'node:fs';
@@ -74,6 +72,12 @@ async function sessionFiles(root, matches) {
 }
 
 let cache;
+let generation = 0;
+
+export function invalidateSessionCatalog() {
+  cache = undefined;
+  generation += 1;
+}
 
 // List the session history of one project directory (realpath-matched).
 export async function listSessions(cwd) {
@@ -85,6 +89,7 @@ export async function listSessions(cwd) {
   if (cache?.root === root && Date.now() - cache.time < cacheMs) {
     return cache.rows.filter((row) => row.cwd === cwd);
   }
+  const scanGeneration = generation;
   const files = await sessionFiles(root, (name) => name.endsWith('.jsonl'));
   const rows = [];
   let next = 0;
@@ -98,12 +103,12 @@ export async function listSessions(cwd) {
     }
   }));
   rows.sort((left, right) => right.modified.localeCompare(left.modified));
-  cache = { root, time: Date.now(), rows };
+  if (scanGeneration === generation) cache = { root, time: Date.now(), rows };
   return rows.filter((row) => row.cwd === cwd).slice(0, maxSessions);
 }
 
 // Resolve one session ID to its file, requiring exactly one match inside the
-// given project — the same "unique candidate" rule the Desktop host applied.
+// given project.
 export async function findSession(cwd, id) {
   if (!idPattern.test(id)) return undefined;
   const root = await realpath(sessionsRoot()).catch((error) => {

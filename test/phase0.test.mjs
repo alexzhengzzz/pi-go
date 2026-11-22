@@ -15,12 +15,12 @@ import { test } from "node:test";
 import { buffer } from "node:stream/consumers";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { localRequest } from "../desktop/local-ipc.mjs";
-import { localLanAddress } from "../desktop/lan-tls.mjs";
-import { startDiscovery } from "../desktop/lan-discovery.mjs";
-import { listFiles, previewFile, saveFile, openWorkspaceDownload, maxTextBytes, maxDownloadBytes } from "../desktop/workspace-files.mjs";
-import { SessionMetadata } from "../desktop/session-metadata.mjs";
-import { validPromptImage, stageAttachment, stagedAttachment, stagingDir, maxFileBytes } from "../desktop/attachments.mjs";
+import { localRequest } from "../host/bridge/local-ipc.mjs";
+import { localLanAddress } from "../host/bridge/lan-tls.mjs";
+import { startDiscovery } from "../host/bridge/lan-discovery.mjs";
+import { listFiles, previewFile, saveFile, openWorkspaceDownload, maxTextBytes, maxDownloadBytes } from "../host/bridge/workspace-files.mjs";
+import { SessionMetadata } from "../host/bridge/session-metadata.mjs";
+import { validPromptImage, stageAttachment, stagedAttachment, stagingDir, maxFileBytes } from "../host/bridge/attachments.mjs";
 
 const project = fileURLToPath(new URL("../", import.meta.url));
 const provider = fileURLToPath(new URL("./offline-provider.ts", import.meta.url));
@@ -153,7 +153,7 @@ test("HTTPS LAN pairing checks identity, Host, ticket and revocation", { skip: !
   const { port } = reservation.address();
   await promisify(reservation.close.bind(reservation))();
   const admin = join(ipc, `bridge-${port}.sock`);
-  const bridge = spawn(process.execPath, [join(project, "desktop/broker.mjs"), String(port), lanHost],
+  const bridge = spawn(process.execPath, [join(project, "host/bridge/broker.mjs"), String(port), lanHost],
     { env: { ...process.env, PIGO_IPC_DIR: ipc }, stdio: "inherit" });
   const exit = once(bridge, "exit");
   context.after(async () => {
@@ -227,7 +227,7 @@ test("UDP discovery returns only a nonce-matched LAN address hint", { skip: !lan
 test("shared bridge /events forwards worker frames, follows selection and ends on revocation", { timeout: 20000 }, async (context) => {
   const ipc = await mkdtemp(join(tmpdir(), "pigo-events-"));
   const workers = [];
-  const spawnWorker = async (id, cwd) => {
+  const spawnWorker = async (id, cwd, stallSession = false) => {
     const clients = new Set();
     const cursor = { sessionId: id, streamId: `stream-${id}`, runId: null, seq: 0 };
     let historyRequested;
@@ -237,6 +237,7 @@ test("shared bridge /events forwards worker frames, follows selection and ends o
     const server = createHttpServer((request, response) => {
       const route = `${request.method} ${(request.url ?? "").split("?")[0]}`;
       if (route === "GET /session") {
+        if (stallSession) return;
         response.writeHead(200, { "Content-Type": "application/json" });
         response.end(JSON.stringify({ session: { id, cwd, idle: true, queued: false } }));
         return;
@@ -287,13 +288,16 @@ test("shared bridge /events forwards worker frames, follows selection and ends o
   };
   const port = 18990;
   const admin = join(ipc, `bridge-${port}.sock`);
-  const bridge = spawn(process.execPath, [join(project, "desktop/broker.mjs"), String(port)],
+  const bridge = spawn(process.execPath, [join(project, "host/bridge/broker.mjs"), String(port)],
     { env: { ...process.env, PIGO_IPC_DIR: ipc }, stdio: "ignore" });
   const exit = once(bridge, "exit");
   context.after(async () => {
     await localRequest(admin, "POST", "/stop").catch(() => bridge.kill());
     await exit;
-    for (const worker of workers) worker.server.close();
+    for (const worker of workers) {
+      worker.server.close();
+      worker.server.closeAllConnections();
+    }
     await rm(ipc, { force: true, recursive: true });
   });
   let issued;
@@ -313,9 +317,9 @@ test("shared bridge /events forwards worker frames, follows selection and ends o
   assert.equal(paired.status, 200);
   const { token } = await paired.json();
   const headers = { authorization: `Bearer ${token}` };
-  const post = (route, data) => fetch(`${url}${route}`, {
+  const post = (route, data, signal = AbortSignal.timeout(4000)) => fetch(`${url}${route}`, {
     method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(data),
-    signal: AbortSignal.timeout(4000),
+    signal,
   });
   const feed = events(await fetch(`${url}/events`, { headers }));
   const ready = await feed.next();
@@ -332,7 +336,13 @@ test("shared bridge /events forwards worker frames, follows selection and ends o
   const oldHistory = fetch(`${url}/history?id=session-alpha`, { headers, signal: AbortSignal.timeout(5000) });
   await alpha.historyWaiting;
   const beta = await spawnWorker("session-beta", join(ipc, "project-b"));
-  assert.equal((await post("/open", { id: "session-beta" })).status, 200);
+  const slow = await spawnWorker("session-slow", join(ipc, "project-slow"), true);
+  const opened = await post("/open", { id: "session-beta", history: true }, AbortSignal.timeout(2000));
+  slow.server.closeAllConnections();
+  await promisify(slow.server.close.bind(slow.server))();
+  assert.equal(opened.status, 200);
+  // This worker supports snapshots but does not bundle history.
+  assert.deepEqual(await opened.json(), { session: { id: beta.id, cwd: beta.cwd, idle: true, queued: false } });
   alpha.releaseHistory();
   assert.equal((await oldHistory).status, 409);
   assert.equal((await sequenced.next()).done, true);
@@ -359,7 +369,7 @@ test("shared bridge /events forwards worker frames, follows selection and ends o
 function start(agentDir, cwd, env = {}, tools = false, skills = false) {
   const child = spawn(pi, ["--offline", "--mode", "rpc", ...(tools ? [] : ["--no-tools"]),
     "--no-mcp", "--no-approve", ...(skills ? [] : ["--no-skills"]), "--no-context-files", "-e", provider,
-    "--provider", "pi-go-test", "--model", "fixture"], { cwd, env: { ...process.env, ...env, PI_CODING_AGENT_DIR: agentDir } });
+    "--provider", "pi-go-test", "--model", "fixture"], { cwd, env: { ...process.env, ...env, PI_CODING_AGENT_DIR: agentDir, PIGO_TEST_COMMANDS: "1" } });
   const exit = once(child, "exit");
   const messages = [];
   let stderr = "";
@@ -428,7 +438,7 @@ async function* events(response) {
   }
 }
 
-test("phase 0 against Pi 1.4.0 RPC, using an offline provider and disposable projects", { timeout: 30000 }, async (context) => {
+test("phase 0 against Pi RPC, using an offline provider and disposable projects", { timeout: 30000 }, async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pi-go-test-"));
   const agent = join(root, "agent");
   const first = join(root, "first");
@@ -449,7 +459,7 @@ test("phase 0 against Pi 1.4.0 RPC, using an offline provider and disposable pro
   });
   const runPi = promisify(execFile);
   const options = { cwd: first, env: { ...process.env, PI_CODING_AGENT_DIR: agent, PI_OFFLINE: "1" } };
-  assert.equal((await runPi(pi, ["--version"], options)).stdout.trim(), "1.4.0");
+  assert.match((await runPi(pi, ["--version"], options)).stdout.trim(), /^\d+\.\d+\.\d+/);
   await runPi(pi, ["install", project], options);
   const persist = async (runtime, message) => {
     const since = runtime.messages.length;

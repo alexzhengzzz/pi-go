@@ -8,7 +8,6 @@ import { fileURLToPath } from "node:url";
 import { SessionManager, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { ipcDirectory, localRequest, workerSocket } from "./local-ipc.mjs";
 import { pairingRuntime } from "./pairing-runtime.mjs";
-import { localLanAddress } from "./lan-tls.mjs";
 import { maxPromptBody, validPromptImage, validPromptImageBuffer, stageAttachment, stagedAttachment, safeAttachmentName,
   promptAttachments, maxImageBytes, maxFileBytes } from "./attachments.mjs";
 import { imageParts, messageText, messageTextSlice, reply, replyImage, toolDetail, toolDetails, toolResultText } from "./message-view.mjs";
@@ -34,6 +33,71 @@ const modelRow = (model: ModelLike) =>
 
 type LiveToolStatus = { id: string; name: string; detail: string; state: "unknown" | "run" | "ok" | "fail"; ms?: number };
 type ToolActivity = { summary: LiveToolStatus; args: unknown; result?: unknown };
+
+function historyPage(manager: ExtensionContext["sessionManager"], liveTools: ReadonlyMap<string, ToolActivity>,
+  before: string | null, limit: number) {
+  const results = new Map<string, "ok" | "fail">();
+  const seenLiveCalls = new Set<string>();
+  const messages = [];
+  let historyCursor: string | undefined;
+  let waitingForCursor = Boolean(before);
+  for (let entry = manager.getLeafEntry(); entry; entry = entry.parentId ? manager.getEntry(entry.parentId) : undefined) {
+    const atCursor = waitingForCursor && entry.id === before;
+    const include = !waitingForCursor || atCursor;
+    if (entry.type !== "message") continue;
+    const { role, content } = entry.message;
+    if (role === "toolResult") {
+      const { toolCallId, isError } = entry.message;
+      if (!results.has(toolCallId)) results.set(toolCallId, isError ? "fail" : "ok");
+      continue;
+    }
+    if (role !== "user" && role !== "assistant") continue;
+    const tools: LiveToolStatus[] = [];
+    const parts = Array.isArray(content) ? content : [];
+    if (role === "assistant") {
+      // A result belongs to the preceding call with that ID. Later calls can own the live status.
+      for (let index = content.length - 1; index >= 0; index -= 1) {
+        const part = content[index];
+        if (part.type !== "toolCall") continue;
+        const state = results.get(part.id);
+        results.delete(part.id);
+        const live = liveTools.get(part.id);
+        if (include) {
+          tools.push(!state && live && !seenLiveCalls.has(part.id) ? live.summary :
+            { id: part.id, name: part.name, detail: toolDetail(part.arguments), state: state ?? "unknown" });
+        }
+        if (live) seenLiveCalls.add(part.id);
+      }
+    }
+    if (!include) continue;
+    const text = messageText(content);
+    const thinking = role === "assistant" ? content.flatMap((part) =>
+      part.type === "thinking" && typeof part.thinking === "string" ? [part.thinking] : []).join("\n") : "";
+    const imageCount = parts.filter((part) => part.type === "image").length;
+    if (!text && !imageCount && !thinking && !tools.length) {
+      if (atCursor) return undefined;
+      continue;
+    }
+    if (atCursor) {
+      waitingForCursor = false;
+      continue;
+    }
+    if (messages.length === limit) {
+      historyCursor = messages[messages.length - 1].id;
+      break;
+    }
+    const durationMs = role === "assistant" ? (entry.message as { durationMs?: number }).durationMs : undefined;
+    messages.push({
+      id: entry.id, role, text: messageTextSlice(text, 0, messagePreviewLength), imageCount,
+      tools: tools.length ? tools.reverse() : undefined,
+      textTruncated: role === "assistant" && text.length > messagePreviewLength ? true : undefined,
+      thinking: thinking ? thinking.slice(0, 16000) : undefined,
+      thinkingMs: thinking ? durationMs : undefined,
+    });
+  }
+  if (waitingForCursor) return undefined;
+  return { messages: messages.reverse(), historyCursor };
+}
 
 async function body(request: IncomingMessage, limit = maxBody) {
   if (request.headers["content-type"] !== "application/json") throw new Error();
@@ -249,6 +313,18 @@ function createProbe() {
       if (snapshotHistory || route === "GET /chat" || route === "GET /history" || route === "GET /tool-detail" || route === "GET /message-image") {
         const parameters = new URL(request.url ?? "/", "http://pi-go").searchParams;
         if (!snapshotHistory && route !== "GET /chat" && parameters.get("id") !== status()?.id) return fail(409, "session_changed");
+        if (snapshotHistory || route === "GET /chat" || route === "GET /history") {
+          const limit = route === "GET /history" ? Math.min(60, Math.max(1, Math.floor(Number(parameters.get("limit")) || 60))) : 60;
+          const history = historyPage(active.ctx.sessionManager, toolLog, parameters.get("before"), limit);
+          if (!history) return fail(409, "history_changed");
+          const page = { session: status(), ...history };
+          if (snapshotHistory) return reply(response, 200, { ...page, ...snapshotData() });
+          if (route === "GET /history" && parameters.get("sync") === "2") {
+            return reply(response, 200, { ...page, historyLeaf: historyLeaf(), cursor: cursor() });
+          }
+          return reply(response, 200, { ...page, liveText, liveSeq, liveThinking, liveThinkSeq,
+            tools: Array.from(toolLog.values(), ({ summary }) => summary), promptError });
+        }
         const branch = active.ctx.sessionManager.getBranch();
         const imageIndex = parameters.get("index");
         const toolId = parameters.get("tool");
@@ -285,51 +361,16 @@ function createProbe() {
             }
           }
         }
-        if (route === "GET /tool-detail" || route === "GET /message-image") {
-          const id = parameters.get("tool") ?? "";
-          const messageId = parameters.get("message");
-          const saved = messageId ? toolsByMessage.get(messageId)?.find(({ summary }) => summary.id === id) : latestById.get(id);
-          const live = !messageId || (saved && latestById.get(id) === saved) ? toolLog.get(id) : undefined;
-          const activity = saved?.result !== undefined ? saved : live ?? saved;
-          if (!activity) return fail(404, "tool_not_found");
-          if (route === "GET /message-image") {
-            return replyImage(response, (activity.result as { content?: unknown })?.content, Number(imageIndex));
-          }
-          return reply(response, 200, { toolDetail: toolDetails(activity, parameters.get("images") === "1") });
+        const id = parameters.get("tool") ?? "";
+        const messageId = parameters.get("message");
+        const saved = messageId ? toolsByMessage.get(messageId)?.find(({ summary }) => summary.id === id) : latestById.get(id);
+        const live = !messageId || (saved && latestById.get(id) === saved) ? toolLog.get(id) : undefined;
+        const activity = saved?.result !== undefined ? saved : live ?? saved;
+        if (!activity) return fail(404, "tool_not_found");
+        if (route === "GET /message-image") {
+          return replyImage(response, (activity.result as { content?: unknown })?.content, Number(imageIndex));
         }
-        const messages = branch.flatMap((entry) => {
-          if (entry.type !== "message") return [];
-          const { role, content } = entry.message;
-          if (role !== "user" && role !== "assistant") return [];
-          const parts = Array.isArray(content) ? content : [];
-          const text = messageText(content);
-          const thinking = role === "assistant" ? parts.flatMap((part) => part.type === "thinking" && typeof part.thinking === "string" ? [part.thinking] : []).join("\n") : "";
-          const durationMs = role === "assistant" ? (entry.message as { durationMs?: number }).durationMs : undefined;
-          const imageCount = parts.filter((part) => part.type === "image").length;
-          const tools = toolsByMessage.get(entry.id)?.map((activity) => {
-            const { summary } = activity;
-            const live = latestById.get(summary.id) === activity ? toolLog.get(summary.id)?.summary : undefined;
-            return summary.state === "unknown" && live ? live : summary;
-          });
-          return text || imageCount || thinking || tools?.length ? [{
-            id: entry.id, role, text: messageTextSlice(text, 0, messagePreviewLength), imageCount, tools,
-            textTruncated: role === "assistant" && text.length > messagePreviewLength ? true : undefined,
-            thinking: thinking ? thinking.slice(0, 16000) : undefined,
-            thinkingMs: thinking ? durationMs : undefined }] : [];
-        });
-        const before = parameters.get("before");
-        const end = before ? messages.findIndex((message) => message.id === before) : messages.length;
-        if (end < 0) return fail(409, "history_changed");
-        const limit = route === "GET /history" ? Math.min(60, Math.max(1, Math.floor(Number(parameters.get("limit")) || 60))) : 60;
-        const start = Math.max(0, end - limit);
-        const page = { session: status(), messages: messages.slice(start, end),
-          historyCursor: start > 0 ? messages[start].id : undefined };
-        if (snapshotHistory) return reply(response, 200, { ...page, ...snapshotData() });
-        if (route === "GET /history" && parameters.get("sync") === "2") {
-          return reply(response, 200, { ...page, historyLeaf: historyLeaf(), cursor: cursor() });
-        }
-        return reply(response, 200, { ...page, liveText, liveSeq, liveThinking, liveThinkSeq,
-          tools: Array.from(toolLog.values(), ({ summary }) => summary), promptError });
+        return reply(response, 200, { toolDetail: toolDetails(activity, parameters.get("images") === "1") });
       }
       const catalog = async () => {
         let folder: string;
@@ -668,18 +709,27 @@ export default function (pi: ExtensionAPI) {
     processState[key]?.stop();
     delete processState[key];
   };
+  const share = async (ctx: ExtensionContext) => {
+    const probe = processState[key] ?? createProbe();
+    processState[key] = probe;
+    probe.bind(pi, ctx);
+    await probe.share(ctx);
+  };
+  // Installed daemons still use this exact RPC message to attach their new sessions.
+  // Handle it without adding a slash command to Pi's menus.
+  pi.on("input", async (event, ctx) => {
+    if (event.source !== "rpc" || event.text !== "/pi-go-share desktop-host" || event.images?.length) return;
+    try { await share(ctx); }
+    catch { ctx.ui.notify("Pi Go could not share this session", "error"); }
+    return { action: "handled" };
+  });
   let closePairingUI: (() => void) | undefined;
   pi.on("session_start", (_event, ctx) => {
     processState[key]?.bind(pi, ctx);
     closePairingUI?.();
     closePairingUI = pairingRuntime(() => ({ id: ctx.sessionManager.getSessionId(), cwd: ctx.cwd,
       name: ctx.sessionManager.getSessionName(), model: ctx.model && modelRow(ctx.model),
-      shared: processState[key]?.isShared() === true }), async () => {
-      const probe = processState[key] ?? createProbe();
-      processState[key] = probe;
-      probe.bind(pi, ctx);
-      await probe.share(ctx);
-    }, stop);
+      shared: processState[key]?.isShared() === true }), () => share(ctx), stop);
   });
   pi.on("session_shutdown", (event) => {
     closePairingUI?.();
@@ -705,6 +755,8 @@ export default function (pi: ExtensionAPI) {
   });
   pi.on("model_select", () => processState[key]?.changed());
   pi.on("thinking_level_select", () => processState[key]?.changed());
+  if (process.env.PIGO_TEST_COMMANDS !== "1") return;
+
   pi.registerCommand("pi-go", {
     description: "Enable the local Pi Go phase-0 probe (disposable sessions only)",
     handler: async (args, ctx) => {
@@ -725,12 +777,6 @@ export default function (pi: ExtensionAPI) {
     description: "Close the local probe and revoke its credential",
     handler: async (_args, ctx) => { stop(); ctx.ui.notify("Pi Go probe stopped", "info"); },
   });
-  const share = async (ctx: ExtensionCommandContext) => {
-    const probe = processState[key] ?? createProbe();
-    processState[key] = probe;
-    probe.bind(pi, ctx);
-    await probe.share(ctx);
-  };
   pi.registerCommand("pi-go-share", {
     description: "Share this native session with the local Pi Go bridge",
     handler: async (_args, ctx) => {
@@ -738,22 +784,20 @@ export default function (pi: ExtensionAPI) {
       catch { ctx.ui.notify("Pi Go could not share this session", "error"); }
     },
   });
-  for (const action of ["grant", "revoke-project"] as const) {
-    pi.registerCommand(action === "grant" ? "pi-go-project" : "pi-go-project-stop", {
-      description: action === "grant" ? "Allow Pi Go to reopen this project even with no shared tabs" : "Remove Pi Go access to this project when no tabs are shared",
-      handler: async (args, ctx) => {
-        const port = args.trim() ? Number(args.trim()) : 18977;
-        if (!Number.isInteger(port) || port < 1024 || port > 65535) return ctx.ui.notify("Pi Go port must be 1024–65535", "warning");
-        try {
-          const result = await localRequest(join(ipcDirectory(), `bridge-${port}.sock`), "POST", `/${action}`, { cwd: ctx.cwd });
-          if (result.status !== 200) throw new Error(result.data.error);
-          ctx.ui.notify(action === "grant" ? "Pi Go project reopening enabled" : "Pi Go project reopening revoked", "info");
-        } catch {
-          ctx.ui.notify("Pi Go project authorization failed; check the bridge and Desktop workspace trust", "error");
-        }
-      },
-    });
-  }
+  pi.registerCommand("pi-go-project", {
+    description: "Allow Pi Go to reopen this project without a shared session",
+    handler: async (args, ctx) => {
+      const port = args.trim() ? Number(args.trim()) : 18977;
+      if (!Number.isInteger(port) || port < 1024 || port > 65535) return ctx.ui.notify("Pi Go port must be 1024–65535", "warning");
+      try {
+        const result = await localRequest(join(ipcDirectory(), `bridge-${port}.sock`), "POST", "/grant", { cwd: ctx.cwd });
+        if (result.status !== 200) throw new Error(result.data.error);
+        ctx.ui.notify("Pi Go project reopening enabled", "info");
+      } catch {
+        ctx.ui.notify("Pi Go project authorization failed; check that the bridge and Pi Go daemon are running", "error");
+      }
+    },
+  });
   pi.registerCommand("pi-go-bridge", {
     description: "Share this session and start or pair the shared Pi Go bridge",
     handler: async (args, ctx) => {
@@ -779,60 +823,6 @@ export default function (pi: ExtensionAPI) {
         if (result?.status !== 200 || typeof result.data.file !== "string") throw new Error("bridge_unavailable");
         ctx.ui.notify(`Pi Go ticket file: ${result.data.file}`, "info");
       } catch { ctx.ui.notify("Pi Go could not start or pair the shared bridge", "error"); }
-    },
-  });
-  pi.registerCommand("pi-go-lan", {
-    description: "Share this session through HTTPS on an explicit private LAN address",
-    handler: async (args, ctx) => {
-      const [host, value = "18981", ...extra] = args.trim().split(/\s+/);
-      const port = Number(value);
-      if (extra.length || !localLanAddress(host) || !Number.isInteger(port) || port < 1024 || port > 65535) {
-        return ctx.ui.notify("Usage: /pi-go-lan <this Mac's private IPv4> [port]", "warning");
-      }
-      try {
-        await share(ctx);
-        const admin = join(ipcDirectory(), `bridge-${port}.sock`);
-        const requestTicket = () => localRequest(admin, "POST", "/ticket-lan", { host });
-        let result;
-        try { result = await requestTicket(); }
-        catch (error) {
-          if (!["ENOENT", "ECONNREFUSED"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
-          const file = fileURLToPath(new URL("./broker.mjs", import.meta.url));
-          const child = spawn(process.execPath, [file, String(port), host], { detached: true, stdio: "ignore" });
-          child.on("error", () => {});
-          child.unref();
-          for (let attempt = 0; attempt < 40 && !result; attempt += 1) {
-            await new Promise((resolve) => setTimeout(resolve, 100));
-            try { result = await requestTicket(); }
-            catch (cause) { if (!["ENOENT", "ECONNREFUSED"].includes((cause as NodeJS.ErrnoException).code ?? "")) throw cause; }
-          }
-        }
-        if (result?.status !== 200 || typeof result.data.file !== "string") throw new Error("bridge_unavailable");
-        ctx.ui.notify(`Pi Go ticket file: ${result.data.file}`, "info");
-      } catch { ctx.ui.notify("Pi Go could not start or pair the HTTPS LAN bridge", "error"); }
-    },
-  });
-  pi.registerCommand("pi-go-revoke-device", {
-    description: "Revoke the paired device and any unused pairing ticket without stopping the bridge",
-    handler: async (args, ctx) => {
-      const port = args.trim() ? Number(args.trim()) : 18977;
-      if (!Number.isInteger(port) || port < 1024 || port > 65535) return;
-      try {
-        const result = await localRequest(join(ipcDirectory(), `bridge-${port}.sock`), "POST", "/revoke-device");
-        if (result.status !== 200) throw new Error("revoke_failed");
-        ctx.ui.notify("Pi Go device revoked", "info");
-      } catch { ctx.ui.notify("Pi Go bridge is not running", "warning"); }
-    },
-  });
-  pi.registerCommand("pi-go-bridge-stop", {
-    description: "Stop the shared bridge and keep the paired device for restart",
-    handler: async (args, ctx) => {
-      const port = args.trim() ? Number(args.trim()) : 18977;
-      if (!Number.isInteger(port) || port < 1024 || port > 65535) return;
-      try {
-        const result = await localRequest(join(ipcDirectory(), `bridge-${port}.sock`), "POST", "/stop");
-        if (result.status === 200) ctx.ui.notify("Pi Go shared bridge stopped", "info");
-      } catch { ctx.ui.notify("Pi Go shared bridge is not running", "warning"); }
     },
   });
   pi.registerCommand("pi-go-check-ui", {

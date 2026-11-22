@@ -6,7 +6,7 @@ import { homedir } from 'node:os';
 import { request } from 'node:https';
 import { join } from 'node:path';
 import { setTimeout as pause } from 'node:timers/promises';
-import { ipcDirectory, localRequest } from '../desktop/local-ipc.mjs';
+import { ipcDirectory, localRequest } from '../bridge/local-ipc.mjs';
 
 const port = Number(process.env.PIGO_LIVE_PORT);
 assert.ok(Number.isInteger(port) && port >= 1024 && port <= 65535,

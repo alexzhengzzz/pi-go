@@ -24,6 +24,7 @@ import { HISTORY_IMAGE_EXTENSIONS, isImageFile, markdownWorkspacePath, messageFi
 import { decodePairingBundle, validSecureAddress, validUsb } from '../PairingCode';
 import { SequencedFrame, SessionSync, SyncCursor } from '../SessionSync';
 import { connectionLabel, validCompanion } from '../CompanionCheck';
+import { liveActivity } from '../LiveActivity';
 
 interface ModelOption {
   provider: string;
@@ -232,6 +233,11 @@ interface RunNotice {
   stopped: boolean;
 }
 
+interface WorkspaceRow {
+  cwd: string;
+  name: string;
+}
+
 interface BridgeReply {
   cursor?: SyncCursor;
   historyLeaf?: string | null;
@@ -249,10 +255,12 @@ interface BridgeReply {
   dispatched?: boolean;
   interaction?: PendingInteraction;
   state?: string;
-  desktopHandoff?: boolean;
+  deletedSessionId?: string;
+  desktopHandoff?: boolean; // Bridge field for daemon availability.
   canCreateWorkspace?: boolean;
   cwd?: string;
   projects?: string[];
+  workspaces?: WorkspaceRow[];
   token?: string;
   error?: string;
   session?: SessionState;
@@ -278,6 +286,7 @@ interface HistoryImage {
 }
 
 interface Payload {
+  history?: boolean;
   path?: string;
   lookup?: string;
   cursor?: number;
@@ -335,6 +344,8 @@ const SPLIT_WINDOW_WIDTH = 600;
 const SHORT_WINDOW_HEIGHT = 480;
 const MAX_DOWNLOAD_ERROR_BYTES = 4096;
 const MAX_TEXT_PREVIEW_BYTES = 128 * 1024;
+const RUN_NOTICE_SETTING = 'run_completion_notices';
+const LIVE_VIEW_SETTING = 'agent_live_view';
 
 class BridgeFailure extends Error {
   status: number;
@@ -364,6 +375,8 @@ struct Index {
   @StorageProp('pigoDark') private darkMode: boolean = false;
   @StorageLink('pigoAddress') address: string = 'http://127.0.0.1:18977';
   @StorageLink('pigoTicket') @Watch('onLaunchTicket') launchTicket: string = '';
+  @StorageLink('pigoLiveSession') @Watch('onLiveActivityLaunch') private liveLaunchSession: string = '';
+  @StorageLink('pigoLiveAddress') private liveLaunchAddress: string = '';
   private restoreChain: Promise<void> = Promise.resolve();
   @StorageLink('pigoStatusBar') statusBarHeight: number = 38;
   @StorageLink('pigoNavBar') navBarHeight: number = 28;
@@ -486,6 +499,9 @@ struct Index {
   @State private addingComputer: boolean = false;
   @State private themeId: string = 'mint';
   @State private modeId: string = 'system';
+  @State private runNoticesEnabled: boolean = true;
+  @State private liveViewsEnabled: boolean = true;
+  @State private liveViewStatus: string = '';
   @State private appearanceNotice: string = '';
   @State private huaweiProfile?: HuaweiProfile = undefined;
   @State private avatarUnavailable: boolean = false;
@@ -509,7 +525,7 @@ struct Index {
   @State private interaction?: PendingInteraction = undefined;
   @State private interactionDraft: string = '';
   @State private pendingSend?: PendingSend = undefined;
-  @State private desktopHandoff: boolean = false;
+  @State private hostAvailable: boolean = false;
   @State private canCreateWorkspace: boolean = false;
   @State private showNewSpace: boolean = false;
   @State private newSpaceName: string = '';
@@ -532,6 +548,8 @@ struct Index {
   private recordTimer: number = -1;
   private voiceSession?: VoiceInputSession = undefined;
   @State @Watch('updateSidebarRows') private projects: string[] = [];
+  @State @Watch('updateSidebarRows') private workspaces: WorkspaceRow[] = [];
+  @State @Watch('updateSidebarRows') private hasWorkspaceDetails: boolean = false;
   private base: string = '';
   private token: string = '';
   private ca?: string;
@@ -592,6 +610,12 @@ struct Index {
 
   aboutToAppear(): void {
     this.getUIContext().setKeyboardAvoidMode(KeyboardAvoidMode.RESIZE);
+    const context = this.getUIContext().getHostContext();
+    if (context) {
+      liveActivity.attach(context as common.UIAbilityContext, (status: string): void => {
+        this.liveViewStatus = status;
+      });
+    }
     this.restoreSettings();
     this.restoreChain = this.restore();
     void this.restoreChain.then(() => {
@@ -603,13 +627,21 @@ struct Index {
     this.visible = true;
     this.schedule(0);
     this.startStream();
+    this.syncLiveActivity();
+    void this.consumeLiveActivityLaunch();
     void this.checkHuaweiProfile().then(() => { this.scheduleCloudSync(0); });
   }
   onPageHide(): void {
     this.visible = false;
     this.clearRunNotices();
-    this.cancelSchedule();
-    this.stopStream();
+    if (this.backgroundLiveActivity()) {
+      // Best effort only: HarmonyOS may still freeze the process without a continuous-task grant.
+      this.schedule(0);
+      this.startStream();
+    } else {
+      this.cancelSchedule();
+      this.stopStream();
+    }
     this.resetVoice();
     this.flushSidebarSave();
   }
@@ -619,6 +651,7 @@ struct Index {
     this.clearRunNotices();
     this.cancelSchedule();
     this.stopStream();
+    liveActivity.sync(undefined);
     this.stopRecordClock();
     this.resetVoice();
     this.flushSidebarSave();
@@ -673,6 +706,50 @@ struct Index {
     this.launchTicket = '';
   }
 
+  private onLiveActivityLaunch(): void { void this.consumeLiveActivityLaunch(); }
+
+  private async consumeLiveActivityLaunch(): Promise<void> {
+    const id = this.liveLaunchSession;
+    if (!id) return;
+    if (!/^[a-zA-Z0-9._-]{1,200}$/.test(id)) {
+      this.liveLaunchSession = '';
+      this.liveLaunchAddress = '';
+      return;
+    }
+    await this.restoreChain;
+    for (let attempt = 0; attempt < 40; attempt++) {
+      if (this.liveLaunchSession !== id) return;
+      if (this.visible && !this.loading && !this.busy && !this.openingSession) {
+        const address = this.liveLaunchAddress;
+        if (address && address !== this.base) {
+          const target = this.computers.find((record: Companion): boolean =>
+            validCompanion(record) && record.address === address);
+          if (!target) {
+            this.liveLaunchSession = '';
+            this.liveLaunchAddress = '';
+            this.status = '实况窗对应的电脑未配对，请重新连接。';
+            return;
+          }
+          this.leaveComputer(false, target);
+        }
+        if (!this.isPaired) return;
+        this.liveLaunchSession = '';
+        this.liveLaunchAddress = '';
+        this.activeTab = 'tasks';
+        this.showFiles = false;
+        this.showSettings = false;
+        this.showSessions = false;
+        if (id !== this.currentId) await this.requestAction('/open', { id: id });
+        else {
+          this.schedule(0);
+          this.syncLiveActivity();
+        }
+        return;
+      }
+      await new Promise<void>((resolve: () => void) => { setTimeout(resolve, 300); });
+    }
+  }
+
   private activateComputer(record: Companion): void {
     const usb = validUsb(record.address);
     this.epoch += 1;
@@ -720,7 +797,7 @@ struct Index {
 
   private schedule(delay: number): void {
     this.cancelSchedule();
-    if (!this.isPaired || !this.visible) return;
+    if (!this.isPaired || (!this.visible && !this.backgroundLiveActivity())) return;
     this.timer = setTimeout(() => { void this.poll(); }, delay);
   }
 
@@ -775,7 +852,7 @@ struct Index {
   private scheduleStream(delay: number): void {
     if (this.streamTimer !== -1) clearTimeout(this.streamTimer);
     this.streamTimer = -1;
-    if (!this.isPaired || !this.visible || !this.base || !this.token) return;
+    if (!this.isPaired || (!this.visible && !this.backgroundLiveActivity()) || !this.base || !this.token) return;
     this.streamTimer = setTimeout(() => { this.startStream(); }, delay);
   }
 
@@ -795,7 +872,7 @@ struct Index {
   }
 
   private startStream(): void {
-    if (!this.isPaired || !this.visible || !this.base || !this.token || this.streamReq ||
+    if (!this.isPaired || (!this.visible && !this.backgroundLiveActivity()) || !this.base || !this.token || this.streamReq ||
         this.syncMode === 'probe' || (this.syncMode === 'sequenced' && this.openingSession)) return;
     const gen = ++this.streamGen;
     const req = http.createHttp();
@@ -932,6 +1009,7 @@ struct Index {
       // steering 排队状态即时回传：不重置流式内容，只更新 runId 与 queued。
       if (eventRun) this.runId = eventRun;
       if (frame.queued !== undefined) this.queued = frame.queued;
+      this.syncLiveActivity();
       return;
     }
     if (frame.type === 'session/status') {
@@ -963,6 +1041,7 @@ struct Index {
         this.liveTools = [];
         this.liveSeq = 0;
       }
+      this.syncLiveActivity();
       return;
     }
     if (frame.type === 'message/final') {
@@ -978,12 +1057,12 @@ struct Index {
         this.liveThinkSeq = frame.thinkingSeq ?? 0;
         this.liveThinkingOpen = false;
       }
-      if (frame.reason === 'error') this.status = 'Pi 模型运行失败，请查看桌面中的错误详情。';
+      if (frame.reason === 'error') this.status = 'Pi 模型运行失败，请在电脑上查看当前会话或 Pi Go 日志。';
       this.schedule(200);
       return;
     }
     if (frame.type === 'prompt/unconfirmed') {
-      this.status = 'Pi 未确认这次发送。请查看桌面；不会自动重发。';
+      this.status = 'Pi 未确认这次发送。请在电脑上核对会话，应用不会自动重发。';
       return;
     }
     if (frame.type === 'session/changed') {
@@ -1007,7 +1086,7 @@ struct Index {
         ca = bundle.ca;
         pin = bundle.pin;
       } catch {
-        this.status = this.pairingMode === 'remote' ? '请导入桌面生成的公网配对包。' : '请导入桌面生成的局域网配对包。';
+        this.status = this.pairingMode === 'remote' ? '请导入 Pi Go.app 生成的公网配对包。' : '请导入 Pi Go.app 生成的局域网配对包。';
         return;
       }
     } else if (!validUsb(base) || !/^(\d{8}|[a-f0-9]{64})$/.test(ticket)) {
@@ -1037,7 +1116,7 @@ struct Index {
       }
     } catch (error) {
       this.status = error instanceof BridgeFailure && error.status === 401 ? '票据已经失效，请在电脑上重新生成。' :
-        this.pairingMode !== 'usb' ? '无法建立安全连接。请检查网络、桌面服务与配对包。' : '无法连接电脑，请确认 USB 转发和 Pi Go 桥接服务。';
+        this.pairingMode !== 'usb' ? '无法建立安全连接。请检查网络、Pi Go 服务和配对包。' : '无法连接电脑，请确认 USB 转发和 Pi Go 桥接服务。';
     } finally { this.busy = false; }
   }
 
@@ -1064,8 +1143,8 @@ struct Index {
       this.pairingBundle = result.originalValue;
       this.status = `已导入 ${bundle.url}。确认是自己的电脑后，点「配对并连接」。`;
     } catch {
-      this.status = this.pairingMode === 'remote' ? '未导入公网配对包，请扫描桌面「公网」二维码。' :
-        '未导入局域网配对包，请扫描桌面「局域网」二维码。';
+      this.status = this.pairingMode === 'remote' ? '未导入公网配对包，请扫描 Pi Go.app「公网」二维码。' :
+        '未导入局域网配对包，请扫描 Pi Go.app「局域网扫码」二维码。';
     }
     finally { this.busy = false; }
   }
@@ -1136,12 +1215,14 @@ struct Index {
     this.modelLabel = '';
     this.setInteraction();
     this.pendingSend = undefined;
-    this.desktopHandoff = false;
+    this.hostAvailable = false;
     this.canCreateWorkspace = false;
     this.showNewSpace = false;
     this.newSpaceName = '';
     this.newSpaceError = '';
     this.projects = [];
+    this.workspaces = [];
+    this.hasWorkspaceDetails = false;
     this.isPaired = false;
     this.runId = '';
     this.queued = false;
@@ -1162,6 +1243,7 @@ struct Index {
     this.status = revoked ? '该电脑的配对已撤销，请重新连接。' : '';
     this.flushSidebarSave();
     if (next) this.activateComputer(next);
+    this.syncLiveActivity();
     void this.persistComputers().catch(() => { this.status = '无法保存电脑列表的本次更改。'; });
   }
 
@@ -1249,6 +1331,7 @@ struct Index {
     this.runId = session.runId ?? '';
     this.queued = session.queued ?? false;
     this.acceptsImage = session.acceptsImage ?? false;
+    this.syncLiveActivity();
   }
 
   private async poll(): Promise<void> {
@@ -1273,7 +1356,7 @@ struct Index {
         void this.loadSessionStatus();
       } else if (this.backgroundActive() || Date.now() - this.sessionStatusAt >= 5000) {
         // Keep every running task visible on the chat header even with the drawer closed;
-        // slow probing detects tasks started from the desktop side.
+        // slow probing detects tasks started on the computer.
         this.sessionStatusAt = Date.now();
         void this.loadSessionStatus();
       }
@@ -1285,7 +1368,16 @@ struct Index {
         }
         this.flushStreamDeltas(false);
         this.closeToolDetails();
-        this.noSession = result.state === 'session_closed' ? '原会话已关闭，请在会话列表选择历史记录或其他会话。' :
+        if (result.state === 'session_deleted' && result.deletedSessionId) {
+          this.sessions = this.sessions.filter((row: SessionRow): boolean => row.id !== result.deletedSessionId);
+          this.chatCache.delete(this.draftKey(result.deletedSessionId));
+          if (this.currentId === result.deletedSessionId) {
+            this.showSessions = !this.dockedSessions();
+            void this.loadSessions();
+          }
+        }
+        this.noSession = result.state === 'session_deleted' ? '会话已在电脑端删除。' :
+          result.state === 'session_closed' ? '原会话已关闭，请在会话列表选择历史记录或其他会话。' :
           result.state === 'no_shared_sessions' ? '电脑已连接，请在任务列表选择一条对话。' : '请在任务列表选择一个会话。';
         if (this.currentId) {
           this.rememberDraft(this.currentId);
@@ -1355,8 +1447,8 @@ struct Index {
       }
       this.setInteraction(result.interaction);
       this.reachable = true;
-      if (result.promptError === 'unconfirmed') this.status = 'Pi 未确认这次发送。请查看桌面；不会自动重发。';
-      else if (result.promptError === 'model_error') this.status = 'Pi 模型运行失败，请查看桌面中的错误详情。';
+      if (result.promptError === 'unconfirmed') this.status = 'Pi 未确认这次发送。请在电脑上核对会话，应用不会自动重发。';
+      else if (result.promptError === 'model_error') this.status = 'Pi 模型运行失败，请在电脑上查看当前会话或 Pi Go 日志。';
       this.cacheChat(result.session);
     } catch (error) {
       if (epoch !== this.epoch) return;
@@ -1369,6 +1461,7 @@ struct Index {
     } finally {
       this.polling = false;
       if (epoch === this.epoch) {
+        this.syncLiveActivity();
         const delay = !this.reachable ? 1500 :
           this.syncMode === 'sequenced' && this.sessionSync.needsSnapshot() ? 150 :
           this.streamAlive ? (this.idle ? 3000 : 1200) :
@@ -1413,8 +1506,8 @@ struct Index {
         const live = this.liveTools.find((tool: LiveTool): boolean => tool.id === selectedId);
         if (live) this.refreshSelectedTool(live);
       }
-      if (snapshot.promptError === 'unconfirmed') this.status = 'Pi 未确认这次发送。请查看桌面；不会自动重发。';
-      else if (snapshot.promptError === 'model_error') this.status = 'Pi 模型运行失败，请查看桌面中的错误详情。';
+      if (snapshot.promptError === 'unconfirmed') this.status = 'Pi 未确认这次发送。请在电脑上核对会话，应用不会自动重发。';
+      else if (snapshot.promptError === 'model_error') this.status = 'Pi 模型运行失败，请在电脑上查看当前会话或 Pi Go 日志。';
     }, (frame: StreamFrame): void => this.applyStreamFrame(frame));
     if (applied) this.cacheChat(session);
     return applied;
@@ -1592,7 +1685,7 @@ struct Index {
       return;
     }
     const previousTitle = this.observedRuns.get(id);
-    if (!this.observedRuns.delete(id) || !this.visible) return;
+    if (!this.observedRuns.delete(id) || !this.visible || !this.runNoticesEnabled) return;
     this.pendingRunNotices.push({ title: title || previousTitle || '任务', stopped: stopped });
     if (!this.runNotice) this.advanceRunNotice();
   }
@@ -1607,6 +1700,29 @@ struct Index {
   private clearRunNotices(): void {
     this.pendingRunNotices = [];
     this.advanceRunNotice();
+  }
+
+  private backgroundLiveActivity(): boolean {
+    return this.liveViewsEnabled && this.isPaired && !!this.currentId && (!this.idle || this.queued);
+  }
+
+  private syncLiveActivity(): void {
+    if (this.backgroundLiveActivity()) {
+      const listed = this.sessions.find((session: SessionRow): boolean => session.id === this.currentId);
+      const state = !this.reachable ? '重新连接中' : this.interaction ? '等待处理' : this.queued ? '排队中' : '运行中';
+      liveActivity.sync({
+        sessionId: this.currentId,
+        address: this.base,
+        title: this.sessionName || listed?.name || this.project || 'Agent 任务',
+        project: this.project,
+        state: state,
+        foreground: this.visible
+      });
+    } else liveActivity.sync(undefined);
+    if (!this.visible && !this.backgroundLiveActivity()) {
+      this.cancelSchedule();
+      this.stopStream();
+    }
   }
 
   private backgroundActive(): boolean {
@@ -1698,7 +1814,9 @@ struct Index {
           this.sessions = sessions.slice();
           this.loadedView = view;
           this.projects = result.projects ?? [];
-          this.desktopHandoff = result.desktopHandoff ?? false;
+          this.workspaces = result.workspaces ?? [];
+          this.hasWorkspaceDetails = result.workspaces !== undefined;
+          this.hostAvailable = result.desktopHandoff ?? false;
           this.canCreateWorkspace = result.canCreateWorkspace ?? false;
           this.sessionCatalogLoaded = true;
         }
@@ -1708,9 +1826,11 @@ struct Index {
       this.sessionCatalogUpdatedAt = Date.now();
       this.sessions = sessions;
       this.loadedView = view;
-      this.desktopHandoff = result.desktopHandoff ?? false;
+      this.hostAvailable = result.desktopHandoff ?? false;
       this.canCreateWorkspace = result.canCreateWorkspace ?? false;
       this.projects = result.projects ?? [];
+      this.workspaces = result.workspaces ?? [];
+      this.hasWorkspaceDetails = result.workspaces !== undefined;
     } catch (error) {
       if (epoch !== this.epoch || version !== this.sessionCatalogVersion) return;
       if (error instanceof BridgeFailure && error.status === 401) this.leaveComputer(true);
@@ -1893,7 +2013,7 @@ struct Index {
 
   private downloadFailure(error: Error): void {
     if (error instanceof BridgeFailure && error.status === 401) { this.leaveComputer(true); return; }
-    this.status = error.message === 'not_found' ? '当前桌面桥缺少文件下载接口。请更新桌面桥并重新连接。' :
+    this.status = error.message === 'not_found' ? '当前 Pi Go 服务缺少文件下载接口。请更新电脑端 Pi Go 后重新连接。' :
       error.message === 'file_not_found' ? '当前工作区找不到该文件。请检查卡片里的路径。' :
       error.message === 'ambiguous_file_name' ? '工作区有多个同名文件，请使用完整的相对路径。' :
       error.message === 'file_lookup_limit' ? '工作区过大，无法按文件名查找。请使用完整的相对路径。' :
@@ -2463,9 +2583,9 @@ struct Index {
 
   private createSpaceTask(path: string): void {
     if (!this.projects.includes(path)) return;
-    if (!this.reachable || !this.desktopHandoff) {
+    if (!this.reachable || !this.hostAvailable) {
       this.getUIContext().getPromptAction().showToast({
-        message: this.reachable ? '此电脑未启用 Pi Go 集成，无法新建任务。' : '请先连接电脑再新建任务。'
+        message: this.reachable ? '无法新建任务，请在电脑上启动 Pi Go 后台服务。' : '请先连接电脑再新建任务。'
       });
       return;
     }
@@ -2473,9 +2593,14 @@ struct Index {
     void this.requestAction('/new', { cwd: path });
   }
 
+  private workspaceName(path: string): string {
+    return this.workspaces?.find((row: WorkspaceRow): boolean => row.cwd === path)?.name ||
+      path.split('/').pop() || path;
+  }
+
   private newTaskOptions(): MenuElement[] {
     const options = this.projects.map((path: string): MenuElement => ({
-      value: path.split('/').pop() || path,
+      value: this.workspaceName(path),
       action: () => { this.createSpaceTask(path); }
     }));
     if (this.canCreateWorkspace) {
@@ -2555,7 +2680,7 @@ struct Index {
 
   private confirmCloseSpace(path: string, epoch: number): void {
     if (epoch !== this.epoch || !this.projects.includes(path)) return;
-    const name = path.split('/').pop() || path;
+    const name = this.workspaceName(path);
     const prompt = this.getUIContext().getPromptAction();
     if (!this.isPaired || !this.reachable) { prompt.showToast({ message: '请先连接电脑再移除空间。' }); return; }
     if (this.busy || this.openingSession) { prompt.showToast({ message: '请等待当前操作结束后再移除空间。' }); return; }
@@ -2584,11 +2709,13 @@ struct Index {
       if (epoch === this.epoch && this.status) this.getUIContext().getPromptAction().showToast({ message: this.status });
       return;
     }
-    // 本地立即镜像桌面端的移除，避免等待下一次网络刷新才消失。
+    const name = this.workspaceName(path);
+    // 移除成功后立刻更新本地列表。
     this.projects = this.projects.filter((item: string): boolean => item !== path);
     this.expandedSpaces = this.expandedSpaces.filter((item: string): boolean => item !== path);
+    this.workspaces = this.workspaces?.filter((row: WorkspaceRow): boolean => row.cwd !== path) ?? [];
     this.scheduleSidebarSave();
-    this.getUIContext().getPromptAction().showToast({ message: `已移除空间「${path.split('/').pop() || path}」` });
+    this.getUIContext().getPromptAction().showToast({ message: `已移除空间「${name}」` });
     if (this.workspaceCwd === path) {
       // 当前会话所在的电脑端工作区已关闭，回到任务列表等桥接状态刷新。
       this.showSessions = !this.dockedSessions();
@@ -2619,7 +2746,9 @@ struct Index {
     } else this.busy = true;
     this.status = '';
     try {
-      const result = await this.request(path, input);
+      const payload: Payload | undefined = path === '/open' && this.syncMode !== 'legacy'
+        ? { id: input?.id, history: true } : input;
+      const result = await this.request(path, payload);
       if (epoch !== this.epoch) return false;
       if (path === '/new' || path === '/rename' || path === '/session-meta' || path === '/close-workspace') {
         this.sessionCatalogLoaded = false;
@@ -2646,7 +2775,12 @@ struct Index {
         navigationConfirmed = true;
         // A cached transcript is already visible; refresh it after confirming the remote selection.
         const liveRevision = this.liveRevision;
-        const chat = await this.requestSessionSnapshot(epoch, true);
+        let chat = result;
+        if (!chat.cursor || chat.messages === undefined) {
+          chat = await this.requestSessionSnapshot(epoch, true);
+        } else if (this.syncMode === 'probe') {
+          this.syncMode = 'sequenced';
+        }
         if (epoch !== this.epoch) return false;
         if (chat.session?.id !== result.session.id || chat.session.cwd !== result.session.cwd) throw new Error('session_changed');
         if (chat.cursor) {
@@ -2678,12 +2812,11 @@ struct Index {
       else if (error instanceof BridgeFailure && error.message === 'desktop_handoff_required') this.status = '电脑端 Pi Go 宿主未运行。启动宿主后重试，或在电脑上打开并共享该会话。';
       else if (error instanceof BridgeFailure && error.message === 'desktop_workspace_unshared') this.status = '该工作区尚未共享给手机。';
       else if (error instanceof BridgeFailure && error.message === 'desktop_workspace_not_registered') this.status = '该工作区未在电脑端 Pi Go 的工作区列表中登记。';
-      else if (error instanceof BridgeFailure && error.message === 'desktop_workspace_kind_unsupported') this.status = '该工作区是桌面管理的临时检出，请在电脑上关闭。';
       else if (error instanceof BridgeFailure && error.message === 'desktop_close_failed') this.status = '电脑端关闭工作区失败，请稍后重试。';
       else if (error instanceof BridgeFailure && error.message === 'desktop_workspace_untrusted') this.status = '该工作区未在电脑端 Pi Go 中登记或授权。';
       else if (error instanceof BridgeFailure && error.message === 'desktop_handoff_unconfirmed' && path === '/close-workspace') this.status = '电脑端尚未确认，请刷新列表查看工作区是否已移除。';
       else if (error instanceof BridgeFailure && error.message === 'desktop_handoff_unconfirmed') this.status = '电脑端尚未确认操作，请刷新会话列表查看结果。';
-      else if (error instanceof BridgeFailure && error.message === 'session_occupied') this.status = '同一历史会话出现在多个桌面运行时，请关闭重复标签。';
+      else if (error instanceof BridgeFailure && error.message === 'session_occupied') this.status = '同一会话由多个 Pi 进程打开。请在电脑上关闭重复会话后重试。';
       else if (error instanceof BridgeFailure && error.message === 'interaction_unavailable') {
         this.setInteraction();
         this.status = '此请求已处理或已失效。';
@@ -2692,7 +2825,7 @@ struct Index {
       else if (error instanceof BridgeFailure && error.message === 'metadata_conflict') this.status = '会话标记已变化，请重新搜索后再操作。';
       else if (error instanceof BridgeFailure && error.message === 'model_not_found') this.status = '模型已不可用，请重新打开设置。';
       else if (error instanceof BridgeFailure && error.message === 'session_busy') this.status = '等待当前任务和队列结束后，再应用模型设置。';
-      else if (error instanceof BridgeFailure && error.message === 'model_not_applied') this.status = '桌面未应用所选模型，请检查该模型的登录状态或 API 配置。';
+      else if (error instanceof BridgeFailure && error.message === 'model_not_applied') this.status = 'Pi 未应用所选模型，请在电脑上检查模型的登录状态或 API 配置。';
       else if (error instanceof BridgeFailure && error.message === 'invalid_name') this.status = '名称须为 1–200 字且不含换行。';
       else if (error instanceof BridgeFailure && error.status === 409) this.status = 'Pi 正在处理任务或会话已变化，请刷新后再试。';
       else this.status = '电脑端尚未确认操作，请刷新查看结果。';
@@ -2717,6 +2850,7 @@ struct Index {
     if (request?.id === this.interaction?.id) return;
     this.interactionDraft = request?.prefill ?? '';
     this.interaction = request;
+    this.syncLiveActivity();
   }
 
   private async answerInteraction(pendingId: string, answer: boolean | string): Promise<void> {
@@ -3456,7 +3590,7 @@ struct Index {
       if (result.dispatched) {
         this.finishSend(key, pending);
         this.status = '电脑已记录此次发送。';
-      } else this.status = '未找到发送记录。请先在桌面核对，再决定是否重发。';
+      } else this.status = '未找到发送记录。请先在电脑上核对会话，再决定是否重发。';
     } catch (error) {
       if (epoch !== this.epoch) return;
       if (error instanceof BridgeFailure && error.status === 401) this.leaveComputer(true);
@@ -3475,7 +3609,7 @@ struct Index {
       const result = await this.request('/models');
       if (epoch !== this.epoch || result.session?.id !== this.currentId) return;
       this.models = result.models ?? [];
-      if (!this.models.length) { this.status = '没有可用模型，请在桌面检查配置。'; return; }
+      if (!this.models.length) { this.status = '没有可用模型，请在电脑上检查 Pi CLI 的模型配置。'; return; }
       this.showModelMenu = true;
     } catch (error) {
       if (epoch !== this.epoch) return;
@@ -3538,6 +3672,8 @@ struct Index {
       this.settings = settings;
       this.themeId = themeStyle(settings.getSync('theme_style', 'mint') as string).id;
       this.modeId = appearanceMode(settings.getSync('appearance_mode', 'system') as string).id;
+      this.runNoticesEnabled = settings.getSync(RUN_NOTICE_SETTING, true) !== false;
+      this.liveViewsEnabled = settings.getSync(LIVE_VIEW_SETTING, true) !== false;
       const raw = settings.getSync('huawei_profile', '') as string;
       if (!raw) return;
       const profile = JSON.parse(raw) as HuaweiProfile;
@@ -3548,7 +3684,7 @@ struct Index {
     } catch { /* An unavailable preferences store leaves the defaults in place. */ }
   }
 
-  private async saveSetting(key: string, value: string): Promise<void> {
+  private async saveSetting(key: string, value: string | boolean): Promise<void> {
     const settings = this.settings;
     if (!settings) throw new Error('settings_unavailable');
     const write = this.settingsWrite.then(async () => {
@@ -3557,6 +3693,34 @@ struct Index {
     });
     this.settingsWrite = write.catch(() => {});
     return write;
+  }
+
+  private async setRunNoticesEnabled(enabled: boolean): Promise<void> {
+    this.runNoticesEnabled = enabled;
+    if (!enabled) this.clearRunNotices();
+    try {
+      await this.saveSetting(RUN_NOTICE_SETTING, enabled);
+    } catch {
+      if (this.runNoticesEnabled === enabled) {
+        this.getUIContext().getPromptAction().showToast({ message: '未能保存通知设置' });
+      }
+    }
+  }
+
+  private async setLiveViewsEnabled(enabled: boolean): Promise<void> {
+    this.liveViewsEnabled = enabled;
+    this.syncLiveActivity();
+    if (this.visible && this.backgroundLiveActivity()) {
+      this.schedule(0);
+      this.startStream();
+    }
+    try {
+      await this.saveSetting(LIVE_VIEW_SETTING, enabled);
+    } catch {
+      if (this.liveViewsEnabled === enabled) {
+        this.getUIContext().getPromptAction().showToast({ message: '未能保存实况窗设置' });
+      }
+    }
   }
 
   private async checkHuaweiProfile(): Promise<void> {
@@ -3913,8 +4077,8 @@ struct Index {
       }.width('100%').padding(4).borderRadius(17).backgroundColor($r('app.color.pigo_control'))
         .enabled(!this.busy && !this.removeTarget)
       if (this.pairingMode !== 'usb') {
-        Text(this.pairingMode === 'remote' ? '扫描或粘贴桌面「公网」生成的配对包。' :
-          '扫描或粘贴桌面「局域网」生成的配对包。').fontSize(14).fontColor($r('app.color.pigo_muted')).width('100%')
+        Text(this.pairingMode === 'remote' ? '扫描或粘贴 Pi Go.app「公网」生成的配对包。' :
+          '扫描或粘贴 Pi Go.app「局域网扫码」生成的配对包。').fontSize(14).fontColor($r('app.color.pigo_muted')).width('100%')
         Row({ space: 8 }) {
           if (this.pairingMode === 'lan') {
             Button('发现电脑').chatAction().id('lan-discover').enabled(!this.busy && !this.removeTarget).onClick(() => { void this.findLanCompanions(); })
@@ -3936,7 +4100,7 @@ struct Index {
           .id(this.pairingMode === 'remote' ? 'remote-bundle' : 'lan-bundle').type(InputType.Password).maxLength(4096)
           .onChange((value: string) => { this.pairingBundle = value; }).width('100%')
       } else {
-        Text('先在桌面会话执行 /pi-go-bridge，再通过 USB 转发连接。').fontSize(14).fontColor($r('app.color.pigo_muted')).width('100%')
+        Text('用 USB 连接电脑并允许调试，再在 Pi Go.app 选择「USB」并点「连接手机」。').fontSize(14).fontColor($r('app.color.pigo_muted')).width('100%')
         TextInput({ placeholder: 'USB 地址', text: this.address }).id('address')
           .onChange((value: string) => { this.address = value; }).width('100%')
         TextInput({ placeholder: '8 位配对码或一次性票据', text: this.ticket }).id('ticket').type(InputType.Password)
@@ -4049,6 +4213,39 @@ struct Index {
   }
 
   @Builder
+  runNoticeSettings() {
+    Row({ space: 12 }) {
+      Column({ space: 4 }) {
+        Text('运行结束通知').fontSize(16).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
+        Text('任务结束时在应用顶部显示横幅').fontSize(13).fontColor($r('app.color.pigo_muted'))
+      }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+      Toggle({ type: ToggleType.Switch, isOn: this.runNoticesEnabled })
+        .id('run-notice-setting').selectedColor(this.accent()).accessibilityText('运行结束通知')
+        .onChange((enabled: boolean) => { void this.setRunNoticesEnabled(enabled); })
+    }.width('100%').padding(14).backgroundColor($r('app.color.pigo_panel')).borderRadius(16)
+  }
+
+  private liveViewSummary(): string {
+    if (this.liveViewStatus === 'rights') return '未开通场景权益，请在 AppGallery Connect 开通并联调';
+    if (this.liveViewStatus === 'disabled') return '系统实况窗开关未开启，请在系统应用设置中开启';
+    if (this.liveViewStatus === 'error') return '实况窗创建失败，将在运行期间自动重试';
+    return '在状态栏、锁屏和通知中心显示当前任务状态';
+  }
+
+  @Builder
+  liveViewSettings() {
+    Row({ space: 12 }) {
+      Column({ space: 4 }) {
+        Text('任务实况窗').fontSize(16).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
+        Text(this.liveViewSummary()).fontSize(13).fontColor($r('app.color.pigo_muted'))
+      }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+      Toggle({ type: ToggleType.Switch, isOn: this.liveViewsEnabled })
+        .id('live-view-setting').selectedColor(this.accent()).accessibilityText('任务实况窗')
+        .onChange((enabled: boolean) => { void this.setLiveViewsEnabled(enabled); })
+    }.width('100%').padding(14).backgroundColor($r('app.color.pigo_panel')).borderRadius(16)
+  }
+
+  @Builder
   glassSurface(radius: number) {
     Stack() {
       Row().width('100%').height('100%').borderRadius(radius).clip(true)
@@ -4119,6 +4316,8 @@ struct Index {
             (this.computers.length || this.cloudComputers.length ?
               `${this.computers.length + this.cloudOnlyComputers().length} 台电脑` : '配对并连接电脑'))
           this.mineEntry('theme', '系统主题', `${themeStyle(this.themeId).label} · ${appearanceMode(this.modeId).label}`)
+          this.runNoticeSettings()
+          this.liveViewSettings()
         }
       }.width('100%').alignItems(HorizontalAlign.Start).padding({ top: 4, bottom: 12 })
     }.layoutWeight(1).width('100%').align(Alignment.TopStart)
@@ -4267,7 +4466,7 @@ struct Index {
             })
         }
         if (!this.idle || this.queued) Text('等待当前任务和队列结束后可切换模型。').fontSize(13)
-        if (!this.models.length) Text('没有可用模型，请在桌面检查配置。').fontSize(13)
+        if (!this.models.length) Text('没有可用模型，请在电脑上检查 Pi CLI 的模型配置。').fontSize(13)
       }.width('100%').padding(12)
     }.layoutWeight(1).width('100%')
   }
@@ -4299,7 +4498,7 @@ struct Index {
         Button({ type: ButtonType.Normal }) {
           this.headerIcon($r('app.media.ic_compose'), this.accent())
         }.id('new-task').headerAction().accessibilityText('在当前工作区新建会话')
-          .enabled(this.reachable && !this.busy && !this.openingSession && this.desktopHandoff &&
+          .enabled(this.reachable && !this.busy && !this.openingSession && this.hostAvailable &&
             !!this.workspaceCwd && this.projects.includes(this.workspaceCwd))
           .onClick(() => { this.activeTab = 'tasks'; void this.requestAction('/new', { cwd: this.workspaceCwd }); })
         Button({ type: ButtonType.Normal }) {
@@ -4819,15 +5018,18 @@ struct Index {
     const visibleSessions = this.sessionView === this.loadedView ? this.sessions : [];
     if (this.sessionView === 'all') {
       const bySpace = new Map<string, SessionRow[]>();
+      const paths = new Set<string>(this.projects);
       const expanded = new Set<string>(this.expandedSpaces);
       for (const session of visibleSessions) {
-        if (!session.cwd || !expanded.has(session.cwd)) continue;
+        if (!session.cwd) continue;
+        if (this.hasWorkspaceDetails) paths.add(session.cwd);
+        if (!expanded.has(session.cwd)) continue;
         let group = bySpace.get(session.cwd);
         if (!group) { group = []; bySpace.set(session.cwd, group); }
         group.push(session);
       }
-      for (const path of this.projects) {
-        rows.push({ key: `space:${path}`, path: path, nested: false });
+      for (const path of paths) {
+        rows.push({ key: `space:${path}:${this.workspaceName(path)}`, path: path, nested: false });
         for (const session of bySpace.get(path) ?? []) {
           rows.push({ key: this.sidebarSessionKey(session, true), session: session, nested: true });
         }
@@ -4948,7 +5150,7 @@ struct Index {
               .enabled(this.reachable && this.idle && !this.queued && !this.busy)
               .onClick(() => { this.showModelMenu = false; void this.applyModelFromMenu(index); })
           }, (model: ModelOption) => `${model.provider}-${model.id}`)
-          if (!this.models.length) Text('没有可用模型，请在桌面检查配置。').fontSize(13).width('100%')
+          if (!this.models.length) Text('没有可用模型，请在电脑上检查 Pi CLI 的模型配置。').fontSize(13).width('100%')
         }.width('100%')
       }.constraintSize({ maxHeight: Math.min(260, Math.max(96, this.windowHeight - 140)) })
         .width('100%').align(Alignment.TopStart)
@@ -5229,8 +5431,11 @@ struct Index {
   @Builder
   spaceMenu(path: string, epoch: number) {
     Menu() {
-      MenuItem({ content: '移除空间' }).id('space-remove').contentFontColor($r('app.color.pigo_error'))
-        .onClick(() => { this.confirmCloseSpace(path, epoch); })
+      if ((!this.hasWorkspaceDetails && this.projects.includes(path)) ||
+        this.workspaces.some((row: WorkspaceRow): boolean => row.cwd === path)) {
+        MenuItem({ content: '移除空间' }).id('space-remove').contentFontColor($r('app.color.pigo_error'))
+          .onClick(() => { this.confirmCloseSpace(path, epoch); })
+      }
     }
   }
 
@@ -5239,9 +5444,12 @@ struct Index {
     Row({ space: 4 }) {
       Row({ space: this.compactSessionPane() ? 4 : 9 }) {
         Image($r('app.media.ic_folder')).width(18).height(18).fillColor(this.accent())
-        Text(path.split('/').pop() || path).fontSize(14).fontWeight(FontWeight.Medium)
+        Text(this.workspaceName(path)).fontSize(14).fontWeight(FontWeight.Medium)
           .fontColor($r('app.color.pigo_text'))
           .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).layoutWeight(1)
+        if (this.hasWorkspaceDetails && !this.workspaces.some((row: WorkspaceRow): boolean => row.cwd === path)) {
+          Text('未登记').fontSize(10).fontColor($r('app.color.pigo_muted'))
+        }
         Image($r('app.media.ic_chevron')).width(this.compactSessionPane() ? 12 : 18)
           .height(this.compactSessionPane() ? 12 : 18).fillColor($r('app.color.pigo_text'))
           .rotate({ angle: this.expandedSpaces.includes(path) ? 0 : -90 }).opacity(0.6)
@@ -5251,7 +5459,8 @@ struct Index {
         SymbolGlyph($r('sys.symbol.plus')).fontSize(16).fontColor([$r('app.color.pigo_muted')])
       }.id(`space-new-task-${path}`).width(40).height(44).padding(0).borderRadius(10)
         .backgroundColor(Color.Transparent)
-        .accessibilityText(`在${path.split('/').pop() || path}空间新建任务`)
+        .accessibilityText(`在${this.workspaceName(path)}空间新建任务`)
+        .visibility(this.projects.includes(path) ? Visibility.Visible : Visibility.None)
         .enabled(!this.busy && !this.openingSession)
         .onClick(() => { this.createSpaceTask(path); })
     }.width('100%').padding({ left: this.compactSessionPane() ? 4 : 8 })
@@ -5260,7 +5469,7 @@ struct Index {
   @Builder
   sessionLibrary() {
     if (!this.sessionLoading && !this.sessionCatalogFailed && this.loadedView === this.sessionView &&
-      (this.sessionView === 'all' ? this.projects.length === 0 : this.sessions.length === 0)) {
+      (this.sessionView === 'all' ? this.sidebarRows.totalCount() === 0 : this.sessions.length === 0)) {
       Text(this.reachable ? (this.sessionView === 'all' ? '暂无空间' : '暂无任务') : '连接电脑后加载任务')
         .fontSize(14).fontColor($r('app.color.pigo_muted')).width('100%').padding(this.compactSessionPane() ? 6 : 16)
         .layoutWeight(1).align(Alignment.TopStart)
@@ -5322,7 +5531,7 @@ struct Index {
         .backgroundColor(this.dockedSessions() ? this.accent() : $r('app.color.pigo_panel'))
         .border({ width: this.dockedSessions() ? 0 : 1, radius: this.dockedSessions() ? 12 : 16,
           color: $r('app.color.pigo_line') })
-        .enabled(this.reachable && !this.busy && !this.openingSession && this.desktopHandoff &&
+        .enabled(this.reachable && !this.busy && !this.openingSession && this.hostAvailable &&
           (this.projects.length > 0 || this.canCreateWorkspace))
         .bindMenu(this.newTaskOptions())
       if (!this.reachable) this.offlineNotice(true, this.compactSessionPane())

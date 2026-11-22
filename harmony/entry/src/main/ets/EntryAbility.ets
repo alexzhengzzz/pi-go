@@ -1,6 +1,7 @@
 import { UIAbility, Want, Configuration, ConfigurationConstant } from '@kit.AbilityKit';
 import { window } from '@kit.ArkUI';
 import { appearanceMode, openSettings } from './Appearance';
+import { liveActivity } from './LiveActivity';
 
 export default class EntryAbility extends UIAbility {
   private mainWindow?: window.Window;
@@ -38,6 +39,7 @@ export default class EntryAbility extends UIAbility {
     });
   }
   onWindowStageDestroy(): void { this.mainWindow = undefined; }
+  async onDestroy(): Promise<void> { await liveActivity.dispose(); }
 
   private trackAvoidAreas(mainWindow: window.Window): void {
     const update = (): void => {
@@ -64,6 +66,13 @@ export default class EntryAbility extends UIAbility {
   }
 
   private applyLaunch(want: Want): void {
+    const liveSession = want.parameters?.['pigoLiveSession'];
+    const liveAddress = want.parameters?.['pigoLiveAddress'];
+    if (typeof liveSession === 'string' && /^[a-zA-Z0-9._-]{1,200}$/.test(liveSession) &&
+      typeof liveAddress === 'string' && liveAddress.length <= 2048) {
+      AppStorage.setOrCreate<string>('pigoLiveSession', liveSession);
+      AppStorage.setOrCreate<string>('pigoLiveAddress', liveAddress);
+    }
     const address = want.parameters?.['address'];
     if (typeof address === 'string' && /^http:\/\/127\.0\.0\.1:\d{1,5}$/.test(address)) {
       AppStorage.setOrCreate<string>('pigoAddress', address);

@@ -21,7 +21,7 @@ const DEFAULT_SESSION_LEXICON: string[] = [
   '鸿蒙', 'HarmonyOS', '方舟', 'ArkTS', 'ArkUI', 'TypeScript', 'JavaScript',
   'WebSocket', 'HTTP', 'HTTPS', 'JSON', 'API', 'SDK', 'RPC', 'ETS', 'Markdown',
   'Git', 'GitHub', 'Commit', 'Push', 'Diff', 'Token', 'TLS', 'UUID', 'npm', 'Node',
-  'Codex', 'Core Speech Kit', 'DevEco Studio', 'Pi Go', 'HAP',
+  'Codex', 'HAP',
   '组件', '页面', '路由', '回调', '异步', '并发', '线程', '进程',
   '权限', '麦克风', '通知栏', '真机', '模拟器'
 ];
@@ -29,6 +29,7 @@ const DEFAULT_SESSION_LEXICON: string[] = [
 const LEXICON_MAX_WORDS = 200;
 const LEXICON_WORD_MIN_LEN = 2;
 const LEXICON_WORD_MAX_LEN = 20;
+const LEXICON_WORD_PATTERN = /^[\u4e00-\u9fffA-Za-z]+$/;
 
 function normalizeLexicon(words?: string[]): string[] {
   const source: string[] = words && words.length > 0 ? words : DEFAULT_SESSION_LEXICON;
@@ -38,6 +39,7 @@ function normalizeLexicon(words?: string[]): string[] {
     if (typeof word !== 'string') continue;
     const trimmed: string = word.trim();
     if (trimmed.length < LEXICON_WORD_MIN_LEN || trimmed.length > LEXICON_WORD_MAX_LEN) continue;
+    if (!LEXICON_WORD_PATTERN.test(trimmed)) continue;
     if (seen.has(trimmed)) continue;
     seen.add(trimmed);
     if (result.length >= LEXICON_MAX_WORDS) break;

@@ -1,8 +1,5 @@
-// Workspace registry for the Pi Go daemon — the replacement for the patched
-// Desktop's WorkspaceManager persistence. Keeps a small JSON list of the
-// projects the phone may open, create sessions in, or close. Files on disk are
-// never touched by removal: closing a workspace only deregisters it and stops
-// its Pi runtimes, exactly like Desktop's "remove workspace".
+// Persistent list of Pi Go workspaces. Closing a workspace removes its
+// registration and stops its managed Pi runtimes while preserving its files.
 import { createHash } from 'node:crypto';
 import { lstatSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -26,10 +23,11 @@ export class WorkspaceRegistry {
     this.state = load(this.file);
   }
 
-  save() {
+  save(state) {
     const next = `${this.file}.${process.pid}.tmp`;
-    writeFileSync(next, JSON.stringify(this.state, null, 2), { mode: 0o600 });
+    writeFileSync(next, JSON.stringify(state, null, 2), { mode: 0o600 });
     renameSync(next, this.file);
+    this.state = state;
   }
 
   list() { return this.state.workspaces.map((row) => ({ ...row })); }
@@ -40,17 +38,23 @@ export class WorkspaceRegistry {
     const resolved = resolve(path);
     if (this.state.workspaces.some((row) => resolve(row.path) === resolved)) return null;
     const row = { id: workspaceId(resolved), name, path: resolved, createdAt: new Date().toISOString() };
-    this.state.workspaces.push(row);
-    this.save();
+    this.save({ workspaces: [...this.state.workspaces, row] });
     return { ...row };
+  }
+
+  rename(id, name) {
+    const row = this.state.workspaces.find((workspace) => workspace.id === id);
+    if (!row) return undefined;
+    const updated = { ...row, name };
+    this.save({ workspaces: this.state.workspaces.map((workspace) => workspace === row ? updated : workspace) });
+    return updated;
   }
 
   remove(path) {
     const resolved = resolve(path);
-    const before = this.state.workspaces.length;
-    this.state.workspaces = this.state.workspaces.filter((row) => resolve(row.path) !== resolved);
-    if (this.state.workspaces.length === before) return false;
-    this.save();
+    const workspaces = this.state.workspaces.filter((row) => resolve(row.path) !== resolved);
+    if (workspaces.length === this.state.workspaces.length) return false;
+    this.save({ workspaces });
     return true;
   }
 

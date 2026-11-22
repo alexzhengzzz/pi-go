@@ -6,12 +6,12 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { execFile, spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtemp, mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { appendFile, mkdtemp, mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { realpath } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import { localRequest } from '../desktop/local-ipc.mjs';
+import { localRequest } from '../host/bridge/local-ipc.mjs';
 
 const project = new URL('../', import.meta.url).pathname;
 const provider = new URL('./offline-provider.ts', import.meta.url).pathname;
@@ -47,7 +47,7 @@ async function seedSession(agentDir, cwd, env, text) {
   return state;
 }
 
-test('daemon host serves native open, new, interactions and close without Pi Desktop', { timeout: 300000 }, async (context) => {
+test('daemon host serves native open, new, interactions and close', { timeout: 300000 }, async (context) => {
   const root = await realpath(await mkdtemp('/private/tmp/pigo-daemon-'));
   const agent = join(root, 'agent'), ipc = join(root, 'ipc');
   const first = join(root, 'project-a'), second = join(root, 'project-b');
@@ -65,6 +65,18 @@ test('daemon host serves native open, new, interactions and close without Pi Des
 
   const a = await seedSession(agent, first, env, 'History from project A');
   const b = await seedSession(agent, second, env, 'History from project B');
+  const entries = (await readFile(b.sessionFile, 'utf8')).trimEnd().split('\n').map((line) => JSON.parse(line));
+  let parentId = entries.at(-1).id;
+  const timestamp = new Date().toISOString();
+  const extraHistory = Array.from({ length: 64 }, (_, index) => {
+    const id = (0x12300000 + index).toString(16);
+    const entry = { type: 'message', id, parentId, timestamp, message: {
+      role: 'user', content: [{ type: 'text', text: `Project B message ${index + 1}` }], timestamp: Date.now(),
+    } };
+    parentId = id;
+    return JSON.stringify(entry);
+  });
+  await appendFile(b.sessionFile, extraHistory.join('\n') + '\n');
 
   const children = [];
   context.after(async () => {
@@ -73,8 +85,8 @@ test('daemon host serves native open, new, interactions and close without Pi Des
     await rm(root, { recursive: true, force: true });
   });
 
-  const daemon = spawn(process.execPath, [join(project, 'daemon/daemon.mjs')], {
-    env: { ...env, PIGO_PI_ARGS: JSON.stringify(runtimeArgs) }, stdio: ['ignore', 'ignore', 'pipe'] });
+  const daemon = spawn(process.execPath, [join(project, 'host/daemon/daemon.mjs')], {
+    env: { ...env, HOME: root, PIGO_PI_ARGS: JSON.stringify(runtimeArgs) }, stdio: ['ignore', 'ignore', 'pipe'] });
   children.push(daemon);
   let logs = '';
   daemon.stderr.setEncoding('utf8').on('data', (data) => { logs = (logs + data).slice(-6000); });
@@ -211,13 +223,12 @@ test('daemon host serves native open, new, interactions and close without Pi Des
   // The first runtime keeps serving its workspace after another was closed.
   assert.equal((await localRequest(firstWorker, 'GET', '/chat', undefined, 4000).catch(() => undefined))?.status, 200);
 
-  // Phone end-to-end: pair with the broker, list, open and chat — all through
-  // the unmodified broker, proving the daemon is a host-protocol drop-in.
+  // Phone end-to-end: pair, list, open, chat, and manage a workspace through the broker.
   const reservation = (await import('node:net')).createServer().listen(0, '127.0.0.1');
   await once(reservation, 'listening');
   const port = reservation.address().port;
   await promisify(reservation.close.bind(reservation))();
-  const broker = spawn(process.execPath, [join(project, 'desktop/broker.mjs'), String(port)], { env, stdio: 'ignore' });
+  const broker = spawn(process.execPath, [join(project, 'host/bridge/broker.mjs'), String(port)], { env, stdio: 'ignore' });
   children.push(broker);
   const admin = join(ipc, `bridge-${port}.sock`);
   let ticket;
@@ -244,10 +255,44 @@ test('daemon host serves native open, new, interactions and close without Pi Des
   const phoneChat = await phone('/chat');
   assert.equal(phoneChat.data.session.id, a.sessionId);
   assert.equal(phoneChat.data.messages.some((message) => message.text === 'History from project A'), true);
+
+  // Both restored history and an already-running session can return a first page on open.
+  for (const [id, text] of [[b.sessionId, 'Project B message 64'], [a.sessionId, 'History from project A']]) {
+    const opened = await phone('/open', { id, history: true });
+    assert.equal(opened.status, 200, JSON.stringify(opened));
+    assert.equal(opened.data.session.id, id);
+    assert.equal(opened.data.cursor?.sessionId, id);
+    assert.ok(opened.data.messages.some((message) => message.text === text));
+    const snapshot = await phone('/session/snapshot');
+    assert.equal(opened.data.cursor.streamId, snapshot.data.cursor.streamId);
+    assert.equal(opened.data.historyLeaf, snapshot.data.historyLeaf);
+    if (id === b.sessionId) {
+      assert.equal(opened.data.messages.length, 60);
+      assert.equal(opened.data.messages[0].text, 'Project B message 5');
+      assert.equal(opened.data.historyCursor, opened.data.messages[0].id);
+      const earlier = await phone(`/history?id=${id}&before=${opened.data.historyCursor}&sync=2`);
+      assert.equal(earlier.status, 200, JSON.stringify(earlier));
+      assert.equal(earlier.data.messages.at(-1).text, 'Project B message 4');
+      assert.ok(earlier.data.messages.some(({ text }) => text === 'History from project B'));
+      assert.equal(earlier.data.historyCursor, undefined);
+    }
+  }
+
+  const space = { name: '测试 空间' };
+  const spacePath = join(root, 'Pi Go', 'Spaces', space.name);
+  assert.deepEqual(await phone('/create-workspace', { name: '../outside' }),
+    { status: 400, data: { error: 'invalid_workspace_name' } });
+  assert.deepEqual(await phone('/create-workspace', space), { status: 200, data: { cwd: spacePath } });
+  assert.deepEqual(await phone('/create-workspace', space),
+    { status: 409, data: { error: 'workspace_exists' } });
+  assert.ok((await phone('/sessions')).data.projects.includes(spacePath));
+  assert.deepEqual(await phone('/close-workspace', { cwd: spacePath }), { status: 200, data: { closed: true } });
+  assert.ok(!(await phone('/sessions')).data.projects.includes(spacePath));
+  assert.ok((await stat(spacePath)).isDirectory());
   await localRequest(admin, 'POST', '/stop').catch(() => {});
 
   // The daemon refuses to co-exist with another live host socket.
-  const duplicate = spawn(process.execPath, [join(project, 'daemon/daemon.mjs')], {
+  const duplicate = spawn(process.execPath, [join(project, 'host/daemon/daemon.mjs')], {
     env: { ...env, PIGO_PI_ARGS: JSON.stringify(runtimeArgs) }, stdio: ['ignore', 'ignore', 'pipe'] });
   children.push(duplicate);
   const duplicateExit = await once(duplicate, 'exit');

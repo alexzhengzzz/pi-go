@@ -211,7 +211,7 @@ async function rawBody(request, limit) {
   return bytes;
 }
 
-async function workerList() {
+async function workerList(openingId) {
   if (computerAccess && bearer) await Promise.all(pairingRuntimes().map(async (socket) => {
     try {
       const { status, data } = await localRequest(socket, 'GET', '/session', undefined, 700);
@@ -220,19 +220,27 @@ async function workerList() {
       }
     } catch {}
   }));
-  const states = await Promise.all(workers().map(async (socket) => {
+  const states = [];
+  const complete = Promise.all(workers().map(async (socket, index) => {
     try {
       const { status, data } = await localRequest(socket, 'GET', '/session');
       if (status === 200 && typeof data.session?.id === 'string' && typeof data.session?.cwd === 'string') {
-        return { socket, session: data.session, historyDirectory: typeof data.historyDirectory === 'string' ? data.historyDirectory : undefined };
+        states[index] = { socket, session: data.session, historyDirectory: typeof data.historyDirectory === 'string' ? data.historyDirectory : undefined };
       }
     } catch (cause) {
       if (cause.code === 'ECONNREFUSED') {
         try { unlinkSync(socket); } catch {}
       }
     }
-    return undefined;
   }));
+  if (openingId !== undefined) {
+    let timer;
+    await Promise.race([complete, new Promise((resolve) => { timer = setTimeout(resolve, 700); })]);
+    clearTimeout(timer);
+    // Restore from disk only after the full probe window in case a slow worker has the target.
+    if (states.some((worker) => worker.session.id === openingId)) return states.filter(Boolean);
+  }
+  await complete;
   return states.filter(Boolean);
 }
 
@@ -249,14 +257,14 @@ function selectionFor(live) {
   return selected && live.find(({ socket, session }) => socket === selected.socket && session.id === selected.id && session.cwd === selected.cwd);
 }
 
-async function catalog(live, hostSocket, granted = [], includeComputerHistory = true) {
+async function catalog(live, hostSocket, granted = [], includeComputerHistory = true, revision) {
   const counts = new Map();
   for (const { session } of live) counts.set(session.id, (counts.get(session.id) ?? 0) + 1);
   const rows = new Map(live.map(({ session }) => [session.id, {
     ...session, active: true, occupied: counts.get(session.id) > 1,
   }]));
   const projects = new Map(live.map((worker) => [worker.session.cwd, worker]));
-  const native = computerAccess && includeComputerHistory ? await computerSessions() : [];
+  const native = computerAccess && includeComputerHistory ? await computerSessions(revision) : [];
   const nativeProjectsById = new Map(native.map((row) => [row.id, row.cwd]));
   let nativeRoot;
   if (computerAccess && includeComputerHistory) {
@@ -283,7 +291,7 @@ async function catalog(live, hostSocket, granted = [], includeComputerHistory = 
     }
   }));
   // In computer-wide mode the native store supplies history without asking
-  // Desktop to register or trust a workspace during a read-only listing.
+  // the host to register a workspace during a read-only listing.
   if (hostSocket && !computerAccess) await Promise.all(granted.filter((cwd) => !projects.has(cwd)).map(async (cwd) => {
     const result = await localRequest(hostSocket, 'POST', '/catalog', { cwd }).catch(() => undefined);
     if (!grants.has(cwd) || result?.status !== 200 || !Array.isArray(result.data.sessions)) return;
@@ -301,22 +309,65 @@ async function hostContext() {
   const socket = hosts[0];
   const result = await localRequest(socket, 'GET', '/health', undefined, 700).catch(() => undefined);
   const profile = result?.data.profile;
-  let granted = [...grants].filter(([, owner]) => owner === profile).map(([cwd]) => cwd);
-  if (computerAccess) {
-    const projects = await localRequest(socket, 'POST', '/projects', {}).catch(() => undefined);
-    if (projects?.status === 200 && Array.isArray(projects.data.projects)) granted = [...new Set([...granted, ...projects.data.projects])];
+  const workspaceReply = result?.data.workspaceLibrary === true
+    ? await localRequest(socket, 'POST', '/workspaces', {}).catch(() => undefined) : undefined;
+  const supportsWorkspaces = result?.data.workspaceLibrary === true;
+  const registered = workspaceReply?.status === 200 && Array.isArray(workspaceReply.data.workspaces)
+    ? workspaceReply.data.workspaces.filter((row) => typeof row.cwd === 'string') : undefined;
+  const registeredPaths = registered && new Set(registered.map(({ cwd }) => cwd));
+  const granted = [];
+  for (const [cwd, owner] of grants) {
+    if (owner !== profile) continue;
+    if (!supportsWorkspaces || registeredPaths?.has(cwd)) granted.push(cwd);
+    else if (registeredPaths) grants.delete(cwd);
   }
-  return { socket, profile, granted, canCreateWorkspace: computerAccess && result?.data.canCreateWorkspace === true };
+  if (computerAccess && registeredPaths) granted.push(...registeredPaths);
+  else if (computerAccess && !supportsWorkspaces) {
+    const projects = await localRequest(socket, 'POST', '/projects', {}).catch(() => undefined);
+    if (projects?.status === 200 && Array.isArray(projects.data.projects)) granted.push(...projects.data.projects);
+  }
+  const workspaces = registered?.filter(({ cwd }) => granted.includes(cwd)).map(({ cwd, name }) => ({ cwd, name }));
+  return { socket, profile, granted: [...new Set(granted)], workspaces, revision: workspaceReply?.data?.revision,
+    canCreateWorkspace: computerAccess && result?.data.canCreateWorkspace === true };
 }
 
-async function nativeHandoff(request, response, route, cwd, id, context, hasLiveProject) {
+const workerIdentity = ({ socket, session }) => ({ id: session.id, pid: Number(/(?:^|\/)w-(\d+)-/.exec(socket)?.[1]) });
+
+async function pendingInteraction(worker) {
+  const hosts = await desktopHosts();
+  if (hosts.length !== 1) return undefined;
+  const pending = await localRequest(hosts[0], 'POST', '/pending', workerIdentity(worker), 700).catch(() => undefined);
+  if (pending?.status === 200) return pending.data.interaction;
+}
+
+async function replyOpen(request, response, worker, includeHistory) {
+  select(worker);
+  const opened = { session: worker.session };
+  if (!includeHistory) return reply(response, 200, opened);
+  const version = selectionVersion;
+  const path = workerPath('/session/snapshot?history=1', worker.session, true);
+  const snapshot = await localRequest(worker.socket, 'GET', path, undefined, 2500).catch(() => undefined);
+  if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
+  if (version !== selectionVersion) return error(response, 409, 'session_changed');
+  const chat = snapshot?.data;
+  // Older workers may return only the live snapshot. The client can then fetch history separately.
+  if (snapshot?.status !== 200 || !Array.isArray(chat.messages) || !chat.cursor) return reply(response, 200, opened);
+  if (chat.session?.id !== worker.session.id || chat.session.cwd !== worker.session.cwd ||
+      chat.cursor.sessionId !== worker.session.id) return error(response, 409, 'session_changed');
+  chat.interaction = await pendingInteraction(worker);
+  if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
+  if (version !== selectionVersion) return error(response, 409, 'session_changed');
+  return reply(response, 200, chat);
+}
+
+async function nativeHandoff(request, response, route, cwd, id, context, hasLiveProject, includeHistory = false) {
   if (handoffPending) return error(response, 409, 'desktop_busy');
   handoffPending = true;
   try {
     if (context.ambiguous) return error(response, 409, 'desktop_host_ambiguous');
     if (!context.socket) return error(response, 409, 'desktop_handoff_required');
     if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
-    if (!computerAccess && !hasLiveProject && grants.get(cwd) !== context.profile) {
+    if (!computerAccess && !hasLiveProject && !context.granted.includes(cwd)) {
       return error(response, 403, 'desktop_workspace_unshared');
     }
     const result = await localRequest(context.socket, 'POST', route, { cwd, id }, 12000).catch(() => undefined);
@@ -325,14 +376,13 @@ async function nativeHandoff(request, response, route, cwd, id, context, hasLive
     if (result.status !== 200) return error(response, result.status, result.data.error ?? 'desktop_handoff_failed');
     if (typeof result.data.id !== 'string' || (id !== undefined && result.data.id !== id)) return error(response, 409, 'session_changed');
     const expected = realpathSync(cwd);
-    const available = (await workerList()).filter(({ session }) => {
+    const available = (await workerList(route === '/open' ? result.data.id : undefined)).filter(({ session }) => {
       try { return session.id === result.data.id && realpathSync(session.cwd) === expected; }
       catch { return false; }
     });
     if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
     if (available.length !== 1) return error(response, 409, available.length ? 'session_occupied' : 'desktop_share_failed');
-    select(available[0]);
-    return reply(response, 200, { session: available[0].session });
+    return await replyOpen(request, response, available[0], includeHistory);
   } finally { handoffPending = false; }
 }
 
@@ -450,7 +500,7 @@ const publicHandler = async (request, response) => {
       if (!result) return error(response, 409, 'desktop_handoff_unconfirmed');
       return reply(response, result.status, result.data);
     }
-    const live = await workerList();
+    const live = await workerList(route === 'POST /open' && typeof input.id === 'string' ? input.id : undefined);
     if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
     const current = selectionFor(live);
     if (path.startsWith('/files/')) {
@@ -523,7 +573,7 @@ const publicHandler = async (request, response) => {
       const cursor = Number(parameters.get('cursor') ?? '0');
       const limit = Math.min(Math.max(Math.floor(Number(parameters.get('limit') ?? '50') || 50), 1), 100);
       const context = await hostContext();
-      const merged = await catalog(live, context.socket, context.granted);
+      const merged = await catalog(live, context.socket, context.granted, true, context.revision);
       if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
       const view = parameters.get('view') ?? 'all';
       if (!['all', 'archived', 'pinned', 'recent'].includes(view)) return error(response, 400, 'invalid_view');
@@ -538,21 +588,23 @@ const publicHandler = async (request, response) => {
       return reply(response, 200, { current: current?.session, sessions: filtered.slice(start, start + limit),
         total: filtered.length, nextCursor: start + limit < filtered.length ? start + limit : undefined,
         desktopHandoff: Boolean(context.socket), canCreateWorkspace: context.canCreateWorkspace === true,
+        workspaces: context.workspaces,
         projects: [...new Set([...live.map(({ session }) => session.cwd), ...context.granted])].sort() });
     }
     if (route === 'POST /open') {
       if (handoffPending) return error(response, 409, 'desktop_busy');
       if (typeof input.id !== 'string') return error(response, 400, 'invalid_session');
+      const includeHistory = input.history === true;
       const targets = live.filter(({ session }) => session.id === input.id);
       if (targets.length === 0) {
         const [context, native] = await Promise.all([hostContext(), computerAccess ? findComputerSession(input.id) : undefined]);
         const row = native ?? (await catalog(live, context.socket, context.granted, false)).find(({ id }) => id === input.id);
         if (!row) return error(response, 409, 'desktop_handoff_required');
-        return await nativeHandoff(request, response, '/open', row.cwd, row.id, context, live.some(({ session }) => session.cwd === row.cwd));
+        return await nativeHandoff(request, response, '/open', row.cwd, row.id, context,
+          live.some(({ session }) => session.cwd === row.cwd), includeHistory);
       }
       if (targets.length !== 1) return error(response, 409, 'session_occupied');
-      select(targets[0]);
-      return reply(response, 200, { session: targets[0].session });
+      return await replyOpen(request, response, targets[0], includeHistory);
     }
     if (route === 'POST /new') {
       const context = await hostContext();
@@ -560,8 +612,7 @@ const publicHandler = async (request, response) => {
       return await nativeHandoff(request, response, '/new', input.cwd, undefined, context, live.some(({ session }) => session.cwd === input.cwd));
     }
     if (route === 'POST /close-workspace') {
-      // Closing mirrors Desktop's own "remove workspace": the folder leaves the
-      // Desktop sidebar (files stay), so the next refresh no longer lists it.
+      // The host removes the workspace registration and preserves its files.
       if (typeof input.cwd !== 'string') return error(response, 400, 'invalid_target');
       const context = await hostContext();
       if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
@@ -585,18 +636,28 @@ const publicHandler = async (request, response) => {
     }
     const snapshot = route === 'GET /session/snapshot';
     if (!current) {
+      if (selected && (snapshot || route === 'GET /chat')) {
+        const target = selected;
+        const hosts = await desktopHosts();
+        const result = hosts.length === 1
+          ? await localRequest(hosts[0], 'POST', '/session-deleted', target, 700).catch(() => undefined) : undefined;
+        if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
+        if (selected !== target) return error(response, 409, 'session_changed');
+        if (result?.data?.deleted === true) {
+          return reply(response, 200, { messages: [], state: 'session_deleted', deletedSessionId: target.id });
+        }
+      }
       if (snapshot) return reply(response, 200, { state: selected ? 'session_closed' : live.length ? 'no_session_selected' : 'no_shared_sessions' });
       if (route === 'GET /chat' || route === 'GET /session') return reply(response, 200, { messages: [], state: selected ? 'session_closed' : live.length ? 'no_session_selected' : 'no_shared_sessions' });
       return error(response, 409, 'session_unavailable');
     }
     if (route === 'GET /session') return reply(response, 200, { session: current.session });
     if (input && (input.id !== current.session.id || live.filter(({ session }) => session.id === input.id).length !== 1)) return error(response, 409, 'session_changed');
-    const identity = { id: current.session.id, pid: Number(/(?:^|\/)w-(\d+)-/.exec(current.socket)?.[1]) };
     if (route === 'POST /answer') {
       const hosts = await desktopHosts();
       if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
       if (hosts.length !== 1) return error(response, 409, 'interaction_unavailable');
-      const answer = await localRequest(hosts[0], 'POST', '/answer', { ...identity, pendingId: input.pendingId, answer: input.answer }).catch(() => undefined);
+      const answer = await localRequest(hosts[0], 'POST', '/answer', { ...workerIdentity(current), pendingId: input.pendingId, answer: input.answer }).catch(() => undefined);
       if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
       return reply(response, answer?.status ?? 409, answer?.data ?? { error: 'interaction_unavailable' });
     }
@@ -614,11 +675,7 @@ const publicHandler = async (request, response) => {
       return error(response, 409, 'session_changed');
     }
     if ((snapshot || route === 'GET /chat') && result.status === 200) {
-      const hosts = await desktopHosts();
-      if (hosts.length === 1) {
-        const pending = await localRequest(hosts[0], 'POST', '/pending', identity, 700).catch(() => undefined);
-        if (pending?.status === 200) result.data.interaction = pending.data.interaction;
-      }
+      result.data.interaction = await pendingInteraction(current);
       if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
     }
     if (scopedRead && version !== selectionVersion) return error(response, 409, 'session_changed');
@@ -642,7 +699,7 @@ publicServer.setTimeout(18000, (socket) => socket.destroy());
 const admin = createServer(options, async (request, response) => {
   if (request.headers.origin !== undefined) return error(response, 403, 'invalid_source');
   if (request.method === 'GET' && request.url === '/status') return reply(response, 200, {
-    protocol: 'pi-go-pairing/1', computerAccess, transport, host, port,
+    protocol: 'pi-go-pairing/1', workspaceLibrary: true, computerAccess, transport, host, port,
     ...(remote ? { address } : {}),
     paired: Boolean(bearer), lastSeen: bearer ? lastSeen : undefined, expiresAt: pairing?.expiresAt,
   });

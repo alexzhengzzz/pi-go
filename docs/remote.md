@@ -31,7 +31,7 @@ backend pigo_ssh
 
 如果 VPS 已经对专用 SSH 帐号配置了 `GatewayPorts clientspecified`，也可以用 `-R 0.0.0.0:8443:127.0.0.1:18982` 直接监听公网端口，省去 TCP 代理。两种方式都由 Mac 的 HTTPS broker 提供证书。
 
-如果 VPS 有 Python 3，也可以在 Mac 运行 `python3 scripts/run-remote-tunnel.py jp`。脚本同时建立 SSH 反向转发，并在 VPS 上启动 TCP 透传，对来源 IP 的连接速率和并发设上限。长期运行时可用 macOS 的 LaunchAgent 管理此命令，设置登录启动和退出重启，并用另一个 LaunchAgent 启动本地 broker。broker 的启动参数为 `node desktop/broker.mjs 18982 --remote <VPS公网IPv4> 8443`。使用相同的公网地址和本机 Pi 用户目录可复用凭证。
+如果 VPS 有 Python 3，也可以在 Mac 运行 `python3 host/scripts/run-remote-tunnel.py jp`。脚本同时建立 SSH 反向转发，并在 VPS 上启动 TCP 透传，对来源 IP 的连接速率和并发设上限。长期运行时可用 macOS 的 LaunchAgent 管理此命令，设置登录启动和退出重启，并用另一个 LaunchAgent 启动本地 broker。broker 的启动参数为 `node host/bridge/broker.mjs 18982 --remote <VPS公网IPv4> 8443`。使用相同的公网地址和本机 Pi 用户目录可复用凭证。
 
 ## 配对
 
