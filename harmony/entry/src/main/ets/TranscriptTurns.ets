@@ -1,4 +1,4 @@
-import { ChatMessage, LiveTool } from './model/PiGoTypes';
+import type { ChatMessage, LiveTool } from './model/PiGoTypes';
 
 export interface ProcessStep {
   id: string;

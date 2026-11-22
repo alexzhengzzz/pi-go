@@ -5,6 +5,7 @@
 import { deviceInfo } from '@kit.BasicServicesKit';
 import { uiMaterial } from '@kit.ArkUI';
 import { hdsEffect } from '@kit.UIDesignKit';
+import { ThemeStyle, themePalette, themeStyle } from './Appearance';
 
 function materialLevel(): uiMaterial.MaterialLevel | undefined {
   try {
@@ -290,4 +291,59 @@ export function glassCardSurface(dark: boolean, radius: number = 16, elevated: b
 // 用于根部 Tabs 悬浮胶囊底栏（API 26 原生 barFloatingStyle + ImmersiveMaterial）。
 export function immersiveFloatingTabs(show: boolean, bottomMargin: number, dark: boolean): FloatingTabsSurface {
   return new FloatingTabsSurface(show, bottomMargin, dark);
+}
+
+class ThemedCardSurface implements AttributeModifier<CommonAttribute> {
+  private readonly dark: boolean;
+  private readonly style: ThemeStyle;
+  private readonly elevated: boolean;
+
+  constructor(dark: boolean, style: ThemeStyle, elevated: boolean) {
+    this.dark = dark;
+    this.style = style;
+    this.elevated = elevated;
+  }
+
+  applyNormalAttribute(instance: CommonAttribute): void {
+    const palette = themePalette(this.style.id, this.dark);
+    const radius = this.style.cardRadius;
+    if (this.style.surface === 'paper') {
+      instance
+        .backgroundColor(palette.cardBg)
+        .borderRadius(radius)
+        .border({ width: 1, radius: radius, color: palette.cardBorder })
+        .shadow({ radius: this.elevated ? 12 : 4, offsetY: this.elevated ? 4 : 1, color: palette.cardShadow });
+      return;
+    }
+    if (this.style.surface === 'terminal') {
+      instance
+        .backdropBlur(this.elevated ? 20 : 12)
+        .backgroundColor(palette.cardBg)
+        .borderRadius(radius)
+        .border({ width: 1, radius: radius, color: palette.cardBorder })
+        .shadow({ radius: this.elevated ? 18 : 10, offsetY: 2, color: palette.cardShadow });
+      return;
+    }
+    if (this.style.surface === 'soft') {
+      instance
+        .backdropBlur(this.elevated ? 28 : 18)
+        .backgroundColor(palette.cardBg)
+        .borderRadius(radius)
+        .border({ width: 0.5, radius: radius, color: palette.cardBorder })
+        .shadow({ radius: this.elevated ? 22 : 12, offsetY: this.elevated ? 6 : 3, color: palette.cardShadow });
+      return;
+    }
+    instance
+      .backdropBlur(this.elevated ? 32 : 22)
+      .backgroundColor(palette.cardBg)
+      .borderRadius(radius)
+      .border({ width: 1, radius: radius, color: palette.cardBorder })
+      .shadow({ radius: this.elevated ? 20 : 12, offsetY: this.elevated ? 6 : 2, color: palette.cardShadow });
+    applyPointLight(instance, false);
+  }
+}
+
+// 按主题风格（液态玻璃 / 纸墨哑光 / 极客终端 / 柔雾圆润）渲染卡片材质。
+export function themedCardSurface(dark: boolean, themeId: string, elevated: boolean = false): ThemedCardSurface {
+  return new ThemedCardSurface(dark, themeStyle(themeId), elevated);
 }

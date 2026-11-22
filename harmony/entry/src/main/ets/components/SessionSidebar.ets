@@ -59,6 +59,7 @@ export struct SessionSidebar {
   @Require swipeDrawer: (event: GestureEvent) => void = unboundAction;
   @Require toggleSpace: (path: string) => void = unboundAction;
   @Require updateSessionMeta: (session: SessionRow, pin: boolean) => Promise<void> = unboundAction;
+  @Require shareSession: (session: SessionRow) => Promise<void> = unboundAction;
   @Prop windowHeight: number;
   @Link workspaces: WorkspaceRow[];
   @Prop accent: string;
@@ -266,10 +267,8 @@ export struct SessionSidebar {
         Image($r('app.media.ic_more')).width(16).height(16).fillColor($r('app.color.pigo_muted'))
       }.id(`session-more-${session.id}`).width(this.compactSessionPane ? 36 : 32).height(40).padding(0)
         .backgroundColor(Color.Transparent)
-        .accessibilityText('任务操作').enabled(this.reachable && !this.busy).bindMenu([
-          { value: session.pinned ? '取消置顶' : '置顶', action: () => { void this.updateSessionMeta(session, true); } },
-          { value: session.archived ? '取消归档' : '归档', action: () => { void this.updateSessionMeta(session, false); } }
-        ])
+        .accessibilityText('任务操作').enabled((this.reachable || session.id === this.currentId) && !this.busy)
+        .bindMenu(this.sessionMoreOptions(session))
     }.width('100%').borderRadius(this.dockedSessions ? 9 : 12)
       .backgroundColor(session.id === this.openingSessionId || (session.id === this.currentId && this.dockedSessions) ?
         this.accentTint : session.id === this.currentId ? $r('app.color.pigo_selected') : Color.Transparent)
@@ -333,6 +332,19 @@ export struct SessionSidebar {
         .onAreaChange(() => { this.revealLibraryAnchor(); })
     }
   }
+  private sessionMoreOptions(session: SessionRow): MenuElement[] {
+    const options: MenuElement[] = [
+      { value: '分享会话', action: () => { void this.shareSession(session); } }
+    ];
+    if (this.reachable) {
+      options.push(
+        { value: session.pinned ? '取消置顶' : '置顶', action: () => { void this.updateSessionMeta(session, true); } },
+        { value: session.archived ? '取消归档' : '归档', action: () => { void this.updateSessionMeta(session, false); } }
+      );
+    }
+    return options;
+  }
+
   private newTaskOptions(): MenuElement[] {
     const options = this.projects.map((path: string): MenuElement => ({
       value: workspaceName(this.workspaces, path),

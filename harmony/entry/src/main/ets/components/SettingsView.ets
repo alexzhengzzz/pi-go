@@ -1,7 +1,7 @@
-import { glassCardSurface } from '../Immersive';
+import { glassCardSurface, themedCardSurface } from '../Immersive';
 import { unboundAction } from './ComponentAction';
 import { Companion } from '../CredentialVault';
-import { APPEARANCE_MODES, AppearanceMode, THEME_STYLES, ThemeStyle, appearanceMode, themeCanvasColor, themeStyle } from '../Appearance';
+import { APPEARANCE_MODES, AppearanceMode, THEME_STYLES, ThemePalette, ThemeStyle, appearanceMode, themePalette, themeStyle } from '../Appearance';
 import { HuaweiProfile } from '../HuaweiProfile';
 import { CloudComputer } from '../AccountSync';
 import { validUsb } from '../PairingCode';
@@ -220,7 +220,7 @@ export struct SettingsView {
         ForEach(group.connections, (record: Companion) => {
           this.computerConnection(record, group)
         }, (record: Companion) => record.address)
-      }.width('100%').padding(14).attributeModifier(glassCardSurface(this.darkMode, 16))
+      }.width('100%').padding(14).attributeModifier(themedCardSurface(this.darkMode, this.themeId))
     }, (group: ComputerGroup) => `${group.id}|${group.name}|${group.connections.map((record: Companion): string => record.address).join('|')}`)
     if (this.removeTarget) {
       Text(this.huaweiProfile ? '移除手机上的配对和账号列表中的连接记录。' : '移除手机上的这条配对记录。')
@@ -249,7 +249,7 @@ export struct SettingsView {
                 .onClick(() => { this.removeTarget = computer.address; })
             }
           }.width('100%')
-        }.width('100%').padding(14).attributeModifier(glassCardSurface(this.darkMode, 16))
+        }.width('100%').padding(14).attributeModifier(themedCardSurface(this.darkMode, this.themeId))
       }, (computer: CloudComputer) => computer.address)
     }
   }
@@ -370,7 +370,7 @@ export struct SettingsView {
             .onClick(() => { this.scheduleCloudSync(0); })
         }.width('100%')
       }
-    }.width('100%').padding(16).attributeModifier(glassCardSurface(this.darkMode, 16))
+    }.width('100%').padding(16).attributeModifier(themedCardSurface(this.darkMode, this.themeId))
   }
   @Builder
   mineEntry(page: string, label: string, summary: string) {
@@ -381,9 +381,9 @@ export struct SettingsView {
             SymbolGlyph($r('sys.symbol.computer')).fontSize(21).fontColor([this.accent])
           } else {
             Row({ space: 3 }) {
-              Blank().width(6).height(6).borderRadius(3).backgroundColor(this.accentFor(themeStyle('mint')))
-              Blank().width(6).height(6).borderRadius(3).backgroundColor(this.accentFor(themeStyle('ocean')))
-              Blank().width(6).height(6).borderRadius(3).backgroundColor(this.accentFor(themeStyle('sakura')))
+              Blank().width(6).height(6).borderRadius(3).backgroundColor(this.paletteFor(themeStyle('aurora')).accent)
+              Blank().width(6).height(6).borderRadius(3).backgroundColor(this.paletteFor(themeStyle('sunset')).accent)
+              Blank().width(6).height(6).borderRadius(3).backgroundColor(this.paletteFor(themeStyle('sakura')).accent)
             }
           }
         }.width(40).height(40).backgroundColor(this.accentTint).borderRadius(12)
@@ -395,7 +395,7 @@ export struct SettingsView {
         SymbolGlyph($r('sys.symbol.chevron_right')).fontSize(15).fontColor([$r('app.color.pigo_muted')])
       }.width('100%').padding(14)
     }.id(`mine-${page}`).width('100%').padding(0)
-      .attributeModifier(glassCardSurface(this.darkMode, 16))
+      .attributeModifier(themedCardSurface(this.darkMode, this.themeId))
       .onClick(() => { this.minePage = page; })
   }
   @Builder
@@ -403,59 +403,150 @@ export struct SettingsView {
     Column({ space: 10 }) {
       Row({ space: 8 }) {
         Text('效果预览').fontSize(14).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_muted')).layoutWeight(1)
-        Text(`${themeStyle(this.themeId).label} · ${themeStyle(this.themeId).subtitle}`)
-          .fontSize(12).fontColor(this.accent)
+        Text(`${themeStyle(this.themeId).label} · ${themeStyle(this.themeId).styleTag}`)
+          .fontSize(12).fontWeight(FontWeight.Medium).fontColor(this.accent)
       }.width('100%')
-      Column({ space: 8 }) {
-        Row() {
-          Text('帮我切换到一个更有氛围的主题').fontSize(13).fontColor($r('app.color.pigo_text'))
-            .padding({ left: 12, right: 12, top: 8, bottom: 8 })
-            .backgroundColor(this.accentTint)
-            .borderRadius({ topLeft: 14, topRight: 5, bottomLeft: 14, bottomRight: 14 })
-        }.width('100%').justifyContent(FlexAlign.End)
-        Row({ space: 8 }) {
-          Blank().width(6).height(6).borderRadius(3).backgroundColor(this.accent)
-          Text('已应用当前配色与背景色调').fontSize(13).fontColor($r('app.color.pigo_text')).layoutWeight(1)
-          Text('发送').fontSize(11).fontWeight(FontWeight.Medium).fontColor(this.accentForeground)
-            .padding({ left: 10, right: 10, top: 4, bottom: 4 })
-            .backgroundColor(this.accent).borderRadius(10)
-        }.width('100%').alignItems(VerticalAlign.Center)
-          .padding({ left: 12, right: 10, top: 8, bottom: 8 })
-          .backgroundColor($r('app.color.pigo_panel')).borderRadius(12)
-      }.width('100%').padding(12).borderRadius(12)
-        .backgroundColor(themeCanvasColor(themeStyle(this.themeId), this.darkMode))
-        .border({ width: 1, radius: 12, color: $r('app.color.pigo_line') })
-    }.width('100%').padding(16).attributeModifier(glassCardSurface(this.darkMode, 16))
+      Stack() {
+        Column()
+          .width('100%').height('100%')
+          .radialGradient({
+            center: ['15%', '12%'],
+            radius: '82%',
+            colors: [[this.activePalette().auraTop, 0], ['#00000000', 1]]
+          })
+        Column()
+          .width('100%').height('100%')
+          .radialGradient({
+            center: ['88%', '88%'],
+            radius: '78%',
+            colors: [[this.activePalette().auraBottom, 0], ['#00000000', 1]]
+          })
+        Column({ space: 8 }) {
+          Row() {
+            Text('帮我切换到一个更有氛围的主题').fontSize(13).fontColor($r('app.color.pigo_text'))
+              .padding({ left: 12, right: 12, top: 7, bottom: 7 })
+              .backgroundColor(themeStyle(this.themeId).bubble === 'gradient' ? Color.Transparent : this.activePalette().bubbleStart)
+              .linearGradient(themeStyle(this.themeId).bubble === 'gradient' ? {
+                angle: 135,
+                colors: [[this.activePalette().bubbleStart, 0], [this.activePalette().bubbleEnd, 1]]
+              } : undefined)
+              .borderRadius({
+                topLeft: themeStyle(this.themeId).bubbleRadius,
+                topRight: Math.max(4, Math.round(themeStyle(this.themeId).bubbleRadius * 0.35)),
+                bottomLeft: themeStyle(this.themeId).bubbleRadius,
+                bottomRight: themeStyle(this.themeId).bubbleRadius
+              })
+              .border({
+                width: themeStyle(this.themeId).bubble === 'outline' ? 1.2 : 0.6,
+                radius: {
+                  topLeft: themeStyle(this.themeId).bubbleRadius,
+                  topRight: Math.max(4, Math.round(themeStyle(this.themeId).bubbleRadius * 0.35)),
+                  bottomLeft: themeStyle(this.themeId).bubbleRadius,
+                  bottomRight: themeStyle(this.themeId).bubbleRadius
+                },
+                color: this.activePalette().bubbleBorder
+              })
+          }.width('100%').justifyContent(FlexAlign.End)
+          Column() {
+            Row() {
+              Text('ts').fontSize(10).fontWeight(FontWeight.Medium).fontColor(this.accent).layoutWeight(1)
+              Text(themeStyle(this.themeId).subtitle).fontSize(10).fontColor($r('app.color.pigo_muted'))
+            }.width('100%').padding({ left: 10, right: 10, top: 4, bottom: 4 })
+              .backgroundColor(this.activePalette().codeHeaderBg)
+              .border({ width: { bottom: 0.5 }, color: this.activePalette().codeBorder })
+            Row({ space: 8 }) {
+              Text(`const theme = "${themeStyle(this.themeId).id}";`)
+                .fontSize(12).fontFamily('monospace').fontColor($r('app.color.pigo_text')).layoutWeight(1)
+                .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+              Text('发送').fontSize(11).fontWeight(FontWeight.Medium).fontColor(this.accentForeground)
+                .padding({ left: 9, right: 9, top: 3, bottom: 3 })
+                .backgroundColor(this.accent).borderRadius(Math.min(10, themeStyle(this.themeId).codeRadius))
+            }.width('100%').alignItems(VerticalAlign.Center).padding({ left: 10, right: 8, top: 7, bottom: 7 })
+          }.width('100%').clip(true)
+            .backgroundColor(this.activePalette().codeBg)
+            .borderRadius(themeStyle(this.themeId).codeRadius)
+            .border({ width: 1, radius: themeStyle(this.themeId).codeRadius, color: this.activePalette().codeBorder })
+        }.width('100%').padding(12)
+      }.width('100%').clip(true)
+        .backgroundColor(this.activePalette().canvas)
+        .borderRadius(themeStyle(this.themeId).cardRadius)
+        .border({ width: 1, radius: themeStyle(this.themeId).cardRadius, color: this.activePalette().cardBorder })
+    }.width('100%').padding(16).attributeModifier(themedCardSurface(this.darkMode, this.themeId))
   }
   @Builder
   themeOption(style: ThemeStyle) {
     Button({ type: ButtonType.Normal }) {
-      Column({ space: 8 }) {
-        Row({ space: 8 }) {
-          Row({ space: 4 }) {
-            Blank().width(20).height(20).borderRadius(10).backgroundColor(this.accentFor(style))
-            Blank().width(12).height(20).borderRadius(6).backgroundColor(this.tintFor(style))
-              .border({ width: 0.5, radius: 6, color: $r('app.color.pigo_line') })
-            Blank().width(10).height(20).borderRadius(5).backgroundColor(themeCanvasColor(style, this.darkMode))
-              .border({ width: 0.5, radius: 5, color: $r('app.color.pigo_line') })
-          }.layoutWeight(1)
+      Column({ space: 0 }) {
+        Stack({ alignContent: Alignment.TopEnd }) {
+          Column()
+            .width('100%').height('100%')
+            .radialGradient({
+              center: ['18%', '15%'],
+              radius: '90%',
+              colors: [[this.paletteFor(style).auraTop, 0], ['#00000000', 1]]
+            })
+          Column()
+            .width('100%').height('100%')
+            .radialGradient({
+              center: ['86%', '88%'],
+              radius: '85%',
+              colors: [[this.paletteFor(style).auraBottom, 0], ['#00000000', 1]]
+            })
+          Column({ space: 5 }) {
+            Row() {
+              Blank().width(44).height(13)
+                .backgroundColor(style.bubble === 'gradient' ? Color.Transparent : this.paletteFor(style).bubbleStart)
+                .linearGradient(style.bubble === 'gradient' ? {
+                  angle: 135,
+                  colors: [[this.paletteFor(style).bubbleStart, 0], [this.paletteFor(style).bubbleEnd, 1]]
+                } : undefined)
+                .borderRadius(Math.min(7, Math.round(style.bubbleRadius * 0.45)))
+                .border({
+                  width: style.bubble === 'outline' ? 1 : 0.5,
+                  radius: Math.min(7, Math.round(style.bubbleRadius * 0.45)),
+                  color: this.paletteFor(style).bubbleBorder
+                })
+            }.width('100%').justifyContent(FlexAlign.End)
+            Row({ space: 5 }) {
+              Blank().width(14).height(14).borderRadius(7).backgroundColor(this.paletteFor(style).accent)
+              Column({ space: 3 }) {
+                Blank().width('72%').height(4).borderRadius(2).backgroundColor(this.paletteFor(style).codeBorder)
+                Blank().width('48%').height(4).borderRadius(2).backgroundColor(this.paletteFor(style).codeHeaderBg)
+              }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+            }.width('100%').padding({ left: 6, right: 6, top: 4, bottom: 4 })
+              .backgroundColor(this.paletteFor(style).codeBg)
+              .borderRadius(Math.min(8, style.codeRadius))
+              .border({ width: 0.6, radius: Math.min(8, style.codeRadius), color: this.paletteFor(style).codeBorder })
+          }.width('100%').height('100%').padding(8).justifyContent(FlexAlign.SpaceBetween)
           if (this.themeId === style.id) {
-            SymbolGlyph($r('sys.symbol.checkmark_circle_fill')).fontSize(18).fontColor([this.accentFor(style)])
+            SymbolGlyph($r('sys.symbol.checkmark_circle_fill')).fontSize(17)
+              .fontColor([this.paletteFor(style).accent])
+              .margin({ top: 6, right: 6 })
           }
-        }.width('100%').alignItems(VerticalAlign.Center)
-        Column({ space: 2 }) {
-          Text(style.label).fontSize(15).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
-          Text(style.subtitle).fontSize(12).fontColor($r('app.color.pigo_muted')).maxLines(1)
-            .textOverflow({ overflow: TextOverflow.Ellipsis })
-        }.width('100%').alignItems(HorizontalAlign.Start)
-      }.width('100%').padding(12)
-    }.id(`theme-${style.id}`).layoutWeight(1).padding(0).borderRadius(14)
+        }.width('100%').height(62).clip(true)
+          .backgroundColor(this.paletteFor(style).canvas)
+          .border({ width: { bottom: 0.5 }, color: this.paletteFor(style).cardBorder })
+        Column({ space: 3 }) {
+          Row({ space: 6 }) {
+            Text(style.label).fontSize(14).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
+              .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).layoutWeight(1)
+            Text(style.styleTag).fontSize(10).fontWeight(FontWeight.Medium)
+              .fontColor(this.paletteFor(style).accent)
+              .padding({ left: 6, right: 6, top: 2, bottom: 2 })
+              .backgroundColor(this.paletteFor(style).accentTint)
+              .borderRadius(6)
+          }.width('100%').alignItems(VerticalAlign.Center)
+          Text(style.subtitle).fontSize(11).fontColor($r('app.color.pigo_muted'))
+            .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+        }.width('100%').padding({ left: 10, right: 10, top: 8, bottom: 9 }).alignItems(HorizontalAlign.Start)
+      }.width('100%')
+    }.id(`theme-${style.id}`).layoutWeight(1).padding(0).clip(true).borderRadius(14)
       .accessibilitySelected(this.themeId === style.id)
-      .backgroundColor(this.themeId === style.id ? this.tintFor(style) : $r('app.color.pigo_control'))
+      .backgroundColor(this.themeId === style.id ? this.paletteFor(style).accentTint : this.paletteFor(style).cardBg)
       .border({
-        width: this.themeId === style.id ? 1.5 : 1,
+        width: this.themeId === style.id ? 1.8 : 1,
         radius: 14,
-        color: this.themeId === style.id ? this.accentFor(style) : $r('app.color.pigo_line')
+        color: this.themeId === style.id ? this.paletteFor(style).accent : this.paletteFor(style).cardBorder
       })
       .onClick(() => { this.selectTheme(style.id); })
   }
@@ -472,11 +563,11 @@ export struct SettingsView {
             .onClick(() => { this.selectAppearanceMode(mode); })
         }, (mode: AppearanceMode) => mode.id)
       }.width('100%').padding(4).borderRadius(14).backgroundColor($r('app.color.pigo_control'))
-    }.width('100%').padding(16).attributeModifier(glassCardSurface(this.darkMode, 16))
+    }.width('100%').padding(16).attributeModifier(themedCardSurface(this.darkMode, this.themeId))
     this.themePreviewCard()
     Column({ space: 10 }) {
       Row() {
-        Text('主题配色').fontSize(16).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text')).layoutWeight(1)
+        Text('精选风格主题').fontSize(16).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text')).layoutWeight(1)
         Text(`${THEME_STYLES.length} 款`).fontSize(13).fontColor($r('app.color.pigo_muted'))
       }.width('100%')
       ForEach(this.themeRows(), (pair: ThemeStyle[], rowIndex: number) => {
@@ -489,7 +580,7 @@ export struct SettingsView {
           }
         }.width('100%')
       }, (_pair: ThemeStyle[], rowIndex: number) => `theme-row-${rowIndex}`)
-    }.width('100%').padding(16).attributeModifier(glassCardSurface(this.darkMode, 16))
+    }.width('100%').padding(16).attributeModifier(themedCardSurface(this.darkMode, this.themeId))
     if (this.appearanceNotice) Text(this.appearanceNotice).fontSize(13).fontColor($r('app.color.pigo_warning'))
   }
   @Builder
@@ -502,7 +593,7 @@ export struct SettingsView {
       Toggle({ type: ToggleType.Switch, isOn: this.runNoticesEnabled })
         .id('run-notice-setting').selectedColor(this.accent).accessibilityText('运行结束通知')
         .onChange((enabled: boolean) => { void this.setRunNoticesEnabled(enabled); })
-    }.width('100%').padding(14).attributeModifier(glassCardSurface(this.darkMode, 16))
+    }.width('100%').padding(14).attributeModifier(themedCardSurface(this.darkMode, this.themeId))
   }
   @Builder
   liveViewSettings() {
@@ -515,13 +606,13 @@ export struct SettingsView {
         .id('live-view-setting').selectedColor(this.accent).accessibilityText('任务实况窗')
         .enabled(this.liveViewStatus !== 'rights')
         .onChange((enabled: boolean) => { void this.setLiveViewsEnabled(enabled); })
-    }.width('100%').padding(14).attributeModifier(glassCardSurface(this.darkMode, 16))
+    }.width('100%').padding(14).attributeModifier(themedCardSurface(this.darkMode, this.themeId))
   }
-  private accentFor(style: ThemeStyle): string {
+  private paletteFor(style: ThemeStyle): ThemePalette {
     return this.darkMode ? style.dark : style.light;
   }
-  private tintFor(style: ThemeStyle): string {
-    return this.darkMode ? style.darkTint : style.lightTint;
+  private activePalette(): ThemePalette {
+    return themePalette(this.themeId, this.darkMode);
   }
   private themeRows(): ThemeStyle[][] {
     const rows: ThemeStyle[][] = [];

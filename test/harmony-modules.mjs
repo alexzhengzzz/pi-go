@@ -6,8 +6,13 @@ const root = new URL('../harmony/entry/src/main/ets/', import.meta.url).href;
 // ArkTS logic modules are TypeScript. Resolve their extensionless imports as
 // ArkTS does, and substitute only the system APIs used by these tests.
 const systemMocks = new Map([
-  ['@kit.ArkTS', `export const util = {
-    TextEncoder, Base64Helper: class {},
+  ['@kit.ArkTS', `class ArkTextEncoder {
+    constructor() { this.encoder = new TextEncoder(); }
+    encode(text) { return this.encoder.encode(text); }
+    encodeInto(text) { return this.encoder.encode(text); }
+  }
+  export const util = {
+    TextEncoder: ArkTextEncoder, Base64Helper: class {},
     TextDecoder: class {
       constructor(encoding) { this.decoder = new TextDecoder(encoding); }
       decodeWithStream(bytes, options) { return this.decoder.decode(bytes, options); }
@@ -28,8 +33,35 @@ const systemMocks = new Map([
       const member = api[key];
       return typeof member === 'function' ? member.bind(api) : member;
     }
-  });`],
-  ['@kit.ArkData', 'export const preferences = {};'],
+  });
+  export const fileUri = {
+    getUriFromPath: (path) => globalThis.pigoTestFileUri ? globalThis.pigoTestFileUri(path) : 'file://com.example.pigo' + path
+  };`],
+  ['@kit.ArkData', `export const preferences = {};
+  export const uniformTypeDescriptor = {
+    UniformDataType: {
+      PLAIN_TEXT: 'general.plain-text',
+      MARKDOWN: 'general.markdown'
+    }
+  };`],
+  ['@kit.AbilityKit', 'export const common = {};'],
+  ['@kit.ShareKit', `export const systemShare = {
+    SelectionMode: { SINGLE: 0, BATCH: 1 },
+    SharePreviewMode: { DEFAULT: 0, DETAIL: 1 },
+    SharedData: class {
+      constructor(record) { this.records = [record]; }
+      addRecord(record) { this.records.push(record); }
+      getRecords() { return this.records; }
+    },
+    ShareController: class {
+      constructor(data) { this.data = data; }
+      async show(context, options) {
+        if (globalThis.pigoTestShareShow) {
+          return await globalThis.pigoTestShareShow(this.data, context, options);
+        }
+      }
+    }
+  };`],
   ['@kit.CryptoArchitectureKit', 'export const cryptoFramework = {};'],
   ['@kit.UniversalKeystoreKit', 'export const huks = {};'],
 ]);

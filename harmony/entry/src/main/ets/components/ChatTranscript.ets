@@ -14,6 +14,7 @@ import {
   TranscriptTurn
 } from '../TranscriptTurns';
 import { headerSymbol } from './HeaderSymbol';
+import { ThemePalette, ThemeStyle, themePalette, themeStyle } from '../Appearance';
 
 @Extend(Button)
 function chatAction() {
@@ -68,6 +69,7 @@ export struct ChatTranscript {
   @BuilderParam emptyTranscript: () => void = this.defaultEmptyTranscript;
   @Prop accent: string;
   @Prop accentTint: string;
+  @Prop themeId: string = 'mint';
   @Prop topPadding: number = 10;
   @Prop bottomPadding: number = 8;
   @Prop scrollBottomOffset: number = 14;
@@ -97,6 +99,19 @@ export struct ChatTranscript {
     } else {
       this.processOpenIds = this.processOpenIds.concat([processId]);
     }
+  }
+
+  private currentTheme(): ThemeStyle {
+    return themeStyle(this.themeId);
+  }
+
+  private currentPalette(): ThemePalette {
+    return themePalette(this.themeId, this.darkMode);
+  }
+
+  private bubbleCorners(): BorderRadiuses {
+    const r = this.currentTheme().bubbleRadius;
+    return { topLeft: r, topRight: Math.max(4, Math.round(r * 0.35)), bottomLeft: r, bottomRight: r };
   }
 
   private displayTurns(): TranscriptTurn[] {
@@ -136,8 +151,8 @@ export struct ChatTranscript {
                 LoadingProgress().width(13).height(13).color(this.accent)
                 Text('正在思考…').fontSize(13).fontColor($r('app.color.pigo_muted'))
               }.width('100%').padding({ left: 12, right: 12, top: 10, bottom: 10 })
-                .backgroundColor($r('app.color.pigo_panel')).borderRadius(12)
-                .border({ width: 1, color: $r('app.color.pigo_line') })
+                .backgroundColor(this.currentPalette().cardBg).borderRadius(this.currentTheme().codeRadius)
+                .border({ width: 1, radius: this.currentTheme().codeRadius, color: this.currentPalette().cardBorder })
             }
             ForEach(this.queuedSteering.filter((message: QueuedSteering): boolean => message.sessionKey === this.draftKey(this.currentId)),
               (message: QueuedSteering) => {
@@ -152,7 +167,17 @@ export struct ChatTranscript {
                     })
                     Text('排队中').fontSize(12).fontColor($r('app.color.pigo_muted'))
                   }.alignItems(HorizontalAlign.Start).padding(13).constraintSize({ maxWidth: '88%' })
-                    .backgroundColor(this.accentTint).borderRadius({ topLeft: 17, topRight: 6, bottomLeft: 17, bottomRight: 17 })
+                    .backgroundColor(this.currentTheme().bubble === 'gradient' ? Color.Transparent : this.currentPalette().bubbleStart)
+                    .linearGradient(this.currentTheme().bubble === 'gradient' ? {
+                      angle: 135,
+                      colors: [[this.currentPalette().bubbleStart, 0], [this.currentPalette().bubbleEnd, 1]]
+                    } : undefined)
+                    .borderRadius(this.bubbleCorners())
+                    .border({
+                      width: this.currentTheme().bubble === 'outline' ? 1.2 : 0.6,
+                      radius: this.bubbleCorners(),
+                      color: this.currentPalette().bubbleBorder
+                    })
                 }.width('100%').justifyContent(FlexAlign.End).padding({ top: 10, bottom: 4 })
               }, (message: QueuedSteering) => message.id)
           }.width('100%').padding({ left: 16, right: 16, top: this.topPadding, bottom: this.bottomPadding })
@@ -219,8 +244,17 @@ export struct ChatTranscript {
         }
       }.alignItems(HorizontalAlign.Start).padding({ left: 14, right: 14, top: 10, bottom: 10 })
         .constraintSize({ maxWidth: '88%' })
-        .backgroundColor(this.accentTint)
-        .borderRadius({ topLeft: 17, topRight: 6, bottomLeft: 17, bottomRight: 17 })
+        .backgroundColor(this.currentTheme().bubble === 'gradient' ? Color.Transparent : this.currentPalette().bubbleStart)
+        .linearGradient(this.currentTheme().bubble === 'gradient' ? {
+          angle: 135,
+          colors: [[this.currentPalette().bubbleStart, 0], [this.currentPalette().bubbleEnd, 1]]
+        } : undefined)
+        .borderRadius(this.bubbleCorners())
+        .border({
+          width: this.currentTheme().bubble === 'outline' ? 1.2 : 0.6,
+          radius: this.bubbleCorners(),
+          color: this.currentPalette().bubbleBorder
+        })
     }.width('100%').justifyContent(FlexAlign.End).padding({ top: 14, bottom: 4 })
   }
 
@@ -329,8 +363,8 @@ export struct ChatTranscript {
           .onClick(() => { this.toggleProcess(turn.processId); })
       }
     }.width('100%').padding({ left: 12, right: 12, top: 10, bottom: 10 })
-      .backgroundColor($r('app.color.pigo_panel')).borderRadius(12)
-      .border({ width: 1, color: $r('app.color.pigo_line') })
+      .backgroundColor(this.currentPalette().cardBg).borderRadius(this.currentTheme().codeRadius)
+      .border({ width: 1, radius: this.currentTheme().codeRadius, color: this.currentPalette().cardBorder })
   }
 
   @Builder
@@ -462,7 +496,14 @@ export struct ChatTranscript {
 
   @Builder
   richChatText(text: string, cwd: string, documentPath: string = '', allowLandscape: boolean = true) {
-    ChatContent({ text: text, accent: this.accent, allowLandscape: allowLandscape,
+    ChatContent({
+      text: text,
+      accent: this.accent,
+      codeBg: this.currentPalette().codeBg,
+      codeBorder: this.currentPalette().codeBorder,
+      codeHeaderBg: this.currentPalette().codeHeaderBg,
+      codeRadius: this.currentTheme().codeRadius,
+      allowLandscape: allowLandscape,
       loadImage: (target: string): Promise<string> => this.loadMarkdownImage(target, cwd, documentPath),
       openImage: (source: string, label: string): void => { this.showChatImage(source, label); },
       openLink: (target: string): void => {

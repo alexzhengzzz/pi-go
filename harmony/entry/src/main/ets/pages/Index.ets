@@ -11,7 +11,7 @@ import { WorkspaceFiles } from '../components/WorkspaceFiles';
 import { SessionSidebar } from '../components/SessionSidebar';
 import { ChatComposer } from '../components/ChatComposer';
 import { ChatTranscript } from '../components/ChatTranscript';
-import { KeyboardAvoidMode, window } from '@kit.ArkUI';
+import { KeyboardAvoidMode, promptAction, window } from '@kit.ArkUI';
 import { inputMethod } from '@kit.IMEKit';
 import { ChatContent } from '../ChatContent';
 import { ChatImage } from '../ChatImage';
@@ -28,7 +28,7 @@ import { Companion, CredentialVault } from '../CredentialVault';
 import { choosePromptImage, capturePromptImage, PromptImage } from '../PromptImage';
 import { choosePromptFiles, MAX_FILES } from '../PromptFile';
 import { ensureMicrophone, VoiceInputSession, voiceInputSupported } from '../VoiceInput';
-import { AppearanceMode, ThemeStyle, appearanceMode, canvasFadeStops, openSettings, themeCanvasColor, themeStyle } from '../Appearance';
+import { AppearanceMode, ThemePalette, ThemeStyle, appearanceMode, canvasFadeStops, openSettings, themePalette, themeStyle } from '../Appearance';
 import { HuaweiProfile, authorizeHuaweiProfile, isHuaweiProfileCurrent } from '../HuaweiProfile';
 import { AccountSync, CloudComputer, SyncRow, SyncSnapshot, SYNC_MODE, SYNC_THEME, computerSyncRow } from '../AccountSync';
 import { immersiveSurface, glassButtonSurface, glassComposerSurface, glassCardSurface, immersiveFloatingTabs, hasImmersiveMaterial, immersiveSheetMaterial } from '../Immersive';
@@ -38,6 +38,7 @@ import { decodePairingBundle, validUsb } from '../PairingCode';
 import { connectionLabel, validCompanion } from '../CompanionCheck';
 import { ComputerGroup, computerGroupId, computerGroups, computerGroupTitle, moveComputerConnection, renameComputerGroup } from '../ComputerGroups';
 import { liveActivity } from '../LiveActivity';
+import { SessionShareFormat, SessionShareMeta, formatSessionMarkdown, shareSessionViaSystem } from '../SessionShare';
 import { ScheduleJob, ScheduleRun, ScheduleWatch, RunMessage, scheduleTime, parseScheduleTime, scheduleRunStatus, isCurrentScheduleComputer } from '../ScheduledRuns';
 
 import { ModelOption, BridgeEndpoint, SessionState, SessionRow, ChatMessage, DraftAttachment, AttachmentRef,
@@ -156,6 +157,7 @@ struct Index {
   private fileVersion: string = '';
   @State private sessionName: string = '';
   @State private showSettings: boolean = false;
+  @State private sharingSession: boolean = false;
   @State private renameDraft: string = '';
   @State private models: ModelOption[] = [];
   @State private selectedModel: number = -1;
@@ -2298,7 +2300,14 @@ struct Index {
 
   @Builder
   richChatText(text: string, cwd: string, documentPath: string = '', allowLandscape: boolean = true) {
-    ChatContent({ text: text, accent: this.accent(), allowLandscape: allowLandscape,
+    ChatContent({
+      text: text,
+      accent: this.accent(),
+      codeBg: this.palette().codeBg,
+      codeBorder: this.palette().codeBorder,
+      codeHeaderBg: this.palette().codeHeaderBg,
+      codeRadius: themeStyle(this.themeId).codeRadius,
+      allowLandscape: allowLandscape,
       loadImage: (target: string): Promise<string> => this.loadMarkdownImage(target, cwd, documentPath),
       openImage: (source: string, label: string): void => { this.showChatImage(source, label); },
       openLink: (target: string): void => {
@@ -2400,6 +2409,172 @@ struct Index {
       message = '复制失败';
     }
     this.getUIContext().getPromptAction().showToast({ message });
+  }
+
+  private openShareMenu(anchor: string = 'session-settings'): void {
+    if (this.sharingSession || this.openingSession) return;
+    if (!this.currentId) {
+      this.getUIContext().getPromptAction().showToast({ message: '请先打开一个会话' });
+      return;
+    }
+    this.dismissKeyboard();
+    void this.getUIContext().getPromptAction().showActionMenu({
+      title: '分享会话',
+      buttons: [
+        { text: '系统分享（Markdown 文件）', color: $r('app.color.pigo_text') },
+        { text: '系统分享（纯文本）', color: $r('app.color.pigo_text') },
+        { text: '复制会话内容', color: $r('app.color.pigo_text') }
+      ]
+    }).then((result: promptAction.ActionMenuSuccessResponse) => {
+      if (result.index === 0) void this.shareCurrentSession('markdown', anchor);
+      else if (result.index === 1) void this.shareCurrentSession('text', anchor);
+      else if (result.index === 2) void this.shareCurrentSession('copy', anchor);
+    }).catch(() => {});
+  }
+
+  private async fetchFullMessageText(sessionId: string, messageId: string, epoch: number): Promise<string | undefined> {
+    const path = `/message-text?id=${encodeURIComponent(sessionId)}&message=${encodeURIComponent(messageId)}`;
+    const pages: string[] = [];
+    let offset = 0;
+    for (let page = 0; page < 40; page++) {
+      const reply = await this.request(`${path}&offset=${offset}`);
+      if (epoch !== this.epoch || sessionId !== this.currentId) return undefined;
+      if (reply.text === undefined) return undefined;
+      pages.push(reply.text);
+      if (reply.nextTextOffset === undefined) break;
+      if (reply.nextTextOffset <= offset) return undefined;
+      offset = reply.nextTextOffset;
+    }
+    return pages.join('');
+  }
+
+  private async collectCurrentSessionMessages(sessionId: string, epoch: number): Promise<ChatMessage[]> {
+    let collected: ChatMessage[] = this.messages.slice();
+    let cursor = this.historyCursor;
+    const seenCursors = new Set<string>();
+    if (this.reachable && cursor) {
+      const sync = this.syncMode === 'sequenced' ? '&sync=2' : '';
+      for (let page = 0; page < 50 && cursor; page++) {
+        if (seenCursors.has(cursor)) break;
+        seenCursors.add(cursor);
+        try {
+          const result = await this.request(`/history?id=${encodeURIComponent(sessionId)}&before=${encodeURIComponent(cursor)}${sync}`);
+          if (epoch !== this.epoch || this.currentId !== sessionId || result.session?.id !== sessionId) break;
+          const known = new Set<string>(collected.map((item: ChatMessage): string => item.id));
+          const older = (result.messages ?? []).filter((item: ChatMessage): boolean => !known.has(item.id));
+          collected = older.concat(collected);
+          cursor = result.historyCursor;
+        } catch {
+          break;
+        }
+      }
+    }
+    if (!this.reachable) return collected;
+    const expanded: ChatMessage[] = [];
+    for (const message of collected) {
+      if (epoch !== this.epoch || this.currentId !== sessionId) break;
+      if (message.textTruncated) {
+        try {
+          const full = await this.fetchFullMessageText(sessionId, message.id, epoch);
+          if (full !== undefined) {
+            expanded.push({
+              id: message.id,
+              role: message.role,
+              text: full,
+              textTruncated: false,
+              imageCount: message.imageCount,
+              thinking: message.thinking,
+              thinkingMs: message.thinkingMs,
+              tools: message.tools
+            });
+            continue;
+          }
+        } catch {}
+      }
+      expanded.push(message);
+    }
+    return expanded;
+  }
+
+  private async shareCurrentSession(mode: SessionShareFormat | 'copy', anchor?: string): Promise<void> {
+    if (this.sharingSession || !this.currentId) return;
+    const epoch = this.epoch;
+    const id = this.currentId;
+    this.sharingSession = true;
+    try {
+      const fullMessages = await this.collectCurrentSessionMessages(id, epoch);
+      if (epoch !== this.epoch || id !== this.currentId) return;
+      const meta: SessionShareMeta = {
+        title: this.chatTitle(),
+        workspace: this.project,
+        computer: this.computerTitle()
+      };
+      const markdown = formatSessionMarkdown(fullMessages, meta, { liveText: this.liveText });
+      if (!markdown) {
+        this.getUIContext().getPromptAction().showToast({ message: '当前会话暂无可分享的内容' });
+        return;
+      }
+      if (mode === 'copy') {
+        await this.copyText(markdown);
+        return;
+      }
+      const host = this.getUIContext().getHostContext();
+      if (!host) throw new Error('no_context');
+      const result = await shareSessionViaSystem(
+        host as common.UIAbilityContext,
+        markdown,
+        meta,
+        fullMessages.length,
+        mode,
+        anchor
+      );
+      if (epoch === this.epoch && result.fallbackToFile) {
+        this.getUIContext().getPromptAction().showToast({ message: '会话内容较长，已转为 Markdown 文件分享' });
+      }
+    } catch {
+      if (epoch === this.epoch) {
+        this.getUIContext().getPromptAction().showToast({ message: '暂时无法调起系统分享，请重试' });
+      }
+    } finally {
+      this.sharingSession = false;
+    }
+  }
+
+  private async shareSidebarSession(session: SessionRow): Promise<void> {
+    if (this.sharingSession || this.openingSession) return;
+    if (session.id === this.currentId) {
+      this.setDrawer(false);
+      this.openShareMenu('session-settings');
+      return;
+    }
+    if (!this.reachable) {
+      this.getUIContext().getPromptAction().showToast({ message: '请先连接电脑再分享该会话' });
+      return;
+    }
+    this.activeTab = 'tasks';
+    this.showSettings = false;
+    this.showFiles = false;
+    const opened = await this.requestAction('/open', { id: session.id });
+    if (opened && this.currentId === session.id) {
+      this.openShareMenu('session-settings');
+    }
+  }
+
+  private chatHeaderMenu(): MenuElement[] {
+    const items: MenuElement[] = [];
+    if (this.currentId && !this.noSession && this.activeTab === 'tasks') {
+      items.push({
+        value: '分享会话',
+        action: () => { this.openShareMenu('session-settings'); }
+      });
+    }
+    items.push(
+      { value: '模型与会话设置', action: () => {
+        if (this.reachable && this.currentId) void this.requestAction('/models');
+      } },
+      { value: '切换电脑', action: () => { if (!this.busy) this.openComputers(); } }
+    );
+    return items;
   }
 
   private async updateSessionMeta(session: SessionRow, pin: boolean): Promise<void> {
@@ -3612,20 +3787,15 @@ struct Index {
     this.updateCloudComputer(computer.address, '');
   }
 
-  private accentFor(style: ThemeStyle): string {
-    return this.darkMode ? style.dark : style.light;
-  }
+  private palette(): ThemePalette { return themePalette(this.themeId, this.darkMode); }
 
-  private accent(): string { return this.accentFor(themeStyle(this.themeId)); }
+  private accent(): string { return this.palette().accent; }
 
-  private accentTint(): string {
-    const style = themeStyle(this.themeId);
-    return this.darkMode ? style.darkTint : style.lightTint;
-  }
+  private accentTint(): string { return this.palette().accentTint; }
 
-  private accentForeground(): string { return this.darkMode ? '#15191C' : '#FFFFFF'; }
+  private accentForeground(): string { return this.palette().accentForeground; }
 
-  private themeCanvas(): string { return themeCanvasColor(themeStyle(this.themeId), this.darkMode); }
+  private themeCanvas(): string { return this.palette().canvas; }
 
   private selectTheme(id: string): void {
     this.appearanceNotice = '';
@@ -3948,6 +4118,23 @@ struct Index {
             Text('没有可用模型，请在电脑上检查 Pi CLI 的模型配置。').fontSize(13).fontColor($r('app.color.pigo_muted')).width('100%')
           }
         }.width('100%').padding(14).attributeModifier(glassCardSurface(this.darkMode, 16))
+        Column({ space: 10 }) {
+          Text('会话分享').fontSize(15).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text')).width('100%')
+          Text('通过鸿蒙系统分享将当前会话发送给其他应用，或复制为 Markdown 文本。')
+            .fontSize(12).fontColor($r('app.color.pigo_muted')).width('100%')
+          Button(this.sharingSession ? '正在准备分享…' : '系统分享（Markdown 文件）').chatAction().id('session-share-markdown')
+            .width('100%').height(42).backgroundColor(this.accent()).fontColor(this.accentForeground())
+            .enabled(!this.sharingSession && !!this.currentId)
+            .onClick(() => { void this.shareCurrentSession('markdown', 'session-share-markdown'); })
+          Row({ space: 8 }) {
+            Button('系统分享（纯文本）').chatAction().id('session-share-text').layoutWeight(1).height(40)
+              .enabled(!this.sharingSession && !!this.currentId)
+              .onClick(() => { void this.shareCurrentSession('text', 'session-share-text'); })
+            Button('复制内容').chatAction().id('session-share-copy').layoutWeight(1).height(40)
+              .enabled(!this.sharingSession && !!this.currentId)
+              .onClick(() => { void this.shareCurrentSession('copy'); })
+          }.width('100%')
+        }.width('100%').padding(14).attributeModifier(glassCardSurface(this.darkMode, 16))
       }.width('100%').padding({ left: 16, right: 16, top: this.topContentClearance(), bottom: this.bottomPad() + 16 })
     }.layoutWeight(1).width('100%').align(Alignment.TopStart).scrollBar(BarState.Off)
   }
@@ -4001,12 +4188,7 @@ struct Index {
               Image($r('app.media.ic_more')).width(20).height(20).fillColor($r('app.color.pigo_text'))
             }.width('100%').height('100%').accessibilityLevel('no-hide-descendants')
           }.id('session-settings').headerAction().attributeModifier(immersiveSurface(this.darkMode)).accessibilityText('更多操作')
-            .bindMenu([
-              { value: '模型与会话设置', action: () => {
-                if (this.reachable && this.currentId) void this.requestAction('/models');
-              } },
-              { value: '切换电脑', action: () => { if (!this.busy) this.openComputers(); } }
-            ])
+            .bindMenu(this.chatHeaderMenu())
         }
       }
     }.width('100%').height(this.headerHeight())
@@ -4067,6 +4249,7 @@ struct Index {
       emptyTranscript: this.emptyTranscript.bind(this),
       accent: this.accent(),
       accentTint: this.accentTint(),
+      themeId: this.themeId,
       topPadding: this.chatHasTopCards() ? 10 : this.topContentClearance(),
       bottomPadding: this.chatBottomClearance(),
       scrollBottomOffset: this.chatScrollBottomOffset(),
@@ -4690,6 +4873,7 @@ struct Index {
       swipeDrawer: (event: GestureEvent): void => this.swipeDrawer(event),
       toggleSpace: (path: string): void => this.toggleSpace(path),
       updateSessionMeta: (session: SessionRow, pin: boolean): Promise<void> => this.updateSessionMeta(session, pin),
+      shareSession: (session: SessionRow): Promise<void> => this.shareSidebarSession(session),
       windowHeight: this.windowHeight,
       workspaces: this.$workspaces,
       accent: this.accent(),
@@ -5095,12 +5279,33 @@ struct Index {
       .attributeModifier(glassCardSurface(this.darkMode, 16, true))
   }
 
+  @Builder
+  themeBackdrop() {
+    Stack() {
+      Column()
+        .width('100%').height('100%')
+        .radialGradient({
+          center: ['16%', '10%'],
+          radius: '78%',
+          colors: [[this.palette().auraTop, 0], ['#00000000', 1]]
+        })
+      Column()
+        .width('100%').height('100%')
+        .radialGradient({
+          center: ['86%', '86%'],
+          radius: '74%',
+          colors: [[this.palette().auraBottom, 0], ['#00000000', 1]]
+        })
+    }.width('100%').height('100%').hitTestBehavior(HitTestMode.None)
+  }
+
   build() {
     Stack({ alignContent: Alignment.TopStart }) {
       Row() {
         // Reserve the sidebar's space without rebuilding the conversation or moving the session list.
         Blank().width(this.dockedSessions() ? this.sessionPaneWidth() : 0)
         Stack({ alignContent: Alignment.Bottom }) {
+          this.themeBackdrop()
           this.mainNavigation()
         }.height('100%').layoutWeight(1)
           .onGestureJudgeBegin(() => this.dockedSessions() || this.showSessions || this.holdActive || this.recording ||
