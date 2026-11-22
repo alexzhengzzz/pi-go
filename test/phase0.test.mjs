@@ -536,6 +536,10 @@ test("phase 0 against Pi 1.4.0 RPC, using an offline provider and disposable pro
   const idleSnapshot = await (await bridge.get("/session/snapshot")).json();
   assert.deepEqual(idleSnapshot.cursor, { ...settledFrame.cursor, runId: null });
   await recoveredFeed.return();
+  const bundledHistory = await (await bridge.get("/session/snapshot?history=1")).json();
+  assert.deepEqual(bundledHistory.cursor, idleSnapshot.cursor);
+  assert.equal(bundledHistory.session.id, historic.sessionId);
+  assert.ok(bundledHistory.messages.some((message) => message.role === "user" && message.text === input.text));
   const snapshot = await (await bridge.get("/chat")).json();
   assert.equal(snapshot.session.idle, true);
   assert.equal(snapshot.liveText, "");

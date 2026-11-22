@@ -3,7 +3,7 @@ import { lstatSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync,
 import { createServer, request as ipcRequest } from 'node:http';
 import { createServer as createSecureServer } from 'node:https';
 import { homedir, tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { desktopHosts, ipcDirectory, localRequest, localUpload, workers, pairingRuntimes } from './local-ipc.mjs';
 import { newLanIdentity, newPublicIdentity, privateIPv4, publicAddress } from './lan-tls.mjs';
@@ -224,7 +224,7 @@ async function workerList() {
     try {
       const { status, data } = await localRequest(socket, 'GET', '/session');
       if (status === 200 && typeof data.session?.id === 'string' && typeof data.session?.cwd === 'string') {
-        return { socket, session: data.session };
+        return { socket, session: data.session, historyDirectory: typeof data.historyDirectory === 'string' ? data.historyDirectory : undefined };
       }
     } catch (cause) {
       if (cause.code === 'ECONNREFUSED') {
@@ -256,7 +256,17 @@ async function catalog(live, hostSocket, granted = [], includeComputerHistory = 
     ...session, active: true, occupied: counts.get(session.id) > 1,
   }]));
   const projects = new Map(live.map((worker) => [worker.session.cwd, worker]));
-  await Promise.all([...projects].map(async ([cwd, { socket, session }]) => {
+  const native = computerAccess && includeComputerHistory ? await computerSessions() : [];
+  const nativeProjectsById = new Map(native.map((row) => [row.id, row.cwd]));
+  let nativeRoot;
+  if (computerAccess && includeComputerHistory) {
+    try { nativeRoot = realpathSync(join(pairingProfile, 'sessions')); } catch {}
+  }
+  await Promise.all([...projects].map(async ([cwd, { socket, session, historyDirectory }]) => {
+    // Reuse native history for workers backed by this broker's Pi data directory.
+    // Older workers omit the directory, so match their live ID and project.
+    if (nativeRoot && (historyDirectory ? dirname(historyDirectory) === nativeRoot
+      : nativeProjectsById.get(session.id) === cwd)) return;
     let cursor = 0;
     for (let page = 0; page < 3; page += 1) {
       const path = workerPath(`/sessions?limit=100&cursor=${cursor}`, session);
@@ -281,11 +291,7 @@ async function catalog(live, hostSocket, granted = [], includeComputerHistory = 
       if (!rows.has(record.id)) rows.set(record.id, { ...record, cwd, active: false });
     }
   }));
-  if (computerAccess && includeComputerHistory) {
-    for (const record of await computerSessions()) {
-      if (!rows.has(record.id)) rows.set(record.id, record);
-    }
-  }
+  for (const record of native) if (!rows.has(record.id)) rows.set(record.id, record);
   return [...rows.values()].sort((left, right) => Number(right.active) - Number(left.active) || (right.modified ?? '').localeCompare(left.modified ?? '')).slice(0, computerAccess ? undefined : 250);
 }
 
@@ -495,6 +501,7 @@ const publicHandler = async (request, response) => {
         if ((session.idle === false || session.queued === true) && !seen.has(session.id)) {
           seen.add(session.id);
           running.push({ id: session.id, name: session.name, cwd: session.cwd,
+            started: !!session.runId || session.queued === true,
             state: session.idle === false ? 'streaming' : 'queued',
             pid: Number(/(?:^|\/)w-(\d+)-/.exec(socket)?.[1]) });
         }
@@ -538,8 +545,7 @@ const publicHandler = async (request, response) => {
       if (typeof input.id !== 'string') return error(response, 400, 'invalid_session');
       const targets = live.filter(({ session }) => session.id === input.id);
       if (targets.length === 0) {
-        const context = await hostContext();
-        const native = computerAccess ? await findComputerSession(input.id) : undefined;
+        const [context, native] = await Promise.all([hostContext(), computerAccess ? findComputerSession(input.id) : undefined]);
         const row = native ?? (await catalog(live, context.socket, context.granted, false)).find(({ id }) => id === input.id);
         if (!row) return error(response, 409, 'desktop_handoff_required');
         return await nativeHandoff(request, response, '/open', row.cwd, row.id, context, live.some(({ session }) => session.cwd === row.cwd));

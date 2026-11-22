@@ -9,7 +9,7 @@ let cached;
 let pending;
 const textOf = (content) => typeof content === 'string' ? content : Array.isArray(content) ? content.filter((p) => p.type === 'text').map((p) => p.text).join('\n') : '';
 
-async function inspect(file, targetId) {
+async function inspect(file, targetId, info) {
   const stream = createReadStream(file, { encoding: 'utf8' });
   const lines = createInterface({ input: stream, crlfDelay: Infinity });
   let header, name, firstMessage = '', messageCount = 0;
@@ -29,7 +29,6 @@ async function inspect(file, targetId) {
       }
     }
     if (!header || !messageCount) return;
-    const info = await stat(file);
     return { id: header.id, cwd: header.cwd, name: (name || firstMessage || '未命名会话').slice(0, 100),
       modified: info.mtime.toISOString(), messageCount, active: false };
   } finally { lines.close(); stream.destroy(); }
@@ -76,13 +75,24 @@ export async function computerSessions() {
   if (pending?.root === root) return pending.promise;
   const promise = (async () => {
     const files = await sessionFiles(root, (name) => name.endsWith('.jsonl'));
+    const entries = new Map();
     const rows = [];
+    const previous = cached?.root === root ? cached.entries : undefined;
     let next = 0;
     await Promise.all(Array.from({ length: Math.min(8, files.length) }, async () => {
-      while (next < files.length) { const file = files[next++]; const row = await inspect(file).catch(() => undefined); if (row) rows.push(row); }
+      while (next < files.length) {
+        const file = files[next++];
+        const info = await stat(file).catch(() => undefined);
+        if (!info) continue;
+        const prior = previous?.get(file);
+        const row = prior?.mtime === info.mtimeMs && prior?.size === info.size && prior?.ino === info.ino
+          ? prior.row : await inspect(file, undefined, info).catch(() => undefined);
+        entries.set(file, { mtime: info.mtimeMs, size: info.size, ino: info.ino, row });
+        if (row) rows.push(row);
+      }
     }));
     rows.sort((a, b) => b.modified.localeCompare(a.modified));
-    cached = { root, time: Date.now(), rows };
+    cached = { root, time: Date.now(), rows, entries };
     return rows;
   })();
   pending = { root, promise };

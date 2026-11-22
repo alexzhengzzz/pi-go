@@ -18,7 +18,7 @@ function method(name) {
   return page.slice(start, end);
 }
 const methods = ['setDrawer', 'loadSessions', 'requestAction', 'positionTranscript', 'poll', 'loadSessionStatus', 'applyRunningStatus', 'backgroundRunning', 'backgroundActive', 'sessionState', 'sessionRunning'];
-methods.push('spaceSessions');
+methods.push('focusActiveSpace', 'toggleSpace', 'updateSidebarRows', 'sidebarSessionKey', 'revealLibraryAnchor');
 methods.push('cacheChat', 'presentChat', 'revealChat', 'send', 'mergeTranscript', 'sameMessage', 'applyLiveSnapshot',
   'handleFrame', 'applyStreamFrame', 'requestSessionSnapshot', 'applySessionSnapshot', 'refreshSessionHistory',
   'applySessionHistory', 'stopStream', 'streamDown', 'queueStreamPaint', 'flushStreamDeltas', 'finishSend', 'reconcileSteering');
@@ -27,8 +27,9 @@ methods.push('appendFileTreeRows', 'updateFileTree', 'toggleFileDirectory', 'loa
 methods.push('newTaskOptions', 'closeNewSpace', 'createWorkspaceTask', 'createSpaceTask', 'confirmCloseSpace', 'closeWorkspace', 'armTranscriptFollow', 'onKeyboardChange');
 methods.push('dockedSessions', 'sessionPaneWidth', 'compactSessionPane', 'onWindowWidthChange');
 methods.push('chatTitle', 'observeSessionRun', 'observeRun', 'advanceRunNotice', 'clearRunNotices');
+const dataSource = page.slice(page.indexOf('class SidebarRows '), page.indexOf('interface ChatMessage'));
 const splitWidth = page.match(/^const SPLIT_WINDOW_WIDTH = \d+;$/m)[0];
-const Page = new Function('Curve', 'BridgeFailure', 'validUsb', 'MAX_COMPUTERS', 'Edge', '$r', 'DialogAlignment', stripTypeScriptTypes(`${splitWidth}\nconst STREAM_PAINT_INTERVAL_MS = 32;\nconst MAX_LIVE_TEXT_LENGTH = 16000;\nclass Harness {\n${methods.map(method).join('\n')}\n}`) + '; return Harness;')(
+const Page = new Function('Curve', 'BridgeFailure', 'validUsb', 'MAX_COMPUTERS', 'Edge', '$r', 'DialogAlignment', stripTypeScriptTypes(`${splitWidth}\nconst STREAM_PAINT_INTERVAL_MS = 32;\nconst MAX_LIVE_TEXT_LENGTH = 16000;\n${dataSource}\nclass Harness {\nsidebarRows = new SidebarRows();\n${methods.map(method).join('\n')}\n}`) + '; return Harness;')(
   { EaseOut: 0 },
   BridgeFailure,
   (address) => address === 'http://127.0.0.1:18977',
@@ -50,7 +51,7 @@ function fixture() {
     deltaPaintTimer: -1, pendingLiveText: '', pendingLiveThinking: '',
     sessionCatalogLoaded: true, sessionCatalogUpdatedAt: Date.now(), sessionCatalogVersion: 0,
     sessions: [{ id: 'one', cwd: '/project', name: 'Cached task' }], projects: ['/project'],
-    sessionView: 'all', loadedView: 'all',
+    sessionView: 'all', loadedView: 'all', expandedSpaces: [], scheduleSidebarSave: () => {},
     showSessions: false, chatCache: new Map(),
     draftKey: id => id, loadSessionStatus: async () => {}, dismissKeyboard: () => {},
     getUIContext: () => ({ animateTo: (_options, change) => change(),
@@ -279,6 +280,54 @@ test('repeated opens share one stale refresh and reuse the loaded catalog', asyn
   assert.deepEqual(state.sessions.map(session => session.id), ['one', 'page-two']);
 });
 
+test('the drawer opens only the active session space and allows selecting another space', () => {
+  const state = fixture();
+  state.currentId = 'one';
+  state.workspaceCwd = '/project';
+  state.expandedSpaces = ['/old', '/other'];
+  clickHistory.call(state);
+  assert.deepEqual(state.expandedSpaces, ['/project']);
+  state.toggleSpace('/other');
+  assert.deepEqual(state.expandedSpaces, ['/project', '/other']);
+  state.setDrawer(false);
+  clickHistory.call(state);
+  assert.deepEqual(state.expandedSpaces, ['/project']);
+});
+
+test('sidebar rows only include tasks from expanded spaces, with an anchor for an offscreen task', () => {
+  const state = fixture();
+  state.projects = ['/project', '/other'];
+  state.expandedSpaces = ['/project'];
+  state.sessions = [
+    { id: 'one', cwd: '/project', revision: 0 },
+    { id: 'offscreen', cwd: '/project', revision: 0 },
+    { id: 'hidden', cwd: '/other', revision: 0 }
+  ];
+  state.updateSidebarRows();
+  assert.equal(state.sidebarRows.totalCount(), 4);
+  assert.equal(state.sidebarRows.anchor('offscreen', '/project'), 2);
+  assert.equal(state.sidebarRows.anchor('hidden', '/other'), 3);
+  assert.equal(state.sidebarRows.getData(2).session.id, 'offscreen');
+});
+
+test('a cold drawer shows the first page while later pages are pending', async () => {
+  const state = fixture();
+  state.sessions = [];
+  state.projects = [];
+  state.sessionCatalogLoaded = false;
+  let resolveTail;
+  state.request = async path => path.includes('cursor=0&')
+    ? { sessions: [{ id: 'first' }], projects: ['/project'], nextCursor: 100 }
+    : new Promise(resolve => { resolveTail = resolve; });
+  const pending = state.loadSessions();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(state.sessions.map(row => row.id), ['first']);
+  assert.deepEqual(state.projects, ['/project']);
+  resolveTail({ sessions: [{ id: 'later' }], projects: ['/project'] });
+  await pending;
+  assert.deepEqual(state.sessions.map(row => row.id), ['first', 'later']);
+});
+
 test('a failed catalog page keeps the cached spaces and tasks and can be retried', async () => {
   const state = fixture();
   let fail = true;
@@ -449,8 +498,8 @@ test('opening the sidebar loads older tasks even when whole pages belong to a co
   };
   clickHistory.call(state);
   await new Promise(resolve => setImmediate(resolve));
-  assert.deepEqual(state.spaceSessions('/project').map(session => session.id), ['older']);
-  assert.equal(state.spaceSessions('/other').filter(session => session.id === 'other-0').length, 1);
+  assert.deepEqual(state.sessions.filter(session => session.cwd === '/project').map(session => session.id), ['older']);
+  assert.equal(state.sessions.filter(session => session.id === 'other-0').length, 1);
   assert.equal(cursors.length, 2);
   assert.doesNotMatch(page, /\.id\('session-more'\)/);
 });
@@ -607,16 +656,20 @@ test('running status refresh updates all tasks without replacing cached pages', 
 });
 
 test('current task shows one banner after the queue drains across events and snapshots', (context) => {
-  const state = fixture();
-  Object.assign(state, { visible: true, currentId: 'one', schedule: () => {} });
+  const state = navigationFixture();
+  Object.assign(state, { visible: true, sessionSync: new SessionSync() });
   context.after(() => state.clearRunNotices());
   const session = { id: 'one', idle: true };
-  state.observeSessionRun(session);
+  const snapshot = (idle, seq) => state.applySessionSnapshot({
+    session: { ...session, idle }, cursor: { sessionId: 'one', streamId: 'worker', runId: null, seq }
+  });
+  snapshot(false, 1);
+  snapshot(true, 2);
   assert.equal(state.runNotice, undefined);
   state.applyStreamFrame({ type: 'session/status', idle: false });
   state.applyStreamFrame({ type: 'session/status', idle: true, queued: true });
   assert.equal(state.runNotice, undefined);
-  state.observeSessionRun(session);
+  snapshot(true, 3);
   assert.deepEqual(state.runNotice, { title: 'Cached task', stopped: false });
   state.applyStreamFrame({ type: 'session/status', idle: true });
   state.advanceRunNotice();
@@ -631,13 +684,17 @@ test('background banners require a previously running task to be confirmed idle'
   const state = fixture();
   Object.assign(state, {
     visible: true, currentId: 'one', sessionLoading: true,
-    sessions: [{ id: 'two', name: 'Build' }, { id: 'three', name: 'Closed' }]
+    sessions: [{ id: 'two', name: 'Build' }, { id: 'three', name: 'Closed' }, { id: 'four', name: 'Dispatching' }]
   });
   context.after(() => state.clearRunNotices());
-  state.applyRunningStatus({ runningSessionIds: ['one', 'two', 'three'], idleSessionIds: [] });
+  state.applyRunningStatus({
+    runningSessionIds: ['one', 'two', 'three', 'four'],
+    runningSessions: [{ id: 'four', started: false }],
+    idleSessionIds: []
+  });
   state.applyRunningStatus(undefined);
   assert.equal(state.runNotice, undefined);
-  state.applyRunningStatus({ runningSessionIds: [], idleSessionIds: ['one', 'two'] });
+  state.applyRunningStatus({ runningSessionIds: [], idleSessionIds: ['one', 'two', 'four'] });
   assert.deepEqual(state.runNotice, { title: 'Build', stopped: false });
   state.applyRunningStatus({ runningSessionIds: [], idleSessionIds: ['one', 'two', 'three'] });
   state.advanceRunNotice();
@@ -1098,7 +1155,7 @@ test('switching away and back ignores earlier snapshots and history for the same
   assert.equal(state.currentId, 'one');
   assert.equal(state.liveText, 'one');
   assert.deepEqual(state.messages, [{ id: 'one-message' }]);
-  assert.deepEqual(calls, ['/open', '/session/snapshot', '/history?id=two&sync=2', '/open', '/session/snapshot', '/history?id=one&sync=2']);
+  assert.deepEqual(calls, ['/open', '/session/snapshot?history=1', '/history?id=two&sync=2', '/open', '/session/snapshot?history=1', '/history?id=one&sync=2']);
 });
 
 test('legacy bridges fall back on a missing snapshot route, while transient errors keep the new protocol', async () => {

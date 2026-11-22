@@ -22,6 +22,9 @@
     "scripts/pair-qr.swift",
     "desktop/pairing-runtime.mjs",
     "desktop/pairing-control.mjs",
+    "desktop/app-services.mjs",
+    "desktop/usb-watch.mjs",
+    "scripts/run-remote-tunnel.py",
     "macos/PairingApp.swift",
     "scripts/build-pairing-app.sh",
     "desktop/computer-sessions.mjs",
@@ -42,7 +45,8 @@
   },
   "scripts": {
     "test": "node --test test/*.test.mjs",
-    "build:pairing": "zsh scripts/build-pairing-app.sh",
+    "build:macos": "zsh scripts/build-pairing-app.sh",
+    "build:pairing": "npm run build:macos",
     "build:desktop-host": "zsh scripts/build-desktop-host-app.sh",
     "install:desktop-host": "zsh scripts/install-desktop-host-app.sh",
     "install:daemon": "zsh scripts/install-daemon-launchd.sh"

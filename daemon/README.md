@@ -18,6 +18,8 @@
 
 ## macOS 安装与 USB 切换
 
+日常使用由 [Pi Go.app](../docs/pairing-gui.md) 统一接管宿主和连接。以下命令适用于开发调试或无界面运行。
+
 1. 退出 Pi Desktop，让 daemon 成为该账号唯一的 Pi Go 宿主。已共享的交互式 Pi CLI 会话可继续运行。
 2. 在仓库根目录执行以下命令。已有 USB 配对可以继续使用，桥接端口保持一致。
 

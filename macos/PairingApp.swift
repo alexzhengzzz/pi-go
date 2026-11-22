@@ -19,15 +19,20 @@ struct Bridge: Decodable {
     var host: String?
     var address: String?
 }
+struct Services: Decodable {
+    var hostRunning: Bool
+    var managed: Bool
+    var tunnelRunning: Bool?
+    var usbAuto: Bool?
+}
 struct Payload: Decodable {
     var sessions: [Session]?
     var addresses: [String]?
     var bridge: Bridge?
+    var services: Services?
     var code: String?
     var bundle: String?
     var warning: String?
-    var usbTarget: String?
-    var usbForwarded: Bool?
 }
 struct Result: Decodable { var ok: Bool; var data: Payload?; var error: String? }
 
@@ -35,13 +40,11 @@ struct Result: Decodable { var ok: Bool; var data: Payload?; var error: String? 
     @Published var mode = UserDefaults.standard.string(forKey: "connectionMode") ?? "lan" {
         didSet {
             UserDefaults.standard.set(mode, forKey: "connectionMode")
-            if mode != oldValue { usbTarget = nil }
         }
     }
     @Published var autoUSB = UserDefaults.standard.bool(forKey: "autoUSB") {
         didSet {
             UserDefaults.standard.set(autoUSB, forKey: "autoUSB")
-            if !autoUSB { usbTarget = nil }
         }
     }
     @Published var host = UserDefaults.standard.string(forKey: "lanHost") ?? ""
@@ -50,13 +53,13 @@ struct Result: Decodable { var ok: Bool; var data: Payload?; var error: String? 
     @Published var sessions: [Session] = []
     @Published var addresses: [String] = []
     @Published var bridge = Bridge(running: false)
+    @Published var services: Services?
     @Published var code = ""
     @Published var bundle = ""
     @Published var notice = ""
     @Published var error = ""
     @Published var busy = false
     private var polling = false
-    private var usbTarget: String?
 
     func request(_ input: [String: String]) async throws -> Payload {
         let encoded = try JSONSerialization.data(withJSONObject: input)
@@ -67,6 +70,7 @@ struct Result: Decodable { var ok: Bool; var data: Payload?; var error: String? 
             process.executableURL = URL(fileURLWithPath: node)
             process.arguments = [resources.appendingPathComponent("desktop/pairing-control.mjs").path]
             var env = ProcessInfo.processInfo.environment
+            env["PIGO_APP_RESOURCES"] = resources.path
             env["PATH"] = "\(URL(fileURLWithPath: node).deletingLastPathComponent().path):/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
             process.environment = env
             let output = Pipe(), input = Pipe(), errors = Pipe()
@@ -94,6 +98,7 @@ struct Result: Decodable { var ok: Bool; var data: Payload?; var error: String? 
             guard selectedMode == mode && !busy else { return }
             sessions = payload.sessions ?? []; addresses = payload.addresses ?? []
             bridge = payload.bridge ?? Bridge(running: false)
+            services = payload.services
             if selectedMode == "lan" && !addresses.contains(host) {
                 host = bridge.host.flatMap { addresses.contains($0) ? $0 : nil } ?? addresses.first ?? ""
             }
@@ -105,18 +110,9 @@ struct Result: Decodable { var ok: Bool; var data: Payload?; var error: String? 
             if (!code.isEmpty || !bundle.isEmpty) && (bridge.expiresAt ?? 0) < Date().timeIntervalSince1970 * 1000 {
                 code = ""; bundle = ""; notice = ""
             }
-            if selectedMode == "usb" && autoUSB {
-                let usb = try await request(["action": "usb-target", "target": usbTarget ?? ""])
-                guard !Task.isCancelled && mode == "usb" && autoUSB && !busy else { return }
-                if let detected = usb.usbTarget {
-                    if usb.usbForwarded != true || !bridge.running { await perform("connect", target: detected) }
-                } else {
-                    usbTarget = nil
-                }
-            }
         } catch { self.error = error.localizedDescription }
     }
-    func perform(_ action: String, session: Session? = nil, target: String? = nil) async {
+    func perform(_ action: String, session: Session? = nil, usbEnabled: Bool? = nil) async {
         guard !busy else { return }
         busy = true; error = ""
         var input = ["action": action, "mode": mode, "host": host]
@@ -125,14 +121,14 @@ struct Result: Decodable { var ok: Bool; var data: Payload?; var error: String? 
             input["publicPort"] = publicPort.trimmingCharacters(in: .whitespacesAndNewlines)
         }
         if let session { input["socket"] = session.socket; input["id"] = session.id }
-        if let target { input["target"] = target }
+        if mode == "usb" && action == "takeover" { input["enabled"] = String(autoUSB) }
+        if let usbEnabled { input["enabled"] = String(usbEnabled) }
         do {
             let payload = try await request(input)
             if action == "pair" || action == "connect" {
                 notice = payload.warning ?? ""
                 code = payload.code ?? ""
                 bundle = payload.bundle ?? ""
-                if mode == "usb" { usbTarget = payload.usbTarget }
                 if mode == "lan" { UserDefaults.standard.set(host, forKey: "lanHost") }
                 if mode == "remote" {
                     UserDefaults.standard.set(input["publicIP"], forKey: "publicIP")
@@ -140,8 +136,10 @@ struct Result: Decodable { var ok: Bool; var data: Payload?; var error: String? 
                 }
             }
             if action == "revoke" || action == "stop" { code = ""; bundle = ""; notice = "" }
-            if mode == "usb" && (action == "revoke" || action == "stop") { autoUSB = false }
+            if mode == "usb" && action == "stop" { autoUSB = false }
+            if let usbEnabled { autoUSB = usbEnabled }
             if let value = payload.bridge { bridge = value }
+            if let value = payload.services { services = value }
         } catch { self.error = error.localizedDescription }
         busy = false
         await refresh()
@@ -177,6 +175,10 @@ struct PairingView: View {
                 VStack(alignment: .leading) {
                     Text("连接手机").font(.title.bold())
                     Text("Pi Go · \(model.status)").foregroundStyle(.secondary)
+                    if let services = model.services {
+                        Text(services.hostRunning ? "后台宿主运行中" : "后台宿主未启用")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                 }
                 Spacer()
                 if model.busy { ProgressView().controlSize(.small) }
@@ -200,10 +202,14 @@ struct PairingView: View {
                             TextField("VPS 公网 IPv4", text: $model.publicIP)
                             TextField("端口", text: $model.publicPort).frame(width: 75)
                         }.textFieldStyle(.roundedBorder).disabled(model.busy || model.bridge.running)
-                        Text("将 VPS 公网端口通过 SSH TCP 隧道转发至此 Mac 的 127.0.0.1:18982。").font(.caption).foregroundStyle(.secondary)
+                        Text(model.services?.tunnelRunning == true ? "本机 SSH 隧道进程运行中" : "使用已配置的 VPS SSH 隧道转发至本机端口 18982。")
+                            .font(.caption).foregroundStyle(.secondary)
                     } else {
-                        Toggle("插线自动连接", isOn: $model.autoUSB).disabled(model.busy)
-                        Text("保持此窗口打开。通过 USB 连接一台手机并允许调试，Pi Go 会在手机上打开并连接这台电脑。").foregroundStyle(.secondary)
+                        Toggle("插线自动连接", isOn: Binding(
+                            get: { model.services?.usbAuto ?? false },
+                            set: { enabled in Task { await model.perform("usb-auto", usbEnabled: enabled) } }
+                        )).disabled(model.busy || model.services?.managed != true)
+                        Text("通过 USB 连接一台已配对且允许调试的手机。退出 App 后也可自动恢复连接。").foregroundStyle(.secondary)
                     }
                     Button(model.connectLabel) {
                         Task { await model.perform(model.mode != "usb" && model.bridge.running ? "pair" : "connect") }
@@ -211,13 +217,18 @@ struct PairingView: View {
                         .buttonStyle(.borderedProminent).controlSize(.large)
                         .disabled(model.busy || (model.mode == "lan" && model.host.isEmpty) ||
                             (model.mode == "remote" && (model.publicIP.isEmpty || model.publicPort.isEmpty)))
+                    if model.services?.managed != true {
+                        Button("接管连接服务") { Task { await model.perform("takeover") } }
+                            .disabled(model.busy || (model.mode == "lan" && model.host.isEmpty) ||
+                                (model.mode == "remote" && (model.publicIP.isEmpty || model.publicPort.isEmpty)))
+                    }
                     if model.bridge.running {
                         HStack {
                             if model.mode == "usb" && model.bridge.paired == true {
                                 Button("重新配对") { Task { await model.perform("pair") } }
                             }
                             Button("撤销手机配对", role: .destructive) { Task { await model.perform("revoke") } }
-                            Button("停止服务") { Task { await model.perform("stop") } }
+                            Button("停用连接") { Task { await model.perform("stop") } }
                         }.disabled(model.busy)
                     }
                     Text("关闭窗口后服务继续运行。配对成功后手机会保存连接。").font(.caption).foregroundStyle(.secondary)
@@ -246,8 +257,7 @@ struct PairingView: View {
             if model.sessions.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("暂未发现运行中的会话")
-                    Text("历史记录会自动出现在手机会话列表。要继续聊天，请打开 Pi Desktop；升级后重新打开会话以加载新版扩展。").font(.callout).foregroundStyle(.secondary)
-                    Button("打开 Pi Desktop") { NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications/Pi Desktop.app")) }
+                    Text("从手机打开历史记录，或在 Mac 的 Pi CLI 使用 /pi-go-share 共享当前会话。").font(.callout).foregroundStyle(.secondary)
                 }.frame(maxWidth: .infinity, alignment: .leading).padding().background(.quaternary, in: RoundedRectangle(cornerRadius: 10))
             } else {
                 ScrollView {
@@ -270,12 +280,11 @@ struct PairingView: View {
         }
         .padding(26).frame(minWidth: 760, idealWidth: 800, minHeight: 620, idealHeight: 700)
         .task { while !Task.isCancelled { await model.refresh(); try? await Task.sleep(for: .seconds(3)) } }
-        .onChange(of: model.mode) { _, _ in model.code = ""; model.bundle = ""; model.notice = ""; model.bridge = Bridge(running: false); model.error = ""; Task { await model.refresh() } }
-        .onChange(of: model.autoUSB) { _, enabled in if enabled { Task { await model.refresh() } } }
+        .onChange(of: model.mode) { _, _ in model.code = ""; model.bundle = ""; model.notice = ""; model.bridge = Bridge(running: false); model.services = nil; model.error = ""; Task { await model.refresh() } }
     }
 }
 
-@main struct PiGoPairingApp: App {
+@main struct PiGoApp: App {
     var body: some Scene {
         Window("Pi Go — 连接手机", id: "pairing") { PairingView() }
             .defaultSize(width: 800, height: 700)

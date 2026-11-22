@@ -6,8 +6,10 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { ipcDirectory, localRequest } from './local-ipc.mjs';
 import { localLanAddress, publicAddress } from './lan-tls.mjs';
+import { createAppServices } from './app-services.mjs';
 const run = promisify(execFile);
 const root = dirname(fileURLToPath(import.meta.url));
+const appServices = process.env.PIGO_APP_RESOURCES === dirname(root) ? createAppServices(dirname(root)) : undefined;
 
 async function sessions() {
   const directory = ipcDirectory();
@@ -22,7 +24,7 @@ async function sessions() {
 async function status(port) {
   try {
     const r = await localRequest(join(ipcDirectory(), `bridge-${port}.sock`), 'GET', '/status', undefined, 700);
-    if (r.status !== 200 || r.data.protocol !== 'pi-go-pairing/1') throw new Error('旧版桥接服务正在运行，请先在 Desktop 停止旧桥后重试。');
+    if (r.status !== 200 || r.data.protocol !== 'pi-go-pairing/1') throw new Error('旧版桥接服务正在运行，请先停止旧桥后重试。');
     return { running: true, ...r.data };
   } catch (e) {
     if (['ENOENT', 'ECONNREFUSED'].includes(e.code)) return { running: false };
@@ -30,7 +32,7 @@ async function status(port) {
   }
 }
 const hdcPath = () => process.env.HDC_BIN || '/Applications/DevEco-Studio.app/Contents/sdk/default/openharmony/toolchains/hdc';
-async function usbTargets() {
+export async function usbTargets() {
   const hdc = hdcPath();
   await access(hdc).catch(() => { throw new Error('未找到 USB 工具，请安装 DevEco Studio，或使用局域网扫码。'); });
   const { stdout } = await run(hdc, ['list', 'targets', '-v'], { timeout: 5000 });
@@ -38,13 +40,13 @@ async function usbTargets() {
     .filter(([, transport, state]) => transport === 'USB' && state === 'Connected')
     .map(([target]) => target);
 }
-async function usbForwarded(target, port) {
+export async function usbForwarded(target, port) {
   const endpoint = `tcp:${port}`;
   const { stdout } = await run(hdcPath(), ['-t', target, 'fport', 'ls'], { timeout: 5000 });
   const rule = [target, endpoint, endpoint, '[Reverse]'].join(' ');
   return stdout.split(/\r?\n/).some((line) => line.trim().replace(/\s+/g, ' ') === rule);
 }
-async function usbForward(port, expectedTarget) {
+export async function usbForward(port, expectedTarget) {
   const targets = await usbTargets();
   if (!targets.length) throw new Error('未发现手机，请连接 USB 并在手机允许调试。');
   if (targets.length !== 1) throw new Error('请只通过 USB 连接一台手机。');
@@ -58,7 +60,7 @@ async function usbForward(port, expectedTarget) {
   }
   return { args, target };
 }
-async function usbLaunch(args, port, ticket) {
+export async function usbLaunch(args, port, ticket) {
   const parameters = ['-a', 'EntryAbility', '-b', 'com.alex.pigo', '--ps', 'address', `http://127.0.0.1:${port}`];
   if (ticket) parameters.push('--ps', 'ticket', ticket);
   const warning = ticket ? '无法自动打开手机 Pi Go，请确认已安装应用；可手动打开并输入配对码。' :
@@ -75,6 +77,11 @@ export async function control(input) {
   const port = input.port ?? (mode === 'remote' ? 18982 : mode === 'lan' ? 18981 : 18977);
   if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error('invalid_port');
   const socket = join(ipcDirectory(), `bridge-${port}.sock`);
+  if (input.action === 'usb-auto' && mode === 'usb' && appServices) {
+    if (input.enabled === 'true') await usbTargets();
+    await appServices.setUSB(port, input.enabled === 'true');
+    return { services: await appServices.status(mode, port) };
+  }
   if (input.action === 'usb-target') {
     const targets = await usbTargets();
     if (targets.length !== 1) return {};
@@ -83,23 +90,34 @@ export async function control(input) {
   }
   if (input.action === 'refresh') return {
     sessions: await sessions(), addresses: [...new Set(Object.values(networkInterfaces()).flat().filter((e) => e && localLanAddress(e.address)).map((e) => e.address))],
-    bridge: await status(port),
+    bridge: await status(port), services: await appServices?.status(mode, port),
   };
   if (input.action === 'share' || input.action === 'unshare') {
     const target = (await sessions()).find((s) => s.socket === input.socket && s.id === input.id);
     if (!target) throw new Error('会话已关闭或已切换，请刷新后重试。');
     const r = await localRequest(target.socket, 'POST', `/${input.action}`, { id: input.id });
-    if (r.status !== 200) throw new Error('无法共享会话，请重载 Desktop 会话后重试。');
+    if (r.status !== 200) throw new Error('无法共享会话，请重新打开 Pi 会话后重试。');
     return r.data;
   }
-  if (input.action === 'pair' || input.action === 'connect') {
+  if (['pair', 'connect', 'takeover'].includes(input.action)) {
     if (mode === 'lan' && !localLanAddress(input.host)) throw new Error('请选择当前电脑的局域网地址。');
     let endpoint;
     if (mode === 'remote') {
       try { endpoint = publicAddress(input.publicIP, Number(input.publicPort)); }
       catch { throw new Error('请输入 VPS 的公网 IPv4，以及 443 或 1024–65535 之间的端口。'); }
     }
-    const usb = mode === 'usb' ? await usbForward(port, input.target) : undefined;
+    const usb = mode === 'usb' && input.action !== 'takeover' ? await usbForward(port, input.target) : undefined;
+    if (appServices) {
+      await appServices.startHost();
+      await appServices.startBridge(mode, port, input.host, endpoint);
+      if (mode === 'remote') await appServices.adoptTunnel();
+      if (input.action === 'takeover') {
+        if (mode === 'usb' && input.enabled === 'true') await appServices.setUSB(port, true);
+        return { bridge: await status(port), services: await appServices.status(mode, port) };
+      }
+    } else if (input.action === 'takeover') {
+      throw new Error('请从已安装的 Pi Go.app 启用后台服务。');
+    }
     let current = await status(port);
     if (current.running && current.computerAccess === undefined) {
       await localRequest(socket, 'POST', '/stop');
@@ -145,6 +163,12 @@ export async function control(input) {
     // launched the app, so the phone pairs without manual code entry.
     const warning = usb ? await usbLaunch(usb.args, port, config.ticket) : undefined;
     return { code: config.code, bundle: config.bundle, warning, usbTarget: usb?.target, bridge: await status(port) };
+  }
+  if (input.action === 'stop' && appServices) {
+    const current = await status(port);
+    if (current.running && current.transport !== mode) throw new Error('此端口正在使用其他连接配置。');
+    await appServices.stop(mode, port);
+    return { bridge: await status(port), services: await appServices.status(mode, port) };
   }
   if (input.action === 'stop' || input.action === 'revoke') {
     if (mode === 'remote' && (await status(port)).transport !== mode) throw new Error('公网服务未运行。');

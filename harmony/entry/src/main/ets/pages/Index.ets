@@ -67,6 +67,34 @@ interface SessionRow {
   messageCount: number;
 }
 
+interface SidebarRow {
+  key: string;
+  path?: string;
+  session?: SessionRow;
+  nested: boolean;
+}
+
+class SidebarRows implements IDataSource {
+  private rows: SidebarRow[] = [];
+  private listeners: DataChangeListener[] = [];
+
+  totalCount(): number { return this.rows.length; }
+  getData(index: number): SidebarRow { return this.rows[index]; }
+  registerDataChangeListener(listener: DataChangeListener): void { this.listeners.push(listener); }
+  unregisterDataChangeListener(listener: DataChangeListener): void {
+    this.listeners = this.listeners.filter((item: DataChangeListener): boolean => item !== listener);
+  }
+  replace(rows: SidebarRow[]): void {
+    if (this.rows.length === rows.length && this.rows.every((row: SidebarRow, index: number): boolean => row.key === rows[index].key)) return;
+    this.rows = rows;
+    for (const listener of this.listeners) listener.onDataReloaded();
+  }
+  anchor(sessionId: string, workspace: string): number {
+    const session = this.rows.findIndex((row: SidebarRow): boolean => row.session?.id === sessionId);
+    return session >= 0 ? session : this.rows.findIndex((row: SidebarRow): boolean => row.path === workspace);
+  }
+}
+
 interface ChatMessage {
   id: string;
   role: string;
@@ -196,6 +224,7 @@ interface RunningRow {
   name?: string;
   cwd?: string;
   state?: string;
+  started?: boolean;
 }
 
 interface RunNotice {
@@ -433,7 +462,7 @@ struct Index {
   private streamTimer: number = -1;
   private streamGen: number = 0;
   @State private historyCursor?: string = undefined;
-  @State private sessions: SessionRow[] = [];
+  @State @Watch('updateSidebarRows') private sessions: SessionRow[] = [];
   @State private runningSessionIds: string[] = [];
   @State private runningSessions: RunningRow[] = [];
   private readonly observedRuns: Map<string, string> = new Map<string, string>();
@@ -450,7 +479,7 @@ struct Index {
   @State private preferredSessionPaneWidth?: number = undefined;
   @State private sessionPaneDragging: boolean = false;
   private sessionPaneDragStart: number = 0;
-  @State private expandedSpaces: string[] = [];
+  @State @Watch('updateSidebarRows') private expandedSpaces: string[] = [];
   @State private offlineDismissed: boolean = false;
   @State private activeTab: string = 'tasks';
   @State private minePage: string = '';
@@ -475,8 +504,8 @@ struct Index {
   private cloudRevision: number = 0;
   private readonly pendingCloudRows: Map<string, SyncRow> = new Map<string, SyncRow>();
 
-  @State private sessionView: string = 'all';
-  @State private loadedView: string = 'all';
+  @State @Watch('updateSidebarRows') private sessionView: string = 'all';
+  @State @Watch('updateSidebarRows') private loadedView: string = 'all';
   @State private interaction?: PendingInteraction = undefined;
   @State private interactionDraft: string = '';
   @State private pendingSend?: PendingSend = undefined;
@@ -502,7 +531,7 @@ struct Index {
   private holdStart: number = 0;
   private recordTimer: number = -1;
   private voiceSession?: VoiceInputSession = undefined;
-  @State private projects: string[] = [];
+  @State @Watch('updateSidebarRows') private projects: string[] = [];
   private base: string = '';
   private token: string = '';
   private ca?: string;
@@ -533,9 +562,7 @@ struct Index {
   private transcriptViewport: number = 0;
   @State private transcriptFollow: boolean = true;
   private readonly library: Scroller = new Scroller();
-  private libraryViewportY: number = -1;
-  private libraryRowY: number = -1;
-  private librarySpaceY: number = -1;
+  private readonly sidebarRows: SidebarRows = new SidebarRows();
   private pendingLibraryReveal: boolean = false;
   private readonly chatCache: Map<string, BridgeReply> = new Map<string, BridgeReply>();
 
@@ -1351,10 +1378,10 @@ struct Index {
     }
   }
 
-  private async requestSessionSnapshot(epoch: number): Promise<BridgeReply> {
+  private async requestSessionSnapshot(epoch: number, includeHistory: boolean = false): Promise<BridgeReply> {
     if (this.syncMode === 'legacy') return await this.request('/chat');
     try {
-      const result = await this.request('/session/snapshot');
+      const result = await this.request(includeHistory ? '/session/snapshot?history=1' : '/session/snapshot');
       if (epoch === this.epoch && this.syncMode === 'probe') {
         this.syncMode = 'sequenced';
         this.startStream();
@@ -1532,7 +1559,7 @@ struct Index {
     this.runningSessionIds = ids.filter((id: string, index: number): boolean => ids.indexOf(id) === index);
     if (result?.idleSessionIds) {
       for (const row of this.backgroundRunning()) {
-        if (row.id !== selected) this.observeRun(row.id, row.name || '后台任务', true);
+        if (row.id !== selected && row.started !== false) this.observeRun(row.id, row.name || '后台任务', true);
       }
       const idle = new Set<string>(result.idleSessionIds);
       for (const id of this.observedRuns.keys()) {
@@ -1551,6 +1578,8 @@ struct Index {
   }
 
   private observeSessionRun(session: SessionState): void {
+    // A dispatched prompt can make the session busy before Pi starts a run.
+    if (!session.idle && !session.runId && !session.queued) return;
     const title = session.name || this.sessions.find((row: SessionRow): boolean => row.id === session.id)?.name ||
       (session.id === this.currentId ? this.chatTitle() : '任务');
     this.observeRun(session.id, title, !session.idle || session.queued === true);
@@ -1595,7 +1624,8 @@ struct Index {
     return rows.concat(extras).map((row: RunningRow): RunningRow => ({
       id: row.id,
       name: row.name || this.sessions.find((session: SessionRow): boolean => session.id === row.id)?.name,
-      cwd: row.cwd
+      cwd: row.cwd,
+      started: row.started
     }));
   }
 
@@ -1653,6 +1683,7 @@ struct Index {
       const ids = new Set<string>();
       let cursor: number | undefined = 0;
       let result: BridgeReply;
+      const showFirstPage = !this.sessions.length || this.loadedView !== view;
       do {
         result = await this.request(`/sessions?limit=100&cursor=${cursor}&view=${view}`);
         if (epoch !== this.epoch || version !== this.sessionCatalogVersion) return;
@@ -1663,6 +1694,14 @@ struct Index {
           sessions.push(row);
         }
         const next = result.nextCursor;
+        if (cursor === 0 && next !== undefined && showFirstPage) {
+          this.sessions = sessions.slice();
+          this.loadedView = view;
+          this.projects = result.projects ?? [];
+          this.desktopHandoff = result.desktopHandoff ?? false;
+          this.canCreateWorkspace = result.canCreateWorkspace ?? false;
+          this.sessionCatalogLoaded = true;
+        }
         cursor = next !== undefined && next > cursor ? next : undefined;
       } while (cursor !== undefined);
       this.sessionCatalogLoaded = true;
@@ -2607,11 +2646,11 @@ struct Index {
         navigationConfirmed = true;
         // A cached transcript is already visible; refresh it after confirming the remote selection.
         const liveRevision = this.liveRevision;
-        const chat = await this.requestSessionSnapshot(epoch);
+        const chat = await this.requestSessionSnapshot(epoch, true);
         if (epoch !== this.epoch) return false;
         if (chat.session?.id !== result.session.id || chat.session.cwd !== result.session.cwd) throw new Error('session_changed');
         if (chat.cursor) {
-          const page = await this.refreshSessionHistory(chat, true);
+          const page = chat.messages !== undefined ? chat : await this.refreshSessionHistory(chat, true);
           if (epoch !== this.epoch) return false;
           if (!page) throw new Error('session_changed');
           if (!this.applySessionSnapshot(chat)) throw new Error('session_changed');
@@ -4728,7 +4767,10 @@ struct Index {
 
   private setDrawer(open: boolean): void {
     if (open && this.dockedSessions()) return;
-    if (open) this.dismissKeyboard();
+    if (open) {
+      this.dismissKeyboard();
+      this.focusActiveSpace();
+    }
     this.getUIContext().animateTo({ duration: 220, curve: Curve.EaseOut }, () => { this.showSessions = open; });
     if (open) void this.loadSessionStatus();
     // Reuse the catalog for quick drawer toggles; stale data stays usable during refresh.
@@ -4766,13 +4808,50 @@ struct Index {
     if (this.dockedSessions()) this.showSessions = false;
   }
 
+  private focusActiveSpace(): void {
+    if (!this.currentId) return;
+    const path = this.workspaceCwd || this.sessions.find((row: SessionRow): boolean => row.id === this.currentId)?.cwd;
+    if (path && (this.expandedSpaces.length !== 1 || this.expandedSpaces[0] !== path)) this.expandedSpaces = [path];
+  }
+
+  private updateSidebarRows(): void {
+    const rows: SidebarRow[] = [];
+    const visibleSessions = this.sessionView === this.loadedView ? this.sessions : [];
+    if (this.sessionView === 'all') {
+      const bySpace = new Map<string, SessionRow[]>();
+      const expanded = new Set<string>(this.expandedSpaces);
+      for (const session of visibleSessions) {
+        if (!session.cwd || !expanded.has(session.cwd)) continue;
+        let group = bySpace.get(session.cwd);
+        if (!group) { group = []; bySpace.set(session.cwd, group); }
+        group.push(session);
+      }
+      for (const path of this.projects) {
+        rows.push({ key: `space:${path}`, path: path, nested: false });
+        for (const session of bySpace.get(path) ?? []) {
+          rows.push({ key: this.sidebarSessionKey(session, true), session: session, nested: true });
+        }
+      }
+    } else {
+      for (const session of visibleSessions) {
+        rows.push({ key: this.sidebarSessionKey(session, false), session: session, nested: false });
+      }
+    }
+    this.sidebarRows.replace(rows);
+    if (this.pendingLibraryReveal) setTimeout(() => { this.revealLibraryAnchor(); }, 0);
+  }
+
+  private sidebarSessionKey(session: SessionRow, nested: boolean): string {
+    return `session:${session.id}:${nested}:${session.revision}:${session.pinned}:${session.archived}:${session.cwd ?? ''}:${session.name ?? ''}`;
+  }
+
   private revealLibraryAnchor(): void {
-    if (!this.pendingLibraryReveal || (!this.showSessions && !this.dockedSessions()) || this.libraryViewportY < 0) return;
-    if (this.library.currentOffset().yOffset > 2) { this.pendingLibraryReveal = false; return; } // user scrolled first
-    const anchor: number = this.libraryRowY >= 0 ? this.libraryRowY : this.librarySpaceY;
-    if (anchor < 0) return; // current row not laid out yet; retried on its next area update
+    if (!this.pendingLibraryReveal || (!this.showSessions && !this.dockedSessions())) return;
+    if (this.library.currentOffset().yOffset > 2) { this.pendingLibraryReveal = false; return; }
+    const anchor = this.sidebarRows.anchor(this.currentId, this.workspaceCwd);
+    if (anchor < 0) return;
     this.pendingLibraryReveal = false;
-    this.library.scrollTo({ xOffset: 0, yOffset: Math.max(0, anchor - this.libraryViewportY - 8), animation: false });
+    if (anchor > 0) this.library.scrollToIndex(anchor, false, ScrollAlign.START);
   }
 
   private chatTitle(): string {
@@ -4785,11 +4864,8 @@ struct Index {
     return validUsb(this.base) ? 'USB 电脑' : (this.base.split('://')[1] || '我的电脑');
   }
 
-  private spaceSessions(path: string): SessionRow[] {
-    return this.sessions.filter((session: SessionRow): boolean => (session.cwd || '') === path);
-  }
-
   private toggleSpace(path: string): void {
+    this.pendingLibraryReveal = false;
     this.expandedSpaces = this.expandedSpaces.includes(path) ?
       this.expandedSpaces.filter((item: string): boolean => item !== path) : this.expandedSpaces.concat([path]);
     this.scheduleSidebarSave();
@@ -5024,10 +5100,9 @@ struct Index {
               .fontSize(14).fontColor($r('app.color.pigo_text')).width('100%').maxLines(2)
               .textOverflow({ overflow: TextOverflow.Ellipsis })
           } else {
-            Scroll() {
-              Text(session.name === '(no messages)' ? '新任务' : session.name || '未命名任务')
-                .fontSize(16).fontColor($r('app.color.pigo_text')).maxLines(1)
-            }.scrollable(ScrollDirection.Horizontal).scrollBar(BarState.Off).layoutWeight(1).align(Alignment.Start)
+            Text(session.name === '(no messages)' ? '新任务' : session.name || '未命名任务')
+              .fontSize(16).fontColor($r('app.color.pigo_text')).maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis }).layoutWeight(1)
           }
           if (session.id === this.openingSessionId) {
             Text('正在打开…').id('session-opening').fontSize(11).fontColor(this.accent()).maxLines(1)
@@ -5064,11 +5139,6 @@ struct Index {
     }.width('100%').borderRadius(this.dockedSessions() ? 9 : 12)
       .backgroundColor(session.id === this.openingSessionId || (session.id === this.currentId && this.dockedSessions()) ?
         this.accentTint() : session.id === this.currentId ? $r('app.color.pigo_selected') : Color.Transparent)
-      .onAreaChange((_oldArea: Area, newArea: Area) => {
-        if (session.id !== this.currentId) return;
-        this.libraryRowY = Number(newArea.globalPosition.y);
-        if (this.pendingLibraryReveal) this.revealLibraryAnchor();
-      })
   }
 
   @Builder
@@ -5165,52 +5235,50 @@ struct Index {
   }
 
   @Builder
+  librarySpace(path: string) {
+    Row({ space: 4 }) {
+      Row({ space: this.compactSessionPane() ? 4 : 9 }) {
+        Image($r('app.media.ic_folder')).width(18).height(18).fillColor(this.accent())
+        Text(path.split('/').pop() || path).fontSize(14).fontWeight(FontWeight.Medium)
+          .fontColor($r('app.color.pigo_text'))
+          .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).layoutWeight(1)
+        Image($r('app.media.ic_chevron')).width(this.compactSessionPane() ? 12 : 18)
+          .height(this.compactSessionPane() ? 12 : 18).fillColor($r('app.color.pigo_text'))
+          .rotate({ angle: this.expandedSpaces.includes(path) ? 0 : -90 }).opacity(0.6)
+      }.id(`space-${path}`).layoutWeight(1).height(44).onClick(() => { this.toggleSpace(path); })
+        .bindContextMenu(this.spaceMenu(path, this.epoch), ResponseType.LongPress, { placement: Placement.BottomLeft })
+      Button({ type: ButtonType.Normal }) {
+        SymbolGlyph($r('sys.symbol.plus')).fontSize(16).fontColor([$r('app.color.pigo_muted')])
+      }.id(`space-new-task-${path}`).width(40).height(44).padding(0).borderRadius(10)
+        .backgroundColor(Color.Transparent)
+        .accessibilityText(`在${path.split('/').pop() || path}空间新建任务`)
+        .enabled(!this.busy && !this.openingSession)
+        .onClick(() => { this.createSpaceTask(path); })
+    }.width('100%').padding({ left: this.compactSessionPane() ? 4 : 8 })
+  }
+
+  @Builder
   sessionLibrary() {
-    Scroll(this.library) {
-      Column({ space: 5 }) {
-        if (this.sessionView === 'all') {
-          ForEach(this.projects, (path: string) => {
-            Row({ space: 4 }) {
-              Row({ space: this.compactSessionPane() ? 4 : 9 }) {
-                Image($r('app.media.ic_folder')).width(18).height(18).fillColor(this.accent())
-                Text(path.split('/').pop() || path).fontSize(14).fontWeight(FontWeight.Medium)
-                  .fontColor($r('app.color.pigo_text'))
-                  .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).layoutWeight(1)
-                Image($r('app.media.ic_chevron')).width(this.compactSessionPane() ? 12 : 18)
-                  .height(this.compactSessionPane() ? 12 : 18).fillColor($r('app.color.pigo_text'))
-                  .rotate({ angle: this.expandedSpaces.includes(path) ? 0 : -90 }).opacity(0.6)
-              }.id(`space-${path}`).layoutWeight(1).height(44).onClick(() => { this.toggleSpace(path); })
-                .bindContextMenu(this.spaceMenu(path, this.epoch), ResponseType.LongPress, { placement: Placement.BottomLeft })
-              Button({ type: ButtonType.Normal }) {
-                SymbolGlyph($r('sys.symbol.plus')).fontSize(16).fontColor([$r('app.color.pigo_muted')])
-              }.id(`space-new-task-${path}`).width(40).height(44).padding(0).borderRadius(10)
-                .backgroundColor(Color.Transparent)
-                .accessibilityText(`在${path.split('/').pop() || path}空间新建任务`)
-                .enabled(!this.busy && !this.openingSession)
-                .onClick(() => { this.createSpaceTask(path); })
-            }.width('100%').padding({ left: this.compactSessionPane() ? 4 : 8 })
-              .onAreaChange((_oldArea: Area, newArea: Area) => {
-                if (path !== this.workspaceCwd) return;
-                this.librarySpaceY = Number(newArea.globalPosition.y);
-                if (this.pendingLibraryReveal) this.revealLibraryAnchor();
-              })
-            if (this.expandedSpaces.includes(path) && this.loadedView === 'all') {
-              ForEach(this.spaceSessions(path), (session: SessionRow) => { this.taskRow(session, true) }, (session: SessionRow) => session.id)
+    if (!this.sessionLoading && !this.sessionCatalogFailed && this.loadedView === this.sessionView &&
+      (this.sessionView === 'all' ? this.projects.length === 0 : this.sessions.length === 0)) {
+      Text(this.reachable ? (this.sessionView === 'all' ? '暂无空间' : '暂无任务') : '连接电脑后加载任务')
+        .fontSize(14).fontColor($r('app.color.pigo_muted')).width('100%').padding(this.compactSessionPane() ? 6 : 16)
+        .layoutWeight(1).align(Alignment.TopStart)
+    } else {
+      List({ scroller: this.library, space: 5 }) {
+        LazyForEach(this.sidebarRows, (row: SidebarRow) => {
+          ListItem() {
+            if (row.path !== undefined) {
+              this.librarySpace(row.path)
+            } else if (row.session !== undefined) {
+              this.taskRow(row.session, row.nested)
             }
-          }, (path: string) => path)
-          if (!this.projects.length && !this.sessionLoading && !this.sessionCatalogFailed) Text(this.reachable ? '暂无空间' : '连接电脑后加载空间')
-            .fontSize(14).fontColor($r('app.color.pigo_muted')).width('100%').padding(this.compactSessionPane() ? 6 : 16)
-        } else if (this.loadedView === this.sessionView) {
-          ForEach(this.sessions, (session: SessionRow) => { this.taskRow(session, false) }, (session: SessionRow) => session.id)
-          if (!this.sessions.length && !this.sessionLoading && !this.sessionCatalogFailed) Text(this.reachable ? '暂无任务' : '连接电脑后加载任务')
-            .fontSize(14).fontColor($r('app.color.pigo_muted')).width('100%').padding(this.compactSessionPane() ? 6 : 16)
-        }
-      }.width('100%').alignItems(HorizontalAlign.Start).padding({ bottom: 20 })
-    }.layoutWeight(1).width('100%').align(Alignment.TopStart).scrollBar(BarState.Off)
-      .onAreaChange((_oldArea: Area, newArea: Area) => {
-        this.libraryViewportY = Number(newArea.globalPosition.y);
-        if (this.pendingLibraryReveal) this.revealLibraryAnchor();
-      })
+          }
+        }, (row: SidebarRow): string => row.key)
+      }.cachedCount(4).layoutWeight(1).width('100%').scrollBar(BarState.Off)
+        .padding({ bottom: 20 })
+        .onAreaChange(() => { this.revealLibraryAnchor(); })
+    }
   }
 
   @Builder
@@ -5305,10 +5373,9 @@ struct Index {
       .gesture(PanGesture({ direction: PanDirection.Horizontal }).onActionEnd((event: GestureEvent) => { this.swipeDrawer(event); }))
       .onAppear(() => {
         // On entry, reveal the current session or its workspace when available.
+        if (!this.dockedSessions()) this.focusActiveSpace();
         this.pendingLibraryReveal = !!this.currentId;
-        this.libraryViewportY = -1;
-        this.libraryRowY = -1;
-        this.librarySpaceY = -1;
+        this.updateSidebarRows();
       })
   }
 
@@ -5499,7 +5566,7 @@ struct Index {
       }.id('run-completion-banner').width('100%').constraintSize({ maxWidth: 440 })
         .padding({ left: 14, right: 4, top: 6, bottom: 6 }).borderRadius(16)
         .backgroundColor($r('app.color.pigo_panel')).border({ width: 1, color: $r('app.color.pigo_line') })
-        .shadow({ radius: 16, offsetY: 5, color: this.darkMode ? '#80200000' : '#25627085' })
+        .shadow({ radius: 16, offsetY: 5, color: this.darkMode ? '#80000000' : '#25627085' })
     }.width('100%').justifyContent(FlexAlign.Center).padding({ left: 16, right: 16 })
       .margin({ top: this.statusBarHeight + 8 }).hitTestBehavior(HitTestMode.Transparent)
       .transition(TransitionEffect.OPACITY.animation({ duration: 180, curve: Curve.EaseOut }))

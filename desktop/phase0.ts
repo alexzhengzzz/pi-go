@@ -68,6 +68,7 @@ type PromptContentPart = { type: "text"; text: string } | { type: "image"; mimeT
 
 function createProbe() {
   let runtime: { pi: ExtensionAPI; ctx: ExtensionContext } | undefined;
+  let historyDirectory: string | undefined;
   let command: ExtensionCommandContext | undefined;
   let directory: string | undefined;
   let ticket: Buffer | undefined;
@@ -195,11 +196,14 @@ function createProbe() {
         return;
       }
       if (!runtime || switching) return fail(409, "session_unavailable");
-      if (route === "GET /session") return reply(response, 200, { session: status() });
-      if (route === "GET /session/snapshot") {
-        return reply(response, 200, { session: { ...status(), runId: runId ?? null }, cursor: cursor(), historyLeaf: historyLeaf(),
-          liveText, liveThinking, tools: Array.from(toolLog.values(), ({ summary }) => summary), promptError });
+      if (route === "GET /session") {
+        return reply(response, 200, { session: status(), historyDirectory: privateSocket ? historyDirectory : undefined });
       }
+      const snapshot = route === "GET /session/snapshot";
+      const snapshotHistory = snapshot && new URL(request.url ?? "/", "http://pi-go").searchParams.get("history") === "1";
+      const snapshotData = () => ({ session: { ...status(), runId: runId ?? null }, cursor: cursor(), historyLeaf: historyLeaf(),
+        liveText, liveThinking, tools: Array.from(toolLog.values(), ({ summary }) => summary), promptError });
+      if (snapshot && !snapshotHistory) return reply(response, 200, snapshotData());
       const active = runtime;
       if (route === "GET /models") {
         const scoped = active.ctx.scopedModels;
@@ -242,9 +246,9 @@ function createProbe() {
         const end = offset + chunk.length;
         return reply(response, 200, { text: chunk, nextTextOffset: end < text.length ? end : undefined });
       }
-      if (route === "GET /chat" || route === "GET /history" || route === "GET /tool-detail" || route === "GET /message-image") {
+      if (snapshotHistory || route === "GET /chat" || route === "GET /history" || route === "GET /tool-detail" || route === "GET /message-image") {
         const parameters = new URL(request.url ?? "/", "http://pi-go").searchParams;
-        if (route !== "GET /chat" && parameters.get("id") !== status()?.id) return fail(409, "session_changed");
+        if (!snapshotHistory && route !== "GET /chat" && parameters.get("id") !== status()?.id) return fail(409, "session_changed");
         const branch = active.ctx.sessionManager.getBranch();
         const imageIndex = parameters.get("index");
         const toolId = parameters.get("tool");
@@ -320,6 +324,7 @@ function createProbe() {
         const start = Math.max(0, end - limit);
         const page = { session: status(), messages: messages.slice(start, end),
           historyCursor: start > 0 ? messages[start].id : undefined };
+        if (snapshotHistory) return reply(response, 200, { ...page, ...snapshotData() });
         if (route === "GET /history" && parameters.get("sync") === "2") {
           return reply(response, 200, { ...page, historyLeaf: historyLeaf(), cursor: cursor() });
         }
@@ -535,6 +540,9 @@ function createProbe() {
     bind(pi: ExtensionAPI, ctx: ExtensionContext) {
       for (const stream of sequencedStreams) stream.destroy();
       runtime = { pi, ctx };
+      try {
+        historyDirectory = realpathSync(ctx.sessionManager.getSessionDir());
+      } catch { historyDirectory = undefined; }
       streamId = randomBytes(16).toString("hex");
       syncSeq = 0;
       runId = ctx.isIdle() ? undefined : randomBytes(16).toString("hex");
