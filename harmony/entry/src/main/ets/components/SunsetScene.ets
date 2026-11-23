@@ -32,7 +32,8 @@ interface SunRipple {
 export struct SunsetScene {
   @Prop @Watch('onDarkModeChange') darkMode: boolean = false;
   @Prop sceneOpacity: number = 0.92;
-  @Prop dimmed: boolean = false;
+  @Prop @Watch('onLoopPolicyChange') dimmed: boolean = false;
+  @Prop @Watch('onLoopPolicyChange') active: boolean = true;
   @Prop compact: boolean = false;
   @Prop @Watch('onBurstChange') burstSeq: number = 0;
   @Prop burstKind: string = 'send';
@@ -50,6 +51,7 @@ export struct SunsetScene {
   private loadGen: number = 0;
   private canvasReady: boolean = false;
   private loopTimer: number = -1;
+  private loopIntervalMs: number = 33;
   private lastTickMs: number = 0;
   private elapsed: number = 0;
   private canvasW: number = 0;
@@ -165,12 +167,25 @@ export struct SunsetScene {
     }
   }
 
+  private onLoopPolicyChange(): void {
+    if (!this.active) {
+      this.stopLoop();
+      return;
+    }
+    const desired = this.dimmed ? 50 : 33;
+    if (this.loopTimer !== -1 && this.loopIntervalMs !== desired) {
+      this.stopLoop();
+    }
+    this.ensureLoop();
+  }
+
   private ensureLoop(): void {
-    if (!this.canvasReady || this.loopTimer !== -1) return;
+    if (!this.canvasReady || !this.active || this.loopTimer !== -1) return;
+    this.loopIntervalMs = this.dimmed ? 50 : 33;
     this.lastTickMs = Date.now();
     this.loopTimer = setInterval(() => {
       this.tick();
-    }, 33);
+    }, this.loopIntervalMs);
     this.tick();
   }
 
@@ -240,36 +255,53 @@ export struct SunsetScene {
     const drawX = wideScreen ? (w - drawW) : (w - drawW) * 0.5;
     const drawY = 0;
 
-    const strips = this.compact ? 18 : 34;
-    const dstStripH = h / strips;
     const t = this.elapsed;
-    const gust = 1 + this.breezeBoost * 0.6;
+    const gust = 1 + this.breezeBoost * 0.65;
     const padX = 8;
+    const clipX = wideScreen ? Math.max(0, drawX - 2) : 0;
+    const clipW = wideScreen ? (w - clipX) : w;
 
-    for (let i = 0; i < strips; i += 1) {
-      const v = (i + 0.5) / strips;
-      let dx = 0;
-      let dy = 0;
+    // 1. 静态天空、海滩人群与底部留白一次性绘制，大幅降低每帧开销
+    this.ctx.save();
+    this.ctx.beginPath();
+    this.ctx.rect(clipX, 0, clipW, h);
+    this.ctx.clip();
+    this.ctx.drawImage(bitmap, drawX, drawY, drawW, drawH);
+    this.ctx.restore();
 
-      // 上部加州棕榈叶 (0 ~ 0.34)：随暖海风轻柔摇曳
-      if (v < 0.34) {
-        const palmW = Math.sin((v / 0.34) * Math.PI);
-        dx += Math.sin(t * 1.05 + v * 5.2) * 3.2 * palmW * gust;
-        dy += Math.cos(t * 0.85 + v * 3.4) * 1.1 * palmW * gust;
-      }
-
-      // 中下部橘子海浪花与少女发丝裙摆 (0.48 ~ 0.78)：柔和海风波纹与自然呼吸感
-      if (v > 0.48 && v < 0.78) {
-        const local = (v - 0.48) / 0.30;
-        const env = Math.sin(local * Math.PI);
-        dx += Math.sin(t * 1.2 + local * 5.0) * 2.0 * env * gust;
-        dy += -Math.sin(t * 1.4) * 1.3 * env;
-      }
-
-      const stripY = i * dstStripH;
+    // 2. 仅对上部加州棕榈叶 (0 ~ 0.34) 做 8 条带微风轻摇
+    const palmStrips = this.compact ? 5 : 8;
+    const palmBandH = h * 0.34;
+    const palmStepH = palmBandH / palmStrips;
+    for (let i = 0; i < palmStrips; i += 1) {
+      const local = (i + 0.5) / palmStrips;
+      const v = local * 0.34;
+      const palmW = Math.sin(local * Math.PI);
+      const dx = Math.sin(t * 1.05 + v * 5.2) * 3.0 * palmW * gust;
+      const dy = Math.cos(t * 0.85 + v * 3.4) * 1.0 * palmW * gust;
       this.ctx.save();
       this.ctx.beginPath();
-      this.ctx.rect(wideScreen ? Math.max(0, drawX - 2) : 0, stripY, wideScreen ? (w - Math.max(0, drawX - 2)) : w, dstStripH + 1.2);
+      this.ctx.rect(clipX, i * palmStepH, clipW, palmStepH + 1.2);
+      this.ctx.clip();
+      this.ctx.drawImage(bitmap, drawX - padX + dx, drawY + dy, drawW + padX * 2, drawH);
+      this.ctx.restore();
+    }
+
+    // 3. 仅对中部橘子海海浪带 (0.54 ~ 0.67) 做 8 条带双频轻微颤动
+    const waveStrips = this.compact ? 5 : 8;
+    const waveTop = h * 0.54;
+    const waveBandH = h * 0.13;
+    const waveStepH = waveBandH / waveStrips;
+    for (let i = 0; i < waveStrips; i += 1) {
+      const local = (i + 0.5) / waveStrips;
+      const waveEnv = Math.sin(local * Math.PI);
+      const swell = Math.sin(t * 1.4 + local * 5.8) * 1.9;
+      const tremor = Math.sin(t * 3.0 + local * 14.0) * 1.1;
+      const dx = (swell + tremor) * waveEnv * gust;
+      const dy = Math.cos(t * 2.4 + local * 9.5) * 0.6 * waveEnv * gust;
+      this.ctx.save();
+      this.ctx.beginPath();
+      this.ctx.rect(clipX, waveTop + i * waveStepH, clipW, waveStepH + 1.2);
       this.ctx.clip();
       this.ctx.drawImage(bitmap, drawX - padX + dx, drawY + dy, drawW + padX * 2, drawH);
       this.ctx.restore();

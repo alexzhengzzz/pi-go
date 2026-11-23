@@ -75,7 +75,7 @@ export function createAppServices(root) {
     TMPDIR: tmpdir(),
     PIGO_PI_BIN: process.env.PIGO_PI_BIN || 'pi',
   };
-  for (const name of ['PI_CODING_AGENT_DIR', 'PIGO_IPC_DIR', 'PIGO_STATE_DIR', 'PIGO_PI_ARGS', 'PIGO_CODEX_BIN', 'PIGO_CODEX_ARGS', 'CODEX_HOME', 'HDC_BIN']) {
+  for (const name of ['PI_CODING_AGENT_DIR', 'PIGO_IPC_DIR', 'PIGO_STATE_DIR', 'PIGO_PI_ARGS', 'PIGO_CODEX_BIN', 'PIGO_CODEX_ARGS', 'CODEX_HOME', 'PIGO_AGY_BIN', 'PIGO_AGY_ARGS', 'AGY_HOME', 'PIGO_AGY_GEMINI_DIR', 'PIGO_AGY_APP_DATA_DIR', 'HDC_BIN']) {
     if (process.env[name] !== undefined) env[name] = process.env[name];
   }
 

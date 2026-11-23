@@ -24,7 +24,7 @@ export struct SessionSidebar {
   @Prop busy: boolean;
   @Prop canCreateWorkspace: boolean;
   @Require confirmCloseSpace: (path: string, epoch: number) => void = unboundAction;
-  @Require createSpaceTask: (path: string, agent?: string) => void = unboundAction;
+  @Require openNewSession: (path?: string) => void = unboundAction;
   @Prop currentId: string;
   @Link expandedSpaces: string[];
   @Prop hostAvailable: boolean;
@@ -72,7 +72,6 @@ export struct SessionSidebar {
   @Prop dockedSessions: boolean;
   @Prop drawerWidth: number;
   @Prop sessionPaneWidth: number;
-  @Require openNewSpace: () => void = unboundAction;
   @Require onDrawerAppear: () => void = unboundAction;
   @Require connectionEpoch: () => number = unboundAction;
 
@@ -127,7 +126,7 @@ export struct SessionSidebar {
             .backgroundColor(this.accent)
             .enabled(this.reachable && !this.busy && !this.openingSession && this.hostAvailable &&
               (this.projects.length > 0 || this.canCreateWorkspace))
-            .bindMenu(this.newTaskOptions())
+            .onClick(() => { this.openNewSession(); })
         } else {
           Button({ type: ButtonType.Normal }) {
             Row({ space: 8 }) {
@@ -138,7 +137,7 @@ export struct SessionSidebar {
             .attributeModifier(glassCardSurface(this.darkMode, 14))
             .enabled(this.reachable && !this.busy && !this.openingSession && this.hostAvailable &&
               (this.projects.length > 0 || this.canCreateWorkspace))
-            .bindMenu(this.newTaskOptions())
+            .onClick(() => { this.openNewSession(); })
         }
         if (!this.reachable) this.offlineNotice(true, this.compactSessionPane)
         Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.SpaceBetween, alignContent: FlexAlign.SpaceBetween }) {
@@ -241,7 +240,7 @@ export struct SessionSidebar {
               .textOverflow({ overflow: TextOverflow.Ellipsis }).layoutWeight(1)
           }
           if (session.agent && session.agent !== 'pi') {
-            Text(session.agent === 'codex' ? 'Codex' : session.agent.toUpperCase())
+            Text(session.agent === 'codex' ? 'Codex' : session.agent === 'agy' ? 'AGY' : session.agent.toUpperCase())
               .fontSize(10).fontWeight(FontWeight.Medium).fontColor(this.accent)
               .padding({ left: 6, right: 6, top: 2, bottom: 2 }).borderRadius(6)
               .backgroundColor(this.accentTint)
@@ -309,17 +308,9 @@ export struct SessionSidebar {
         .backgroundColor(Color.Transparent)
         .accessibilityText(`在${workspaceName(this.workspaces, path)}空间新建任务`)
         .visibility(this.projects.includes(path) ? Visibility.Visible : Visibility.Hidden)
-        .enabled(!this.busy && !this.openingSession && this.projects.includes(path))
-        .onClick(() => { this.createSpaceTask(path); })
-        .bindContextMenu(this.spaceNewAgentMenu(path), ResponseType.LongPress, { placement: Placement.BottomRight })
+        .enabled(this.reachable && this.hostAvailable && !this.busy && !this.openingSession && this.projects.includes(path))
+        .onClick(() => { this.openNewSession(path); })
     }.width('100%').padding({ left: this.compactSessionPane ? 4 : 8 })
-  }
-  @Builder
-  spaceNewAgentMenu(path: string) {
-    Menu() {
-      MenuItem({ content: '新建 Pi 会话' }).onClick(() => { this.createSpaceTask(path, 'pi'); })
-      MenuItem({ content: '新建 Codex 会话' }).onClick(() => { this.createSpaceTask(path, 'codex'); })
-    }
   }
   @Builder
   sessionLibrary() {
@@ -370,28 +361,11 @@ export struct SessionSidebar {
       { value: '分享会话', action: () => { void this.shareSession(session); } }
     ];
     if (this.reachable) {
-      options.push(
-        { value: session.pinned ? '取消置顶' : '置顶', action: () => { void this.updateSessionMeta(session, true); } },
-        { value: session.archived ? '取消归档' : '归档', action: () => { void this.updateSessionMeta(session, false); } }
-      );
+      options.push({ value: session.pinned ? '取消置顶' : '置顶', action: () => { void this.updateSessionMeta(session, true); } });
+      if (!session.nativeArchived) {
+        options.push({ value: session.archived ? '取消归档' : '归档', action: () => { void this.updateSessionMeta(session, false); } });
+      }
     }
-    return options;
-  }
-
-  private newTaskOptions(): MenuElement[] {
-    const options: MenuElement[] = [];
-    for (const path of this.projects) {
-      const name = workspaceName(this.workspaces, path);
-      options.push({
-        value: `${name} · Pi`,
-        action: (): void => { this.createSpaceTask(path, 'pi'); }
-      });
-      options.push({
-        value: `${name} · Codex`,
-        action: (): void => { this.createSpaceTask(path, 'codex'); }
-      });
-    }
-    if (this.canCreateWorkspace) options.push({ value: '新空间', action: this.openNewSpace });
     return options;
   }
 

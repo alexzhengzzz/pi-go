@@ -4,12 +4,14 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { codexHome } from './codex/catalog.mjs';
+import { agyAuthed } from './agy/catalog.mjs';
 
 const run = promisify(execFile);
-const knownAgents = ['pi', 'codex'];
+const knownAgents = ['pi', 'codex', 'agy'];
 let cachedStatus = [
-  { id: 'pi', label: 'Pi', installed: true },
-  { id: 'codex', label: 'Codex', installed: true },
+  { id: 'pi', label: 'Pi' },
+  { id: 'codex', label: 'Codex' },
+  { id: 'agy', label: 'Antigravity' },
 ];
 let cachedAt = 0;
 let detecting;
@@ -31,14 +33,17 @@ export async function detectAgents(force = false) {
   if (!force && cachedAt > 0 && Date.now() - cachedAt < 30000) return cachedStatus;
   const piBin = process.env.PIGO_PI_BIN || 'pi';
   const codexBin = process.env.PIGO_CODEX_BIN || 'codex';
-  const [piVersion, codexVersion] = await Promise.all([
+  const agyBin = process.env.PIGO_AGY_BIN || 'agy';
+  const [piVersion, codexVersion, agyVersion] = await Promise.all([
     run(piBin, ['--version'], { timeout: 3000 }).then(({ stdout }) => stdout.trim().split('\n')[0]).catch(() => undefined),
     run(codexBin, ['--version'], { timeout: 3000 }).then(({ stdout }) => stdout.trim().split('\n')[0]).catch(() => undefined),
+    run(agyBin, ['--version'], { timeout: 3000 }).then(({ stdout }) => stdout.trim().split('\n')[0]).catch(() => undefined),
   ]);
   const codexAuthed = Boolean(process.env.OPENAI_API_KEY) || existsSync(join(codexHome(), 'auth.json')) || existsSync(join(codexHome(), 'config.toml'));
   cachedStatus = [
     { id: 'pi', label: 'Pi', installed: Boolean(piVersion), version: piVersion, authed: true },
     { id: 'codex', label: 'Codex', installed: Boolean(codexVersion), version: codexVersion, authed: codexAuthed },
+    { id: 'agy', label: 'Antigravity', installed: Boolean(agyVersion), version: agyVersion, authed: agyAuthed() },
   ];
   cachedAt = Date.now();
   return cachedStatus;

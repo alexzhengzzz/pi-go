@@ -539,7 +539,7 @@ struct WorkspaceView: View {
                             HStack(spacing: 6) {
                                 Text(session.name ?? "未命名会话")
                                 if let agent = session.agent, agent != "pi" {
-                                    Text(agent == "codex" ? "Codex" : agent.uppercased())
+                                    Text(agent == "codex" ? "Codex" : agent == "agy" ? "AGY" : agent.uppercased())
                                         .font(.caption2.weight(.semibold))
                                         .padding(.horizontal, 6)
                                         .padding(.vertical, 2)

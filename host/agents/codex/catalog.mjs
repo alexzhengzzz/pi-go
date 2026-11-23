@@ -26,6 +26,21 @@ export function codexSessionsRoot() {
   return join(codexHome(), 'sessions');
 }
 
+export async function archivedCodexSessionIds() {
+  const entries = await readdir(join(codexHome(), 'archived_sessions'), { withFileTypes: true }).catch((error) => {
+    if (error.code === 'ENOENT') return [];
+    throw error;
+  });
+  const ids = new Set();
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.startsWith('rollout-') || !entry.name.endsWith('.jsonl')) continue;
+    const stem = entry.name.slice(0, -'.jsonl'.length);
+    const id = stem.slice(-36);
+    if (idPattern.test(id)) ids.add(id.toLowerCase());
+  }
+  return ids;
+}
+
 async function threadNameIndex(home) {
   const names = new Map();
   const raw = await readFile(join(home, 'session_index.jsonl'), 'utf8').catch(() => '');

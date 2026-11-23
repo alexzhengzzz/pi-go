@@ -14,6 +14,7 @@ import { registerSocket } from '../bridge/socket-registry.mjs';
 import { computerSessions } from '../bridge/computer-sessions.mjs';
 import { listSessions, findSession, invalidateSessionCatalog } from './catalog.mjs';
 import { listCodexSessions, findCodexSession, invalidateCodexCatalog } from '../agents/codex/catalog.mjs';
+import { listAgySessions, findAgySession, invalidateAgyCatalog } from '../agents/agy/catalog.mjs';
 import { currentAgents, normalizeAgent } from '../agents/registry.mjs';
 
 const sessionIdPattern = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
@@ -268,7 +269,7 @@ export function createDaemonHost({ registry, runtimes, schedules, profile = daem
         }
         const cwd = await realpath(input.cwd).catch(() => undefined);
         const deleted = cwd !== undefined && deletedSessions.get(input.id) === cwd &&
-          !await findSession(cwd, input.id) && !await findCodexSession(cwd, input.id);
+          !await findSession(cwd, input.id) && !await findCodexSession(cwd, input.id) && !await findAgySession(cwd, input.id);
         return reply(response, 200, { deleted });
       }
       if (request.url === '/delete-session') {
@@ -281,7 +282,9 @@ export function createDaemonHost({ registry, runtimes, schedules, profile = daem
         const piMatch = (!requestedAgent || requestedAgent === 'pi') && cwd ? await findSession(cwd, input.id) : undefined;
         const codexMatch = !piMatch && (!requestedAgent || requestedAgent === 'codex') && cwd
           ? await findCodexSession(cwd, input.id) : undefined;
-        const session = piMatch ? { ...piMatch, agent: 'pi' } : codexMatch;
+        const agyMatch = !piMatch && !codexMatch && (!requestedAgent || requestedAgent === 'agy') && cwd
+          ? await findAgySession(cwd, input.id) : undefined;
+        const session = piMatch ? { ...piMatch, agent: 'pi' } : codexMatch ?? agyMatch;
         if (!session) return reply(response, 404, { error: 'desktop_session_not_found' });
         const before = await lstat(session.path);
         const managed = runtimes.list();
@@ -304,6 +307,7 @@ export function createDaemonHost({ registry, runtimes, schedules, profile = daem
         if (deletedSessions.size > 128) deletedSessions.delete(deletedSessions.keys().next().value);
         invalidateSessionCatalog();
         invalidateCodexCatalog();
+        invalidateAgyCatalog();
         revision = randomUUID();
         return reply(response, 200, { deleted: true });
       }
@@ -373,6 +377,10 @@ export function createDaemonHost({ registry, runtimes, schedules, profile = daem
           const found = await findCodexSession(cwd, input.id);
           if (found) session = found;
         }
+        if (!session && (!requestedAgent || requestedAgent === 'agy')) {
+          const found = await findAgySession(cwd, input.id);
+          if (found) session = found;
+        }
       }
       registered = await ensureRegistered(cwd, registered, request.url === '/authorize');
       const transient = Boolean(session) || request.url === '/new';
@@ -387,13 +395,15 @@ export function createDaemonHost({ registry, runtimes, schedules, profile = daem
             .map(({ id, agent, name, modified }) => ({ id, agent, name, modified }));
           return reply(response, 200, { sessions });
         }
-        const [piList, codexList] = await Promise.all([
+        const [piList, codexList, agyList] = await Promise.all([
           listSessions(cwd, refresh),
           listCodexSessions(cwd, refresh).catch(() => []),
+          listAgySessions(cwd, refresh).catch(() => []),
         ]);
         const sessions = [
           ...piList.map(({ id, name, modified }) => ({ agent: 'pi', id, name, modified })),
           ...codexList.map(({ id, name, modified }) => ({ agent: 'codex', id, name, modified })),
+          ...agyList.map(({ id, name, modified }) => ({ agent: 'agy', id, name, modified })),
         ].sort((a, b) => (b.modified ?? '').localeCompare(a.modified ?? ''));
         return reply(response, 200, { sessions });
       }

@@ -12,6 +12,8 @@ import { startDiscovery } from './lan-discovery.mjs';
 import { listFiles, previewFile, saveFile, openWorkspaceDownload, findWorkspaceFileByName } from './workspace-files.mjs';
 import { SessionMetadata, stateDirectory } from './session-metadata.mjs';
 import { computerSessions, findComputerSession } from './computer-sessions.mjs';
+import { archivedCodexSessionIds } from '../agents/codex/catalog.mjs';
+import { archivedAgySessionIds } from '../agents/agy/catalog.mjs';
 import { readRuns, readRunPatch } from './run-results.mjs';
 import { RunPush } from './run-push.mjs';
 import { maxFileBytes, maxHistoryImageBase64, maxImageBytes, maxPromptBody, safeAttachmentName } from './attachments.mjs';
@@ -281,7 +283,11 @@ async function catalog(live, hostSocket, granted = [], includeComputerHistory = 
     if (!liveRow) rows.set(record.id, { ...record, agent: record.agent ?? 'pi' });
     else if (!liveRow.modified && record.modified) liveRow.modified = record.modified;
   }
-  return [...rows.values()].sort((left, right) =>
+  const merged = [...rows.values()];
+  // A worker can keep reporting a thread after Codex moves its rollout to the archive.
+  const archivedCodex = merged.some(({ agent }) => agent === 'codex')
+    ? await archivedCodexSessionIds().catch(() => new Set()) : new Set();
+  return merged.filter(({ agent, id }) => agent !== 'codex' || !archivedCodex.has(id.toLowerCase())).sort((left, right) =>
     Number(right.active) - Number(left.active) || (right.modified ?? '').localeCompare(left.modified ?? '') ||
     left.id.localeCompare(right.id)).slice(0, computerAccess || workspace ? undefined : 250);
 }
@@ -450,16 +456,25 @@ async function nativeHandoff(request, response, route, cwd, id, context, hasLive
       agent = branch.data.agent ?? worker.session.agent;
       if (typeof id !== 'string' || id === worker.session.id) return error(response, 409, 'session_changed');
     }
+    if (route === '/new' && agent && !context.agents?.some((entry) => entry.id === agent && entry.installed !== false)) {
+      return error(response, 409, 'desktop_agent_unavailable');
+    }
     const payload = agent ? { cwd, id, agent } : { cwd, id };
     const result = await localRequest(context.socket, 'POST', route, payload, 12000).catch(() => undefined);
     if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
     if (!result) return error(response, 409, 'desktop_handoff_unconfirmed');
     if (result.status !== 200) return error(response, result.status, result.data.error ?? 'desktop_handoff_failed');
     if (typeof result.data.id !== 'string' || (id !== undefined && result.data.id !== id)) return error(response, 409, 'session_changed');
+    const newSessionAgent = route === '/new' ? agent || 'pi' : undefined;
+    if (newSessionAgent && (result.data.agent ?? 'pi') !== newSessionAgent) {
+      return error(response, 409, 'desktop_agent_mismatch');
+    }
     const expected = realpathSync(cwd);
     const isTarget = ({ session }) => {
-      try { return session.id === result.data.id && realpathSync(session.cwd) === expected; }
-      catch { return false; }
+      try {
+        return (!newSessionAgent || (session.agent ?? 'pi') === newSessionAgent) &&
+          session.id === result.data.id && realpathSync(session.cwd) === expected;
+      } catch { return false; }
     };
     await registry.waitForWorker(isTarget, 2500);
     const available = registry.workers().filter(isTarget);
@@ -714,8 +729,14 @@ const publicHandler = async (request, response) => {
       const cwd = scope === 'workspace' ? parameters.get('cwd') : undefined;
       if (scope === 'workspace' && !catalogInfo.projects.includes(cwd)) return error(response, 403, 'desktop_workspace_unshared');
       const merged = await catalog(live, context.socket, context.granted, true, context.revision, cwd, parameters.get('refresh') === '1');
+      // Read native archive flags after merging so cached rows and live workers respect desktop changes.
+      const archivedAgy = await archivedAgySessionIds(merged.filter(({ agent }) => agent === 'agy').map(({ id }) => id));
       if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
-      const decorated = merged.map((row) => ({ ...row, ...metadata.get(row) }));
+      const decorated = merged.map((row) => {
+        const local = metadata.get(row);
+        if (row.agent === 'agy' && archivedAgy.has(row.id)) return { ...row, ...local, archived: true, nativeArchived: true };
+        return { ...row, ...local };
+      });
       const visible = decorated.filter((row) => view === 'archived' ? row.archived :
         !row.archived && (view === 'pinned' ? row.pinned : view === 'recent' ? !!row.lastVisited : true));
       if (scope === 'workspace' && view === 'all') {

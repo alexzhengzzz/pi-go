@@ -387,8 +387,9 @@ test('daemon host serves native open, new, interactions and close', { timeout: 3
   assert.deepEqual(deletedRun.data, { deleted: true });
   assert.deepEqual((await phone('/schedules/sync', { includeJobs: false })).data.runs, []);
 
-  const newChat = await phone('/new', { cwd: first });
+  const newChat = await phone('/new', { cwd: first, agent: 'pi' });
   assert.equal(newChat.status, 200, JSON.stringify(newChat));
+  assert.equal(newChat.data.session.agent ?? 'pi', 'pi');
   const { id: titledId } = newChat.data.session;
   const promptText = '排查手机切到后台后收不到消息';
   assert.equal((await phone('/prompt', { id: titledId, requestId: 'title-first', text: promptText })).status, 202);

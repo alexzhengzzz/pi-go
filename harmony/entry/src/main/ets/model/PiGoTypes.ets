@@ -38,7 +38,7 @@ export interface SessionCapabilities {
 export interface AgentInfo {
   id: string;
   label: string;
-  installed: boolean;
+  installed?: boolean;
   version?: string;
   authed?: boolean;
 }
@@ -63,6 +63,7 @@ export interface SessionRow {
   revision: number;
   pinned?: boolean;
   archived?: boolean;
+  nativeArchived?: boolean;
   lastVisited?: string;
   id: string;
   name?: string;

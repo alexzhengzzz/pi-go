@@ -8,6 +8,7 @@
 //   {"type":"worker_ready","agent":"codex","sessionId":"...","socket":"/path/to/w-....sock"}
 import { createWorkerServer } from './worker-core.mjs';
 import { CodexDriver } from './codex/driver.mjs';
+import { AgyDriver } from './agy/driver.mjs';
 
 const argv = process.argv.slice(2);
 const option = (name) => {
@@ -25,6 +26,8 @@ async function main() {
   let driver;
   if (agent === 'codex') {
     driver = new CodexDriver({ cwd, sessionId, attach, scheduled });
+  } else if (agent === 'agy') {
+    driver = new AgyDriver({ cwd, sessionId, attach, scheduled });
   } else {
     throw new Error(`unsupported_agent:${agent}`);
   }

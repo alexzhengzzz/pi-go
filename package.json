@@ -17,6 +17,8 @@
     "host/agents/agent-worker.mjs",
     "host/agents/codex/catalog.mjs",
     "host/agents/codex/driver.mjs",
+    "host/agents/agy/catalog.mjs",
+    "host/agents/agy/driver.mjs",
     "host/bridge/phase0.ts",
     "host/bridge/local-ipc.mjs",
     "host/bridge/socket-registry.mjs",

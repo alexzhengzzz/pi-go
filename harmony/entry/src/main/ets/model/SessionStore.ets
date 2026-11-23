@@ -140,7 +140,7 @@ export class SessionStore {
   }
 
   private sessionRow(session: SessionRow, nested: boolean): SidebarRow {
-    const key = `session:${session.id}:${nested}:${session.revision}:${session.pinned}:${session.archived}:${session.cwd ?? ''}:${session.name ?? ''}`;
+    const key = `session:${session.id}:${nested}:${session.revision}:${session.pinned}:${session.archived}:${session.nativeArchived}:${session.cwd ?? ''}:${session.name ?? ''}`;
     return { key: key, session: session, nested: nested };
   }
 }

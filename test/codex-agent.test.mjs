@@ -11,8 +11,8 @@ import { test } from 'node:test';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { createServer } from 'node:http';
-import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { chmod, mkdir, mkdtemp, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises';
+import { basename, join } from 'node:path';
 import { codexComputerSessions } from '../host/agents/codex/catalog.mjs';
 import { localRequest } from '../host/bridge/local-ipc.mjs';
 
@@ -77,7 +77,7 @@ test('Codex CLI sessions work end-to-end through daemon and broker', { timeout: 
 
   const seededId = '01a206c9-eef1-7d53-ba63-ed447ac58d7f';
   const lockedId = '01a206c9-eef1-7d53-ba63-ed447ac58d88';
-  await seedCodexRollout(codexDir, workspace, seededId, '已有 Codex 会话', '第一轮提问', '第一轮回答');
+  const seededRollout = await seedCodexRollout(codexDir, workspace, seededId, '已有 Codex 会话', '第一轮提问', '第一轮回答');
   await seedCodexRollout(codexDir, workspace, lockedId, '桌面锁定 Codex 会话', '桌面提问', '桌面回答');
 
   const env = {
@@ -117,6 +117,8 @@ test('Codex CLI sessions work end-to-end through daemon and broker', { timeout: 
   assert.equal(health?.status, 200, daemonErr);
   assert.equal(Array.isArray(health.data.agents), true);
   assert.equal(health.data.agents.some((a) => a.id === 'codex'), true);
+  const authorized = await localRequest(hostSocket, 'POST', '/authorize', { cwd: workspace });
+  assert.equal(authorized.status, 200, JSON.stringify(authorized));
 
   const port = await reservePort();
   const broker = spawn(process.execPath, [join(project, 'host/bridge/broker.mjs'), String(port)], {
@@ -172,6 +174,25 @@ test('Codex CLI sessions work end-to-end through daemon and broker', { timeout: 
   assert.equal(opened.data.messages.length, 2);
   assert.equal(opened.data.messages[0].text, '第一轮提问');
   assert.equal(opened.data.messages[1].text, '第一轮回答');
+
+  const workspaceSessions = '/sessions?scope=workspace&cwd=' + encodeURIComponent(workspace);
+  const activeList = await get(workspaceSessions);
+  assert.equal(activeList.status, 200, JSON.stringify(activeList));
+  assert.equal(activeList.data.sessions.find(({ id }) => id === seededId)?.active, true);
+  const archiveDir = join(codexDir, 'archived_sessions');
+  await mkdir(archiveDir);
+  const archivedRollout = join(archiveDir, basename(seededRollout));
+  await rename(seededRollout, archivedRollout);
+  for (const query of ['', '&refresh=1']) {
+    const archivedList = await get(workspaceSessions + query);
+    assert.equal(archivedList.status, 200);
+    assert.ok(archivedList.data.sessions.some(({ id }) => id === lockedId));
+    assert.ok(!archivedList.data.sessions.some(({ id }) => id === seededId),
+      'a live worker must not keep a Codex-archived thread in the sidebar');
+  }
+  await rename(archivedRollout, seededRollout);
+  const restoredList = await get(workspaceSessions);
+  assert.equal(restoredList.data.sessions.find(({ id }) => id === seededId)?.active, true);
 
   // 3. Send a prompt and wait for completion + tool execution + thinking.
   const sent = await post('/prompt', {

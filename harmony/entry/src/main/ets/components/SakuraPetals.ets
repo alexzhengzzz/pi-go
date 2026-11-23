@@ -141,7 +141,8 @@ interface FloatingSpark {
 export struct SakuraScene {
   @Prop @Watch('onDarkModeChange') darkMode: boolean = false;
   @Prop sceneOpacity: number = 0.92;
-  @Prop dimmed: boolean = false;
+  @Prop @Watch('onLoopPolicyChange') dimmed: boolean = false;
+  @Prop @Watch('onLoopPolicyChange') active: boolean = true;
   @Prop @Watch('onGirlTap') girlTapSeq: number = 0;
   @Prop @Watch('onCelebrate') celebrateSeq: number = 0;
   @Prop @Watch('onBurstChange') burstSeq: number = 0;
@@ -161,6 +162,7 @@ export struct SakuraScene {
   private imgHeight: number = 0;
   private loadGen: number = 0;
   private loopTimer: number = -1;
+  private loopIntervalMs: number = 33;
   private elapsed: number = 0;
   private lastTickMs: number = 0;
   private canvasW: number = 0;
@@ -384,12 +386,25 @@ export struct SakuraScene {
     }
   }
 
+  private onLoopPolicyChange(): void {
+    if (!this.active) {
+      this.stopLoop();
+      return;
+    }
+    const desired = this.dimmed ? 50 : 33;
+    if (this.loopTimer !== -1 && this.loopIntervalMs !== desired) {
+      this.stopLoop();
+    }
+    this.ensureLoop();
+  }
+
   private ensureLoop(): void {
-    if (!this.canvasReady || this.loopTimer !== -1) return;
+    if (!this.canvasReady || !this.active || this.loopTimer !== -1) return;
+    this.loopIntervalMs = this.dimmed ? 50 : 33;
     this.lastTickMs = Date.now();
     this.loopTimer = setInterval(() => {
       this.tickFrame();
-    }, 33);
+    }, this.loopIntervalMs);
     this.tickFrame();
   }
 
@@ -465,46 +480,55 @@ export struct SakuraScene {
       drawY = 0;
     }
 
-    const strips = 36;
-    const dstStripH = h / strips;
     const t = this.elapsed;
     const gustBoost = 1 + this.windGust * 0.55;
     const padX = 8;
+    const clipX = wideScreen ? Math.max(0, drawX - 2) : 0;
+    const clipW = wideScreen ? (w - clipX) : w;
 
     this.ctx.save();
     this.ctx.globalAlpha = alpha;
-    for (let i = 0; i < strips; i += 1) {
-      const v = (i + 0.5) / strips;
-      let dx = 0;
-      let dy = 0;
+    // 1. 静态天空与底图一次性绘制，避免对不动区域重复切片
+    this.ctx.save();
+    this.ctx.beginPath();
+    this.ctx.rect(clipX, 0, clipW, h);
+    this.ctx.clip();
+    this.ctx.drawImage(bitmap, drawX, drawY, drawW, drawH);
+    this.ctx.restore();
 
-      // 上部樱花枝区域 (0 ~ 0.46)：平滑钟形权重，顶端枝叶随微风柔摆，中部天空自然归零无接缝
-      if (v < 0.46) {
-        const treeWeight = Math.sin((v / 0.46) * Math.PI);
-        dx += Math.sin(t * 1.15 + v * 5.2) * 3.4 * treeWeight * gustBoost;
-        dy += Math.cos(t * 0.9 + v * 3.4) * 1.2 * treeWeight * gustBoost;
-      }
-
-      // 下部少女区域 (0.50 ~ 1.0)：底部锚定不悬空，肩颈与长发呈柔和呼吸起伏与发丝微风波纹
-      if (v > 0.50) {
-        const local = (v - 0.50) / 0.50;
-        const env = Math.sin(local * Math.PI);
-        dy += -Math.sin(t * 1.45) * 1.9 * env;
-        dx += Math.sin(t * 1.25 + local * 4.4) * 2.1 * env * gustBoost;
-      }
-
-      const stripY = i * dstStripH;
+    // 2. 仅对上部樱花枝 (0 ~ 0.44) 做 10 条带柔摆
+    const treeStrips = 10;
+    const treeBandH = h * 0.44;
+    const treeStepH = treeBandH / treeStrips;
+    for (let i = 0; i < treeStrips; i += 1) {
+      const local = (i + 0.5) / treeStrips;
+      const v = local * 0.44;
+      const treeWeight = Math.sin(local * Math.PI);
+      const dx = Math.sin(t * 1.15 + v * 5.2) * 3.4 * treeWeight * gustBoost;
+      const dy = Math.cos(t * 0.9 + v * 3.4) * 1.2 * treeWeight * gustBoost;
       this.ctx.save();
       this.ctx.beginPath();
-      this.ctx.rect(wideScreen ? Math.max(0, drawX - 2) : 0, stripY, wideScreen ? (w - Math.max(0, drawX - 2)) : w, dstStripH + 1.2);
+      this.ctx.rect(clipX, i * treeStepH, clipW, treeStepH + 1.2);
       this.ctx.clip();
-      this.ctx.drawImage(
-        bitmap,
-        drawX - padX + dx,
-        drawY + dy,
-        drawW + padX * 2,
-        drawH
-      );
+      this.ctx.drawImage(bitmap, drawX - padX + dx, drawY + dy, drawW + padX * 2, drawH);
+      this.ctx.restore();
+    }
+
+    // 3. 仅对下部少女区域 (0.52 ~ 1.0) 做 10 条带呼吸与微风波纹
+    const girlStrips = 10;
+    const girlTop = h * 0.52;
+    const girlBandH = h - girlTop;
+    const girlStepH = girlBandH / girlStrips;
+    for (let i = 0; i < girlStrips; i += 1) {
+      const local = (i + 0.5) / girlStrips;
+      const env = Math.sin(local * Math.PI);
+      const dy = -Math.sin(t * 1.45) * 1.9 * env;
+      const dx = Math.sin(t * 1.25 + local * 4.4) * 2.1 * env * gustBoost;
+      this.ctx.save();
+      this.ctx.beginPath();
+      this.ctx.rect(clipX, girlTop + i * girlStepH, clipW, girlStepH + 1.2);
+      this.ctx.clip();
+      this.ctx.drawImage(bitmap, drawX - padX + dx, drawY + dy, drawW + padX * 2, drawH);
       this.ctx.restore();
     }
 

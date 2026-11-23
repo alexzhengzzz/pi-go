@@ -1,6 +1,5 @@
 import { glassCardSurface, themedCardSurface } from '../Immersive';
 import { SakuraPetals } from './SakuraPetals';
-import { ThemeLiveCanvas } from './ThemeLiveCanvas';
 import { InkScene } from './InkScene';
 import { SunsetScene } from './SunsetScene';
 import { unboundAction } from './ComponentAction';
@@ -72,6 +71,8 @@ export struct SettingsView {
   @Require selectAppearanceMode: (mode: AppearanceMode) => void = unboundAction;
   @Require selectPairingMode: (mode: string) => void = unboundAction;
   @Require selectTheme: (id: string) => void = unboundAction;
+  @Require setThemeMotionEnabled: (enabled: boolean) => Promise<void> = unboundAction;
+  @Prop themeMotionEnabled: boolean = true;
   @Require setLiveViewsEnabled: (enabled: boolean) => Promise<void> = unboundAction;
   @Require setRunNoticesEnabled: (enabled: boolean) => Promise<void> = unboundAction;
   @Require signInHuawei: () => Promise<void> = unboundAction;
@@ -385,9 +386,9 @@ export struct SettingsView {
             SymbolGlyph($r('sys.symbol.computer')).fontSize(21).fontColor([this.accent])
           } else {
             Row({ space: 3 }) {
-              Blank().width(6).height(6).borderRadius(3).backgroundColor(this.paletteFor(themeStyle('aurora')).accent)
-              Blank().width(6).height(6).borderRadius(3).backgroundColor(this.paletteFor(themeStyle('sunset')).accent)
               Blank().width(6).height(6).borderRadius(3).backgroundColor(this.paletteFor(themeStyle('sakura')).accent)
+              Blank().width(6).height(6).borderRadius(3).backgroundColor(this.paletteFor(themeStyle('sunset')).accent)
+              Blank().width(6).height(6).borderRadius(3).backgroundColor(this.paletteFor(themeStyle('graphite')).accent)
             }
           }
         }.width(40).height(40).backgroundColor(this.accentTint).borderRadius(12)
@@ -430,13 +431,21 @@ export struct SettingsView {
             .width('100%').height('100%')
             .objectFit(ImageFit.Cover)
             .opacity(this.darkMode ? 0.72 : 0.78)
-          SakuraPetals({ darkMode: this.darkMode, compact: true })
+          if (this.themeMotionEnabled) SakuraPetals({ darkMode: this.darkMode, compact: true })
         } else if (this.themeId === 'graphite') {
-          InkScene({ darkMode: this.darkMode, compact: true })
+          if (this.themeMotionEnabled) {
+            InkScene({ darkMode: this.darkMode, compact: true })
+          } else {
+            Image($rawfile(this.darkMode ? 'ink_dark.jpg' : 'ink_light.jpg'))
+              .width('100%').height('100%').objectFit(ImageFit.Cover).opacity(this.darkMode ? 0.78 : 0.85)
+          }
         } else if (this.themeId === 'sunset') {
-          SunsetScene({ darkMode: this.darkMode, compact: true })
-        } else {
-          ThemeLiveCanvas({ themeId: this.themeId, darkMode: this.darkMode, compact: true })
+          if (this.themeMotionEnabled) {
+            SunsetScene({ darkMode: this.darkMode, compact: true })
+          } else {
+            Image($rawfile(this.darkMode ? 'sunset_dark.jpg' : 'sunset_light.jpg'))
+              .width('100%').height('100%').objectFit(ImageFit.Cover).opacity(this.darkMode ? 0.78 : 0.85)
+          }
         }
         Column({ space: 8 }) {
           Row() {
@@ -577,7 +586,7 @@ export struct SettingsView {
             .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
         }.width('100%').padding({ left: 10, right: 10, top: 8, bottom: 9 }).alignItems(HorizontalAlign.Start)
       }.width('100%')
-    }.id(`theme-${style.id}`).layoutWeight(1).padding(0).clip(true).borderRadius(14)
+    }.id(`theme-${style.id}`).width('100%').padding(0).clip(true).borderRadius(16)
       .accessibilitySelected(this.themeId === style.id)
       .backgroundColor(this.themeId === style.id ? this.paletteFor(style).accentTint : this.paletteFor(style).cardBg)
       .border({
@@ -601,22 +610,24 @@ export struct SettingsView {
         }, (mode: AppearanceMode) => mode.id)
       }.width('100%').padding(4).borderRadius(14).backgroundColor($r('app.color.pigo_control'))
     }.width('100%').padding(16).attributeModifier(themedCardSurface(this.darkMode, this.themeId))
+    Row({ space: 12 }) {
+      Column({ space: 4 }) {
+        Text('动态主题效果').fontSize(16).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
+        Text('开启微风动效与轻点互动，关闭后切换为省电静态壁纸').fontSize(13).fontColor($r('app.color.pigo_muted'))
+      }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+      Toggle({ type: ToggleType.Switch, isOn: this.themeMotionEnabled })
+        .id('theme-motion-setting').selectedColor(this.accent).accessibilityText('动态主题效果')
+        .onChange((enabled: boolean) => { void this.setThemeMotionEnabled(enabled); })
+    }.width('100%').padding(14).attributeModifier(themedCardSurface(this.darkMode, this.themeId))
     this.themePreviewCard()
     Column({ space: 10 }) {
       Row() {
         Text('精选风格主题').fontSize(16).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text')).layoutWeight(1)
         Text(`${THEME_STYLES.length} 款`).fontSize(13).fontColor($r('app.color.pigo_muted'))
       }.width('100%')
-      ForEach(this.themeRows(), (pair: ThemeStyle[], rowIndex: number) => {
-        Row({ space: 10 }) {
-          ForEach(pair, (style: ThemeStyle) => {
-            this.themeOption(style)
-          }, (style: ThemeStyle) => style.id)
-          if (pair.length === 1) {
-            Blank().layoutWeight(1)
-          }
-        }.width('100%')
-      }, (_pair: ThemeStyle[], rowIndex: number) => `theme-row-${rowIndex}`)
+      ForEach(THEME_STYLES, (style: ThemeStyle) => {
+        this.themeOption(style)
+      }, (style: ThemeStyle) => style.id)
     }.width('100%').padding(16).attributeModifier(themedCardSurface(this.darkMode, this.themeId))
     if (this.appearanceNotice) Text(this.appearanceNotice).fontSize(13).fontColor($r('app.color.pigo_warning'))
   }
@@ -649,14 +660,6 @@ export struct SettingsView {
   }
   private activePalette(): ThemePalette {
     return themePalette(this.themeId, this.darkMode);
-  }
-  private themeRows(): ThemeStyle[][] {
-    const rows: ThemeStyle[][] = [];
-    for (let i = 0; i < THEME_STYLES.length; i += 2) {
-      const end = Math.min(i + 2, THEME_STYLES.length);
-      rows.push(THEME_STYLES.slice(i, end));
-    }
-    return rows;
   }
   private cloudOnlyComputers(): CloudComputer[] {
     return this.cloudComputers.filter((row: CloudComputer): boolean =>

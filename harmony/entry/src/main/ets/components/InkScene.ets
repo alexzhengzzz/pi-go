@@ -42,7 +42,8 @@ interface MistBand {
 export struct InkScene {
   @Prop @Watch('onDarkModeChange') darkMode: boolean = false;
   @Prop sceneOpacity: number = 0.92;
-  @Prop dimmed: boolean = false;
+  @Prop @Watch('onLoopPolicyChange') dimmed: boolean = false;
+  @Prop @Watch('onLoopPolicyChange') active: boolean = true;
   @Prop compact: boolean = false;
   @Prop @Watch('onBurstChange') burstSeq: number = 0;
   @Prop burstKind: string = 'send';
@@ -60,6 +61,7 @@ export struct InkScene {
   private loadGen: number = 0;
   private canvasReady: boolean = false;
   private loopTimer: number = -1;
+  private loopIntervalMs: number = 33;
   private lastTickMs: number = 0;
   private elapsed: number = 0;
   private canvasW: number = 0;
@@ -193,12 +195,25 @@ export struct InkScene {
     }
   }
 
+  private onLoopPolicyChange(): void {
+    if (!this.active) {
+      this.stopLoop();
+      return;
+    }
+    const desired = this.dimmed ? 50 : 33;
+    if (this.loopTimer !== -1 && this.loopIntervalMs !== desired) {
+      this.stopLoop();
+    }
+    this.ensureLoop();
+  }
+
   private ensureLoop(): void {
-    if (!this.canvasReady || this.loopTimer !== -1) return;
+    if (!this.canvasReady || !this.active || this.loopTimer !== -1) return;
+    this.loopIntervalMs = this.dimmed ? 50 : 33;
     this.lastTickMs = Date.now();
     this.loopTimer = setInterval(() => {
       this.tick();
-    }, 33);
+    }, this.loopIntervalMs);
     this.tick();
   }
 
@@ -291,43 +306,52 @@ export struct InkScene {
       drawY = 0;
     }
 
-    const strips = this.compact ? 18 : 34;
-    const dstStripH = h / strips;
     const t = this.elapsed;
     const gustBoost = 1 + this.windGust * 0.6;
     const padX = 8;
+    const clipX = wideScreen ? Math.max(0, drawX - 2) : 0;
+    const clipW = wideScreen ? (w - clipX) : w;
 
-    for (let i = 0; i < strips; i += 1) {
-      const v = (i + 0.5) / strips;
-      let dx = 0;
-      let dy = 0;
+    // 1. 静态宣纸留白、山体与亭台一次性绘制
+    this.ctx.save();
+    this.ctx.beginPath();
+    this.ctx.rect(clipX, 0, clipW, h);
+    this.ctx.clip();
+    this.ctx.drawImage(bitmap, drawX, drawY, drawW, drawH);
+    this.ctx.restore();
 
-      // 上部苍松墨竹区域 (0 ~ 0.38)：随山风柔和轻摆，中部宣纸留白自然归零无接缝
-      if (v < 0.38) {
-        const treeWeight = Math.sin((v / 0.38) * Math.PI);
-        dx += Math.sin(t * 1.0 + v * 5.0) * 3.0 * treeWeight * gustBoost;
-        dy += Math.cos(t * 0.8 + v * 3.2) * 1.1 * treeWeight * gustBoost;
-      }
-
-      // 中下部烟雨江面与孤舟区域 (0.60 ~ 0.76)：位于输入框上方安全区，孤舟与水面极轻柔荡漾
-      if (v > 0.60 && v < 0.76) {
-        const local = (v - 0.60) / 0.16;
-        const waterEnv = Math.sin(local * Math.PI);
-        dx += Math.sin(t * 0.95 + local * 4.8) * 1.5 * waterEnv;
-      }
-
-      const stripY = i * dstStripH;
+    // 2. 仅对上部苍松墨竹 (0 ~ 0.36) 做 8 条带微风轻摇
+    const treeStrips = this.compact ? 5 : 8;
+    const treeBandH = h * 0.36;
+    const treeStepH = treeBandH / treeStrips;
+    for (let i = 0; i < treeStrips; i += 1) {
+      const local = (i + 0.5) / treeStrips;
+      const v = local * 0.36;
+      const treeWeight = Math.sin(local * Math.PI);
+      const dx = Math.sin(t * 1.0 + v * 5.0) * 3.0 * treeWeight * gustBoost;
+      const dy = Math.cos(t * 0.8 + v * 3.2) * 1.1 * treeWeight * gustBoost;
       this.ctx.save();
       this.ctx.beginPath();
-      this.ctx.rect(wideScreen ? Math.max(0, drawX - 2) : 0, stripY, wideScreen ? (w - Math.max(0, drawX - 2)) : w, dstStripH + 1.2);
+      this.ctx.rect(clipX, i * treeStepH, clipW, treeStepH + 1.2);
       this.ctx.clip();
-      this.ctx.drawImage(
-        bitmap,
-        drawX - padX + dx,
-        drawY + dy,
-        drawW + padX * 2,
-        drawH
-      );
+      this.ctx.drawImage(bitmap, drawX - padX + dx, drawY + dy, drawW + padX * 2, drawH);
+      this.ctx.restore();
+    }
+
+    // 3. 仅对江面与孤舟区域 (0.60 ~ 0.74) 做 6 条带轻柔水波
+    const waterStrips = this.compact ? 4 : 6;
+    const waterTop = h * 0.60;
+    const waterBandH = h * 0.14;
+    const waterStepH = waterBandH / waterStrips;
+    for (let i = 0; i < waterStrips; i += 1) {
+      const local = (i + 0.5) / waterStrips;
+      const waterEnv = Math.sin(local * Math.PI);
+      const dx = Math.sin(t * 0.95 + local * 4.8) * 1.5 * waterEnv;
+      this.ctx.save();
+      this.ctx.beginPath();
+      this.ctx.rect(clipX, waterTop + i * waterStepH, clipW, waterStepH + 1.2);
+      this.ctx.clip();
+      this.ctx.drawImage(bitmap, drawX - padX + dx, drawY, drawW + padX * 2, drawH);
       this.ctx.restore();
     }
 

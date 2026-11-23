@@ -29,7 +29,7 @@ methods.push('cacheChat', 'presentChat', 'revealChat', 'send', 'promptForkAndCon
   'applySessionHistory', 'stopStream', 'streamDown', 'queueStreamPaint', 'flushStreamDeltas', 'finishSend', 'reconcileSteering');
 methods.push('chooseComputer', 'leaveComputer', 'persistComputers', 'pair', 'resetFileTree', 'closeFileEditor');
 methods.push('appendFileTreeRows', 'updateFileTree', 'toggleFileDirectory', 'loadFileDirectory');
-methods.push('workspaceName', 'openNewSpace', 'closeNewSpace', 'createWorkspaceTask', 'createSpaceTask', 'confirmCloseSpace', 'closeWorkspace', 'armTranscriptFollow', 'onKeyboardChange');
+methods.push('workspaceName', 'openNewSpace', 'closeNewSpace', 'createWorkspaceTask', 'openNewSession', 'closeNewSession', 'defaultNewSessionAgent', 'canCreateSession', 'createSession', 'onInboxFormLaunch', 'confirmCloseSpace', 'closeWorkspace', 'armTranscriptFollow', 'onKeyboardChange');
 methods.push('dockedSessions', 'sessionPaneWidth', 'compactSessionPane', 'onWindowWidthChange');
 methods.push('chatTitle', 'updateCachedSessionTitle', 'observeSessionRun', 'observeRun', 'advanceRunNotice', 'clearRunNotices');
 methods.push('restoreSettings', 'saveSetting', 'setRunNoticesEnabled', 'setLiveViewsEnabled');
@@ -39,7 +39,7 @@ const liveViewCalls = [];
 const liveActivity = { sync: snapshot => liveViewCalls.push(snapshot) };
 const Page = new Function('Curve', 'BridgeFailure', 'validUsb', 'Edge', '$r', 'DialogAlignment',
   'openSettings', 'themeStyle', 'appearanceMode', 'liveActivity', 'util', 'SPLIT_WINDOW_WIDTH',
-  'RUN_NOTICE_SETTING', 'LIVE_VIEW_SETTING', 'workspaceName', 'computerGroupId', 'connectionLabel', 'validCompanion',
+  'RUN_NOTICE_SETTING', 'LIVE_VIEW_SETTING', 'THEME_MOTION_SETTING', 'workspaceName', 'computerGroupId', 'connectionLabel', 'validCompanion',
   stripTypeScriptTypes(`class Harness {\n${methods.map(method).join('\n')}\n}`) + '; return Harness;')(
   { EaseOut: 0 },
   BridgeFailure,
@@ -52,7 +52,7 @@ const Page = new Function('Curve', 'BridgeFailure', 'validUsb', 'Edge', '$r', 'D
   (id) => ({ id }),
   liveActivity,
   { generateRandomUUID: randomUUID },
-  SPLIT_WINDOW_WIDTH, RUN_NOTICE_SETTING, LIVE_VIEW_SETTING, workspaceName, computerGroupId, connectionLabel, validCompanion
+  SPLIT_WINDOW_WIDTH, RUN_NOTICE_SETTING, LIVE_VIEW_SETTING, 'theme_motion_enabled', workspaceName, computerGroupId, connectionLabel, validCompanion
 );
 function fixture() {
   const state = new Page();
@@ -69,7 +69,7 @@ function fixture() {
     liveText: '', liveThinking: '', liveThinkSeq: 0, liveThinkingOpen: false, thinkingOpenIds: [],
     liveTools: [], liveSeq: 0, liveRevision: 0, streamAlive: false, queuedSteering: [],
     sessionCatalogLoaded: true, sessionCatalogUpdatedAt: Date.now(), sessionCatalogVersion: 0, catalogConnection: 0,
-    workspacePageRequestId: 0, workspacePages: [], workspaces: [],
+    workspacePageRequestId: 0, workspacePages: [], workspaces: [], agents: [],
     sessions: [{ id: 'one', cwd: '/project', name: 'Cached task' }], projects: ['/project'],
     sessionView: 'all', loadedView: 'all', expandedSpaces: [], scheduleSidebarSave: () => {},
     showSessions: false,
@@ -512,18 +512,73 @@ test('a failed catalog refresh keeps the cached workspaces and can be retried', 
   assert.equal(state.sessionCatalogFailed, false);
 });
 
-test('the space plus creates a task directly in that space', () => {
+test('a workspace entry opens the Agent picker and submits only after confirmation', async () => {
   const state = fixture();
   const requests = [];
-  state.hostAvailable = true;
-  state.requestAction = async (...args) => { requests.push(args); return false; };
+  Object.assign(state, {
+    hostAvailable: true,
+    agents: [
+      { id: 'pi', installed: true },
+      { id: 'codex', installed: false },
+      { id: 'agy', installed: true, authed: false },
+    ],
+    requestAction: async (...args) => { requests.push(args); return true; },
+  });
 
-  state.createSpaceTask('/project');
+  state.openNewSession('/project');
+  assert.equal(state.showNewSession, true);
+  assert.equal(state.newSessionFixedWorkspace, true);
+  assert.equal(state.newSessionCwd, '/project');
+  assert.equal(state.newSessionAgent, 'pi');
+  assert.deepEqual(requests, []);
+
+  state.newSessionAgent = 'codex';
+  await state.createSession();
+  assert.deepEqual(requests, []);
+
+  state.newSessionAgent = 'agy';
+  await state.createSession();
   assert.equal(state.activeTab, 'tasks');
-  assert.deepEqual(requests, [['/new', { cwd: '/project' }]]);
+  assert.deepEqual(requests, [['/new', { cwd: '/project', agent: 'agy' }]]);
+  assert.equal(state.showNewSession, false);
 });
 
-test('the empty new-task menu can create one space and open its first task', async () => {
+test('the picker uses the current computer catalog and supports legacy Pi hosts', () => {
+  const state = fixture();
+  Object.assign(state, {
+    visible: true, isPaired: true, reachable: false,
+    inboxFormLaunch: true, formDestination: 'new_task',
+    selectRootTab: (tab) => { state.activeTab = tab; },
+    request: async () => { assert.fail('the offline widget launch must not submit a request'); },
+  });
+  state.onInboxFormLaunch();
+  assert.equal(state.activeTab, 'tasks');
+  assert.equal(state.showNewSession, true);
+  assert.equal(state.newSessionAgent, '');
+  state.reachable = true;
+  const workspaces = [{ cwd: '/workspace', name: 'Workspace' }];
+  state.applyCatalog({ sessions: [], reply: {
+    desktopHandoff: true, workspaces,
+    agents: [{ id: 'codex', installed: true }, { id: 'agy', installed: true }],
+  } }, 'all', false);
+  assert.equal(state.newSessionCwd, '/workspace');
+  assert.equal(state.newSessionAgent, 'codex');
+  state.workspaceCwd = '/workspace';
+  state.openNewSession('', 'agy');
+  assert.equal(state.newSessionFixedWorkspace, false);
+  assert.equal(state.newSessionCwd, '/workspace');
+  assert.equal(state.newSessionAgent, 'agy');
+
+  state.resetCatalog();
+  assert.deepEqual(state.agents, []);
+  assert.equal(state.showNewSession, false);
+  state.applyCatalog({ sessions: [], reply: { desktopHandoff: true, workspaces } }, 'all', false);
+  state.openNewSession();
+  assert.equal(state.newSessionAgent, 'pi');
+  assert.equal(state.canCreateSession(), true);
+});
+
+test('creating a space opens its picker and cancelling preserves the space', async () => {
   const state = fixture();
   Object.assign(state, { projects: [], expandedSpaces: [], hostAvailable: true, scheduleSidebarSave: () => {} });
   state.openNewSpace();
@@ -536,7 +591,11 @@ test('the empty new-task menu can create one space and open its first task', asy
 
   const requests = [];
   const cwd = '/Pi Go/Spaces/测试 空间';
-  state.request = async (...args) => { requests.push(args); return { cwd }; };
+  state.request = async (path, payload) => {
+    if (path.startsWith('/sessions?')) return { desktopHandoff: true, workspaces: [{ cwd, name: '测试 空间' }] };
+    requests.push([path, payload]);
+    return { cwd };
+  };
   state.requestAction = async (...args) => { requests.push(args); return true; };
   state.openNewSpace();
   state.newSpaceName = '../outside';
@@ -545,24 +604,35 @@ test('the empty new-task menu can create one space and open its first task', asy
   assert.deepEqual(requests, []);
   state.newSpaceName = '  测试 空间  ';
   await Promise.all([state.createWorkspaceTask(), state.createWorkspaceTask()]);
-  assert.deepEqual(requests, [['/create-workspace', { name: '测试 空间' }], ['/new', { cwd }]]);
+  assert.deepEqual(requests, [['/create-workspace', { name: '测试 空间' }]]);
   assert.deepEqual(state.projects, [cwd]);
   assert.deepEqual(state.expandedSpaces, []);
   assert.equal(state.showNewSpace, false);
+  assert.equal(state.showNewSession, true);
+  assert.equal(state.newSessionCwd, cwd);
+  state.closeNewSession();
+  assert.deepEqual(state.projects, [cwd]);
 });
 
-test('the sidebar keeps a created space if its first task fails to open', async () => {
-  const state = fixture();
-  const messages = [];
+test('a mismatched Agent leaves the picker and its selection available', async () => {
+  const state = navigationFixture();
+  let complete;
+  let requests = 0;
   Object.assign(state, {
-    canCreateWorkspace: true, showNewSpace: true, newSpaceName: '测试', expandedSpaces: [],
-    scheduleSidebarSave: () => {}, request: async () => ({ cwd: '/spaces/测试' }),
-    requestAction: async () => { state.epoch++; state.status = '暂时无法打开任务。'; return false; },
-    getUIContext: () => ({ getPromptAction: () => ({ showToast: ({ message }) => messages.push(message) }) })
+    hostAvailable: true,
+    agents: [{ id: 'codex', installed: true }],
+    request: () => { requests++; return new Promise((resolve) => { complete = resolve; }); },
   });
-  await state.createWorkspaceTask();
-  assert.ok(state.projects.includes('/spaces/测试'));
-  assert.deepEqual(messages, ['空间已创建。暂时无法打开任务。']);
+  state.openNewSession('/project', 'codex');
+  const creation = state.createSession();
+  await state.createSession();
+  assert.equal(requests, 1);
+  complete({ session: { id: 'wrong', cwd: '/project', agent: 'pi' } });
+  await creation;
+  assert.equal(state.currentId, 'one');
+  assert.equal(state.showNewSession, true);
+  assert.equal(state.newSessionAgent, 'codex');
+  assert.match(state.newSessionError, /不一致/);
 });
 
 test('removing a space from its menu requires confirmation on the same computer', () => {

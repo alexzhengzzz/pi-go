@@ -5,6 +5,7 @@ import { homedir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { sessionTitlePreview } from './message-view.mjs';
 import { codexComputerSessions, findCodexSession } from '../agents/codex/catalog.mjs';
+import { agyComputerSessions, findAgySession } from '../agents/agy/catalog.mjs';
 
 const idPattern = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
 const cache = new Map();
@@ -81,15 +82,20 @@ export async function findComputerSession(id, agent) {
     const codex = await findCodexSession(undefined, id);
     if (codex) return codex;
   }
+  if (!agent || agent === 'agy') {
+    const agy = await findAgySession(undefined, id);
+    if (agy) return agy;
+  }
 }
 
-// Read Pi's and Codex's native stores, including projects without an active session.
+// Read Pi's, Codex's, and agy's native stores, including projects without an active session.
 export async function computerSessions(revision, cwd, refresh = false) {
-  const [piRows, codexRows] = await Promise.all([
+  const [piRows, codexRows, agyRows] = await Promise.all([
     piComputerSessions(revision, cwd, refresh),
     codexComputerSessions(revision, cwd, refresh).catch(() => []),
+    agyComputerSessions(revision, cwd, refresh).catch(() => []),
   ]);
-  const combined = [...piRows, ...codexRows];
+  const combined = [...piRows, ...codexRows, ...agyRows];
   combined.sort((a, b) => (b.modified ?? '').localeCompare(a.modified ?? ''));
   return combined;
 }

@@ -13,7 +13,6 @@ import { ChatComposer } from '../components/ChatComposer';
 import { ChatTranscript } from '../components/ChatTranscript';
 import { toolActionTitle } from '../TranscriptTurns';
 import { SakuraScene } from '../components/SakuraPetals';
-import { ThemeLiveCanvas } from '../components/ThemeLiveCanvas';
 import { InkScene } from '../components/InkScene';
 import { SunsetScene } from '../components/SunsetScene';
 import { RunResultView } from '../components/RunResultView';
@@ -38,7 +37,7 @@ import { choosePromptImage, capturePromptImage, PromptImage } from '../PromptIma
 import { choosePromptFiles, MAX_FILES } from '../PromptFile';
 import { ensureMicrophone, VoiceInputSession, voiceInputSupported } from '../VoiceInput';
 import { ReplySpeech, replySpeechSupported } from '../ReplySpeech';
-import { AppearanceMode, ThemePalette, ThemeStyle, appearanceMode, canvasFadeStops, openSettings, themePalette, themeStyle } from '../Appearance';
+import { AppearanceMode, THEME_MOTION_SETTING, ThemePalette, ThemeStyle, appearanceMode, canvasFadeStops, openSettings, themePalette, themeStyle } from '../Appearance';
 import { HuaweiProfile, authorizeHuaweiProfile, isHuaweiProfileCurrent } from '../HuaweiProfile';
 import { AccountSync, CloudComputer, SyncRow, SyncSnapshot, SYNC_MODE, SYNC_THEME, computerSyncRow } from '../AccountSync';
 import { immersiveSurface, glassButtonSurface, glassComposerSurface, glassCardSurface, immersiveFloatingTabs, hasImmersiveMaterial, immersiveSheetMaterial } from '../Immersive';
@@ -54,7 +53,7 @@ import { ScheduleJob, ScheduleRun, ScheduleWatch, RunMessage, scheduleTime, pars
 import { ModelOption, BridgeEndpoint, SessionState, SessionRow, ChatMessage, DraftAttachment, AttachmentRef,
   UploadedAttachment, LiveTool, ToolDetails, CommandRow, ReceivedFilePreview, MarkdownTableReader, StreamFrame,
   PendingInteraction, FileEntry, FileDirectory, FileTreeRow, RunningRow, RunNotice, WorkspaceRow, BridgeReply,
-  Payload, PendingSend, QueuedSteering, BridgeFailure } from '../model/PiGoTypes';
+  AgentInfo, Payload, PendingSend, QueuedSteering, BridgeFailure } from '../model/PiGoTypes';
 import { MAX_IMAGE_ATTACHMENTS, MAX_TOTAL_IMAGE_DRAFTS, MAX_TOTAL_FILE_DRAFTS, USB_ADDRESS, MAX_VOICE_MS, MIN_HOLD_MS,
   RECEIVED_FILE_DIR, RECEIVED_FILE_TTL_S, MAX_DOWNLOAD_BYTES, MAX_INLINE_IMAGE_BYTES, SPLIT_WINDOW_WIDTH,
   SHORT_WINDOW_HEIGHT, MAX_TEXT_PREVIEW_BYTES, RUN_NOTICE_SETTING, LIVE_VIEW_SETTING } from '../model/PiGoConstants';
@@ -289,7 +288,8 @@ struct Index {
   @State private activeTab: string = 'tasks';
   @State private minePage: string = '';
   @State private addingComputer: boolean = false;
-  @State private themeId: string = 'mint';
+  @State private themeId: string = 'sakura';
+  @State private themeMotionEnabled: boolean = true;
   @State private modeId: string = 'system';
   @State private runNoticesEnabled: boolean = true;
   @State private liveViewsEnabled: boolean = true;
@@ -321,6 +321,13 @@ struct Index {
   @State private pendingSend?: PendingSend = undefined;
   @State private hostAvailable: boolean = false;
   @State private canCreateWorkspace: boolean = false;
+  @State private agents: AgentInfo[] = [];
+  @State private showNewSession: boolean = false;
+  @State private newSessionCwd: string = '';
+  @State private newSessionAgent: string = '';
+  @State private newSessionFixedWorkspace: boolean = false;
+  @State private newSessionError: string = '';
+  private newSessionPreferredAgent: string = 'pi';
   @State private showNewSpace: boolean = false;
   @State private newSpaceName: string = '';
   @State private newSpaceError: string = '';
@@ -391,6 +398,7 @@ struct Index {
     if (this.showToolDetails) { this.closeToolDetails(); return true; }
     if (this.showModelMenu) { this.showModelMenu = false; return true; }
     if (this.showNewSpace) { this.closeNewSpace(); return true; }
+    if (this.showNewSession) { this.closeNewSession(); return true; }
     if (this.showSessions) { this.setDrawer(false); return true; }
     if (this.showSettings) { this.showSettings = false; return true; }
     if (this.showFiles) { this.fileBack(); return true; }
@@ -1286,12 +1294,7 @@ struct Index {
     if (destination === 'new_task') {
       this.schedulePage = '';
       this.selectRootTab('tasks');
-      const cwd = this.projects.includes(this.workspaceCwd) ? this.workspaceCwd : (this.projects[0] ?? '');
-      if (cwd && this.reachable && this.hostAvailable) {
-        void this.requestAction('/new', { cwd: cwd });
-      } else if (!this.dockedSessions()) {
-        this.setDrawer(true);
-      }
+      this.openNewSession();
       return;
     }
     if (destination === 'pending') {
@@ -1508,7 +1511,7 @@ struct Index {
   private canSwitchNetwork(): boolean {
     return this.visible && this.isPaired && !this.reachable && !this.busy && !this.openingSession &&
       !this.pendingSend && !this.editingPath && !this.removeTarget && !this.scheduleSaving &&
-      !this.showNewSpace && !this.showSettings && this.schedulePage !== 'editor' &&
+      !this.showNewSession && !this.showNewSpace && !this.showSettings && this.schedulePage !== 'editor' &&
       !this.textFilePreview && !this.markdownTableReader && !this.reviewedRun &&
       this.activeTab === 'tasks' && !this.recording && !this.voicePreparing && !this.voiceFinishing;
   }
@@ -1996,7 +1999,9 @@ struct Index {
       this.offlineDismissed = false;
       const libraryVisible = this.showSessions || this.dockedSessions();
       const catalogStale = Date.now() - this.sessionCatalogUpdatedAt >= 30000;
-      if (libraryVisible && (connected || (!this.sessionCatalogFailed && (!this.sessionCatalogLoaded || (catalogStale && this.sessionView === 'all')))) && !this.busy) {
+      const probingAgents = this.showNewSession && this.agents.some((agent: AgentInfo): boolean => agent.installed === undefined);
+      if ((libraryVisible || this.showNewSession) && (connected || (!this.sessionCatalogFailed &&
+        (!this.sessionCatalogLoaded || probingAgents || (catalogStale && (this.sessionView === 'all' || this.showNewSession))))) && !this.busy) {
         void this.loadSessions();
       }
       if (libraryVisible) {
@@ -2477,6 +2482,13 @@ struct Index {
     this.workspacePages = this.workspacePages.filter((page: WorkspacePage): boolean => this.projects.includes(page.path));
     this.hostAvailable = result.desktopHandoff ?? false;
     this.canCreateWorkspace = result.canCreateWorkspace ?? false;
+    this.agents = this.hostAvailable ? result.agents ?? [{ id: 'pi', label: 'Pi', installed: true }] : [];
+    if (this.showNewSession) {
+      if (!this.newSessionFixedWorkspace && !this.projects.includes(this.newSessionCwd)) {
+        this.newSessionCwd = this.projects.includes(this.workspaceCwd) ? this.workspaceCwd : this.projects[0] ?? '';
+      }
+      if (!this.newSessionAgent) this.newSessionAgent = this.defaultNewSessionAgent(this.newSessionPreferredAgent);
+    }
     this.sessionCatalogLoaded = true;
   }
 
@@ -3337,17 +3349,49 @@ struct Index {
     }
   }
 
-  private createSpaceTask(path: string, agent?: string): void {
-    if (!this.projects.includes(path)) return;
-    if (!this.reachable || !this.hostAvailable) {
-      this.getUIContext().getPromptAction().showToast({
-        message: this.reachable ? '无法新建任务，请在电脑上启动 Pi Go 后台服务。' : '请先连接电脑再新建任务。'
-      });
-      return;
+  private defaultNewSessionAgent(preferred: string = 'pi'): string {
+    return this.agents.find((agent: AgentInfo): boolean => agent.id === preferred && agent.installed === true)?.id ??
+      this.agents.find((agent: AgentInfo): boolean => agent.id === 'pi' && agent.installed === true)?.id ??
+      this.agents.find((agent: AgentInfo): boolean => agent.installed === true)?.id ?? '';
+  }
+
+  private openNewSession(path: string = '', preferred: string = 'pi'): void {
+    if (this.busy || this.openingSession || (path && !this.projects.includes(path))) return;
+    this.dismissKeyboard();
+    this.newSessionFixedWorkspace = !!path;
+    this.newSessionCwd = path || (this.projects.includes(this.workspaceCwd) ? this.workspaceCwd : this.projects[0] ?? '');
+    this.newSessionPreferredAgent = preferred;
+    this.newSessionAgent = this.defaultNewSessionAgent(preferred);
+    this.newSessionError = '';
+    this.showNewSession = true;
+    if (this.reachable && (!this.sessionCatalogLoaded || this.sessionCatalogFailed ||
+      this.agents.some((agent: AgentInfo): boolean => agent.installed === undefined) ||
+      Date.now() - this.sessionCatalogUpdatedAt >= 30000)) {
+      void this.loadSessions();
     }
+  }
+
+  private closeNewSession(): void {
+    if (this.openingSession) return;
+    this.showNewSession = false;
+  }
+
+  private canCreateSession(): boolean {
+    return this.reachable && this.hostAvailable && !this.busy && !this.openingSession &&
+      this.projects.includes(this.newSessionCwd) &&
+      this.agents.some((agent: AgentInfo): boolean => agent.id === this.newSessionAgent && agent.installed === true);
+  }
+
+  private async createSession(): Promise<void> {
+    if (!this.showNewSession || !this.canCreateSession()) return;
+    const connection = this.catalogConnection;
+    const payload: Payload = { cwd: this.newSessionCwd, agent: this.newSessionAgent };
+    this.newSessionError = '';
     this.activeTab = 'tasks';
-    const payload: Payload = agent && agent !== 'pi' ? { cwd: path, agent: agent } : { cwd: path };
-    void this.requestAction('/new', payload);
+    const created = await this.requestAction('/new', payload);
+    if (connection !== this.catalogConnection || !this.showNewSession) return;
+    if (created) this.closeNewSession();
+    else this.newSessionError = this.status || '暂时无法创建会话。';
   }
 
   private workspaceName(path: string): string {
@@ -3419,11 +3463,7 @@ struct Index {
     this.sessionCatalogLoaded = false;
     this.sessionCatalogVersion += 1;
     this.activeTab = 'tasks';
-    if (!(await this.requestAction('/new', { cwd: cwd })) && this.epoch === epoch + 1) {
-      this.getUIContext().getPromptAction().showToast({
-        message: `空间已创建。${this.status || '暂时无法打开任务。'}`
-      });
-    }
+    this.openNewSession(cwd);
   }
 
   private confirmCloseSpace(path: string, epoch: number): void {
@@ -3504,6 +3544,10 @@ struct Index {
       }
       const result = await this.request(path, payload);
       if (epoch !== this.epoch) return false;
+      if (path === '/new') {
+        if (!result.session) throw new BridgeFailure(409, 'desktop_handoff_unconfirmed');
+        if ((result.session.agent ?? 'pi') !== (input?.agent ?? 'pi')) throw new BridgeFailure(409, 'desktop_agent_mismatch');
+      }
       if (path === '/new' || path === '/fork' || path === '/rename' || path === '/session-meta' || path === '/close-workspace') {
         this.sessionCatalogLoaded = false;
         this.sessionCatalogVersion += 1;
@@ -3538,6 +3582,9 @@ struct Index {
         }
         if (epoch !== this.epoch) return false;
         if (chat.session?.id !== result.session.id || chat.session.cwd !== result.session.cwd) throw new Error('session_changed');
+        if (path === '/new' && (chat.session.agent ?? 'pi') !== (result.session.agent ?? 'pi')) {
+          throw new BridgeFailure(409, 'desktop_agent_mismatch');
+        }
         if (chat.cursor) {
           const page = chat.messages !== undefined ? chat : await this.refreshSessionHistory(chat, true);
           if (epoch !== this.epoch) return false;
@@ -3571,6 +3618,12 @@ struct Index {
       else if (error instanceof BridgeFailure && error.message === 'desktop_handoff_required' && path === '/close-workspace') this.status = '电脑端 Pi Go 宿主未运行，暂时无法关闭工作区。';
       else if (error instanceof BridgeFailure && error.message === 'not_found' && path === '/close-workspace') this.status = '当前电脑端 Pi Go 宿主不支持远程关闭工作区，请更新电脑端。';
       else if (error instanceof BridgeFailure && error.message === 'desktop_handoff_required') this.status = '电脑端 Pi Go 宿主未运行。启动宿主后重试，或在电脑上打开并共享该会话。';
+      else if (error instanceof BridgeFailure && error.message === 'desktop_agent_unavailable') this.status = '所选 Agent 在电脑端不可用，请检查安装后刷新。';
+      else if (error instanceof BridgeFailure && error.message === 'desktop_agent_mismatch') this.status = '电脑端返回的会话与所选 Agent 不一致，请刷新会话列表。';
+      else if (path === '/new' && error instanceof BridgeFailure &&
+        (error.message === 'desktop_session_not_ready' || error.message === 'desktop_handoff_failed')) {
+        this.status = '所选 Agent 启动失败，请在电脑上检查登录和配置。';
+      }
       else if (error instanceof BridgeFailure && error.message === 'desktop_workspace_unshared') this.status = '该工作区尚未共享给手机。';
       else if (error instanceof BridgeFailure && error.message === 'desktop_workspace_not_registered') this.status = '该工作区未在电脑端 Pi Go 的工作区列表中登记。';
       else if (error instanceof BridgeFailure && error.message === 'desktop_close_failed') this.status = '电脑端关闭工作区失败，请稍后重试。';
@@ -4015,7 +4068,7 @@ struct Index {
 
   private shareTargetLocked(): boolean {
     return !!this.editingPath || this.savingPreview || this.schedulePage === 'editor' ||
-      this.scheduleSaving || this.showNewSpace || this.addingComputer;
+      this.scheduleSaving || this.showNewSession || this.showNewSpace || this.addingComputer;
   }
 
   private prepareShareTarget(): boolean {
@@ -4507,7 +4560,8 @@ struct Index {
           this.dismissedInboxRuns = new Set<string>(dismissed.filter((id: string): boolean => typeof id === 'string'));
         }
       } catch { /* Ignore an invalid dismissal list. */ }
-      this.themeId = themeStyle(settings.getSync('theme_style', 'mint') as string).id;
+      this.themeId = themeStyle(settings.getSync('theme_style', 'sakura') as string).id;
+      this.themeMotionEnabled = settings.getSync(THEME_MOTION_SETTING, true) !== false;
       this.modeId = appearanceMode(settings.getSync('appearance_mode', 'system') as string).id;
       this.runNoticesEnabled = settings.getSync(RUN_NOTICE_SETTING, true) !== false;
       this.liveViewsEnabled = settings.getSync(LIVE_VIEW_SETTING, true) !== false;
@@ -4789,6 +4843,11 @@ struct Index {
     this.writeCloudRow({ key: SYNC_THEME, payload: id });
   }
 
+  private async setThemeMotionEnabled(enabled: boolean): Promise<void> {
+    this.themeMotionEnabled = enabled;
+    await this.saveSetting(THEME_MOTION_SETTING, enabled).catch(() => { this.appearanceNotice = '未能保存动态效果设置。'; });
+  }
+
   private applyAppearanceMode(mode: AppearanceMode): boolean {
     const context = this.getUIContext().getHostContext();
     if (!context) return false;
@@ -4969,6 +5028,8 @@ struct Index {
       selectAppearanceMode: (mode: AppearanceMode): void => this.selectAppearanceMode(mode),
       selectPairingMode: (mode: string): void => this.selectPairingMode(mode),
       selectTheme: (id: string): void => this.selectTheme(id),
+      setThemeMotionEnabled: (enabled: boolean): Promise<void> => this.setThemeMotionEnabled(enabled),
+      themeMotionEnabled: this.themeMotionEnabled,
       setLiveViewsEnabled: (enabled: boolean): Promise<void> => this.setLiveViewsEnabled(enabled),
       setRunNoticesEnabled: (enabled: boolean): Promise<void> => this.setRunNoticesEnabled(enabled),
       signInHuawei: (): Promise<void> => this.signInHuawei(),
@@ -5140,7 +5201,7 @@ struct Index {
               .backgroundColor(this.reachable ? $r('app.color.pigo_success') : $r('app.color.pigo_warning'))
               .accessibilityText(this.reachable ? '电脑已连接' : '电脑离线')
             if (this.currentAgent && this.currentAgent !== 'pi') {
-              Text(this.currentAgent === 'codex' ? 'Codex' : this.currentAgent.toUpperCase())
+              Text(this.currentAgent === 'codex' ? 'Codex' : this.currentAgent === 'agy' ? 'AGY' : this.currentAgent.toUpperCase())
                 .fontSize(10).fontWeight(FontWeight.Medium).fontColor(this.accent())
                 .padding({ left: 5, right: 5, top: 1, bottom: 1 }).borderRadius(5)
                 .backgroundColor(this.accentTint())
@@ -5162,15 +5223,10 @@ struct Index {
           this.scheduleInboxButton()
           Button({ type: ButtonType.Normal }) {
             headerSymbol($r('sys.symbol.square_and_pencil'), this.accent(), 19)
-          }.id('new-task').headerAction().attributeModifier(immersiveSurface(this.darkMode)).accessibilityText('在当前工作区新建会话')
+          }.id('new-task').headerAction().attributeModifier(immersiveSurface(this.darkMode)).accessibilityText('新建会话')
             .enabled(this.reachable && !this.busy && !this.openingSession && this.hostAvailable &&
               !!this.workspaceCwd && this.projects.includes(this.workspaceCwd))
-            .onClick(() => {
-              this.activeTab = 'tasks';
-              const payload: Payload = this.currentAgent && this.currentAgent !== 'pi'
-                ? { cwd: this.workspaceCwd, agent: this.currentAgent } : { cwd: this.workspaceCwd };
-              void this.requestAction('/new', payload);
-            })
+            .onClick(() => { this.openNewSession('', this.currentAgent); })
           Button({ type: ButtonType.Normal }) {
             Stack() {
               Image($r('app.media.ic_more')).width(20).height(20).fillColor($r('app.color.pigo_text'))
@@ -5591,6 +5647,8 @@ struct Index {
 
   private resetCatalog(): void {
     this.catalogConnection += 1;
+    this.agents = [];
+    this.showNewSession = false;
     this.sessionLoading = false;
     this.sessionCatalogLoaded = false;
     this.sessionCatalogFailed = false;
@@ -5822,7 +5880,7 @@ struct Index {
       busy: this.busy,
       canCreateWorkspace: this.canCreateWorkspace,
       confirmCloseSpace: (path: string, epoch: number): void => this.confirmCloseSpace(path, epoch),
-      createSpaceTask: (path: string, agent?: string): void => this.createSpaceTask(path, agent),
+      openNewSession: (path?: string): void => this.openNewSession(path),
       currentId: this.currentId,
       expandedSpaces: this.$expandedSpaces,
       hostAvailable: this.hostAvailable,
@@ -5877,7 +5935,6 @@ struct Index {
       dockedSessions: this.dockedSessions(),
       drawerWidth: this.drawerWidth(),
       sessionPaneWidth: this.sessionPaneWidth(),
-      openNewSpace: (): void => { this.openNewSpace(); },
       onDrawerAppear: (): void => { this.onSidebarAppear(); },
       connectionEpoch: (): number => this.epoch
     })
@@ -6076,6 +6133,87 @@ struct Index {
   }
 
   @Builder
+  newSessionDialog() {
+    Stack() {
+      Button({ type: ButtonType.Normal }).width('100%').height('100%').borderRadius(0).backgroundColor('#66000000')
+        .accessibilityText('取消新建会话').enabled(!this.openingSession).onClick(() => { this.closeNewSession(); })
+      Scroll() {
+        Column({ space: 12 }) {
+          Text('新建会话').fontSize(19).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
+          Row({ space: 8 }) {
+            Text('工作区').fontSize(14).fontColor($r('app.color.pigo_muted'))
+            if (!this.newSessionFixedWorkspace && this.projects.length > 0) {
+              Select(this.projects.map((path: string): SelectOption => ({ value: this.workspaceName(path) })))
+                .id('new-session-workspace').layoutWeight(1).selected(this.projects.indexOf(this.newSessionCwd))
+                .value(this.newSessionCwd ? this.workspaceName(this.newSessionCwd) : '选择工作区')
+                .fontColor($r('app.color.pigo_text')).backgroundColor($r('app.color.pigo_control'))
+                .enabled(!this.busy && !this.openingSession)
+                .onSelect((index: number) => {
+                  this.newSessionCwd = this.projects[index] ?? '';
+                  this.newSessionError = '';
+                })
+            } else {
+              Text(this.newSessionCwd ? this.workspaceName(this.newSessionCwd) : '暂无工作区')
+                .fontSize(14).fontColor($r('app.color.pigo_text')).layoutWeight(1)
+                .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+            }
+            if (!this.newSessionFixedWorkspace && this.canCreateWorkspace) {
+              Button('新空间').chatAction().height(36).padding({ left: 10, right: 10 })
+                .enabled(this.reachable && !this.busy && !this.openingSession)
+                .onClick(() => { this.closeNewSession(); this.openNewSpace(); })
+            }
+          }.width('100%')
+          Row({ space: 8 }) {
+            Text('Agent').fontSize(14).fontColor($r('app.color.pigo_muted')).layoutWeight(1)
+            Button({ type: ButtonType.Normal }) {
+              SymbolGlyph($r('sys.symbol.arrow_clockwise')).fontSize(16).fontColor([this.accent()])
+            }.id('new-session-refresh').width(44).height(32).padding(0).backgroundColor(Color.Transparent)
+              .accessibilityText('刷新 Agent 列表')
+              .enabled(this.reachable && !this.busy && !this.openingSession && !this.sessionLoading)
+              .onClick(() => { void this.loadSessions(); })
+          }.width('100%')
+          ForEach(this.agents, (agent: AgentInfo) => {
+            Button({ type: ButtonType.Normal }) {
+              Row({ space: 8 }) {
+                Text(agent.label).fontSize(15).fontWeight(FontWeight.Medium)
+                  .fontColor($r('app.color.pigo_text')).layoutWeight(1)
+                if (agent.installed !== true || agent.authed === false) {
+                  Text(agent.installed === undefined ? '检测中' : agent.installed ? '请检查登录或配置' : '未安装')
+                    .fontSize(12).fontColor($r('app.color.pigo_muted'))
+                }
+                if (this.newSessionAgent === agent.id) {
+                  SymbolGlyph($r('sys.symbol.checkmark_circle')).fontSize(18).fontColor([this.accent()])
+                    .accessibilityLevel('no')
+                }
+              }.width('100%').padding({ left: 12, right: 12 })
+            }.id(`new-session-agent-${agent.id}`).width('100%').height(44).padding(0).borderRadius(12)
+              .backgroundColor(this.newSessionAgent === agent.id ? this.accentTint() : $r('app.color.pigo_control'))
+              .accessibilitySelected(this.newSessionAgent === agent.id)
+              .enabled(agent.installed === true && !this.busy && !this.openingSession)
+              .onClick(() => { this.newSessionAgent = agent.id; this.newSessionError = ''; })
+          }, (agent: AgentInfo) => `${agent.id}:${agent.label}:${agent.installed}:${agent.authed}`)
+          if (this.newSessionError || !this.reachable || this.sessionCatalogFailed || !this.hostAvailable ||
+            (this.newSessionFixedWorkspace && !this.projects.includes(this.newSessionCwd))) {
+            Text(this.newSessionError || (!this.reachable ? '正在等待电脑连接…' :
+              this.sessionCatalogFailed ? '加载失败，请刷新 Agent 列表。' :
+              this.sessionLoading ? '正在加载电脑端配置…' : !this.hostAvailable ? '请在电脑上启动 Pi Go 后台服务。' :
+              '该工作区已不可用。'))
+              .fontSize(13).fontColor($r('app.color.pigo_error')).width('100%')
+          }
+          Row({ space: 8 }) {
+            Button('取消').chatAction().layoutWeight(1)
+              .enabled(!this.openingSession).onClick(() => { this.closeNewSession(); })
+            Button(this.openingSession ? '正在创建…' : '创建会话').id('new-session-submit').layoutWeight(2)
+              .backgroundColor(this.accent()).fontColor(this.accentForeground())
+              .enabled(this.canCreateSession()).onClick(() => { void this.createSession(); })
+          }.width('100%')
+        }.width('100%').padding(18)
+      }.width('90%').constraintSize({ maxWidth: 380, maxHeight: this.windowHeight * 0.85 })
+        .scrollBar(BarState.Auto).attributeModifier(glassCardSurface(this.darkMode, 20, true))
+    }.id('new-session-dialog').width('100%').height('100%')
+  }
+
+  @Builder
   newSpaceDialog() {
     Stack() {
       Button({ type: ButtonType.Normal }).width('100%').height('100%').borderRadius(0).backgroundColor('#66000000')
@@ -6094,7 +6232,7 @@ struct Index {
         Row({ space: 8 }) {
           Button('取消').layoutWeight(1).backgroundColor($r('app.color.pigo_control')).fontColor($r('app.color.pigo_text'))
             .enabled(!this.busy).onClick(() => { this.closeNewSpace(); })
-          Button(this.busy ? '正在创建…' : '创建并打开任务').id('new-space-submit').layoutWeight(2)
+          Button(this.busy ? '正在创建…' : '创建空间').id('new-space-submit').layoutWeight(2)
             .backgroundColor(this.accent()).fontColor(this.accentForeground())
             .enabled(!this.busy && this.reachable && !!this.newSpaceName.trim())
             .onClick(() => { void this.createWorkspaceTask(); })
@@ -6301,7 +6439,7 @@ struct Index {
   }
 
   private observeThemeTap(event: TouchEvent): void {
-    if (this.recording || this.holdActive || this.sessionPaneDragging || this.drawerOpen()) return;
+    if (!this.themeMotionEnabled || this.recording || this.holdActive || this.sessionPaneDragging || this.drawerOpen()) return;
     const touch = event.changedTouches.length ? event.changedTouches[0] : (event.touches.length ? event.touches[0] : undefined);
     if (!touch) return;
     if (event.type === TouchType.Down) {
@@ -6331,6 +6469,12 @@ struct Index {
       .onClick(() => { this.tapSakuraGirl(); })
   }
 
+  private staticThemeWallpaper(): Resource {
+    if (this.themeId === 'graphite') return $rawfile(this.darkMode ? 'ink_dark.jpg' : 'ink_light.jpg');
+    if (this.themeId === 'sunset') return $rawfile(this.darkMode ? 'sunset_dark.jpg' : 'sunset_light.jpg');
+    return $rawfile(this.darkMode ? 'sakura_dark.jpg' : 'sakura_light.jpg');
+  }
+
   @Builder
   themeBackdrop() {
     Stack() {
@@ -6348,10 +6492,30 @@ struct Index {
           radius: '74%',
           colors: [[this.palette().auraBottom, 0], ['#00000000', 1]]
         })
-      if (this.themeId === 'sakura') {
+      if (!this.themeMotionEnabled) {
+        Image(this.staticThemeWallpaper())
+          .width('100%').height('100%')
+          .objectFit(ImageFit.Cover)
+          .opacity(this.sakuraConversationFocus()
+            ? (this.darkMode ? 0.56 : 0.60)
+            : (this.darkMode ? 0.90 : 0.94))
+        if (this.sakuraConversationFocus()) {
+          Column()
+            .width('100%').height('100%')
+            .linearGradient({
+              angle: 90,
+              colors: this.themeId === 'graphite'
+                ? (this.darkMode ? [['#B8111317', 0], ['#8A111317', 0.62], ['#24111317', 1]] : [['#C4F6F5F0', 0], ['#96F6F5F0', 0.62], ['#26F6F5F0', 1]])
+                : this.themeId === 'sunset'
+                  ? (this.darkMode ? [['#B81A1210', 0], ['#8A1A1210', 0.62], ['#241A1210', 1]] : [['#C4FDF6F2', 0], ['#96FDF6F2', 0.62], ['#26FDF6F2', 1]])
+                  : (this.darkMode ? [['#B81C1217', 0], ['#8A1C1217', 0.62], ['#261C1217', 1]] : [['#C4FFF6F9', 0], ['#96FFF6F9', 0.62], ['#28FFF6F9', 1]])
+            })
+        }
+      } else if (this.themeId === 'sakura') {
         SakuraScene({
           darkMode: this.darkMode,
           dimmed: this.sakuraConversationFocus(),
+          active: this.visible,
           girlTapSeq: this.sakuraGirlTapSeq,
           celebrateSeq: this.sakuraCelebrateSeq,
           burstSeq: this.sakuraBurstSeq,
@@ -6377,6 +6541,7 @@ struct Index {
         InkScene({
           darkMode: this.darkMode,
           dimmed: this.sakuraConversationFocus(),
+          active: this.visible,
           burstSeq: this.sakuraBurstSeq,
           burstKind: this.sakuraBurstKind,
           tapSeq: this.sakuraBloomSeq,
@@ -6400,6 +6565,7 @@ struct Index {
         SunsetScene({
           darkMode: this.darkMode,
           dimmed: this.sakuraConversationFocus(),
+          active: this.visible,
           burstSeq: this.sakuraBurstSeq,
           burstKind: this.sakuraBurstKind,
           tapSeq: this.sakuraBloomSeq,
@@ -6419,17 +6585,6 @@ struct Index {
                 : [['#C4FDF6F2', 0], ['#96FDF6F2', 0.62], ['#26FDF6F2', 1]]
             })
         }
-      } else {
-        ThemeLiveCanvas({
-          themeId: this.themeId,
-          darkMode: this.darkMode,
-          dimmed: this.sakuraConversationFocus(),
-          burstSeq: this.sakuraBurstSeq,
-          burstKind: this.sakuraBurstKind,
-          tapSeq: this.sakuraBloomSeq,
-          tapX: this.sakuraBloomX,
-          tapY: this.sakuraBloomY
-        })
       }
     }.width('100%').height('100%').hitTestBehavior(HitTestMode.None)
   }
@@ -6506,6 +6661,7 @@ struct Index {
           .hitTestBehavior(HitTestMode.BLOCK_HIERARCHY)
       }
       if (this.markdownTableReader) this.markdownTableReaderPage(this.markdownTableReader)
+      if (this.showNewSession) this.newSessionDialog()
       if (this.showNewSpace) this.newSpaceDialog()
       if (this.runNotice) this.runCompletionBanner(this.runNotice)
       if (this.scheduleBanner && !this.schedulePage && !this.runNotice) {
