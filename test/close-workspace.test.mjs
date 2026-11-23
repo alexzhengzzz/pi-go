@@ -1,7 +1,7 @@
 // Closing a workspace from the phone must remove it from the host's project list
 // (via the host), forget the phone-side grant, and drop it from the next listing.
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, readFile, realpath, rename, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, readFile, realpath, rename, stat, utimes, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
@@ -265,6 +265,12 @@ test("desktop edits and removes registrations and deletes only unoccupied histor
   context.after(() => { finishTrash(); host.shutdown(); });
   const desktop = (path, input = {}) => localRequest(host.path, "POST", path, input);
 
+  const initial = await desktop("/workspace-library", { scope: "workspaces" });
+  assert.deepEqual(initial.data.workspaces.map((row) => [row.cwd, row.sessions]), [[cwd, []], [empty, []]]);
+  const scoped = await desktop("/workspace-library", { scope: "workspace", cwd });
+  assert.deepEqual(new Set(scoped.data.history.map((row) => row.id)), new Set([id, otherId]));
+  assert.equal((await desktop("/workspace-library", { scope: "workspace", cwd: root })).status, 404);
+
   const library = await desktop("/workspace-library");
   assert.deepEqual(library.data.workspaces.find((row) => row.cwd === empty).sessions, []);
   assert.equal(library.data.workspaces.find((row) => row.cwd === cwd).sessions.length, 2);
@@ -318,6 +324,101 @@ test("desktop edits and removes registrations and deletes only unoccupied histor
   assert.equal((await desktop("/remove-workspace", { id: registration.id })).status, 200);
   const remaining = (await desktop("/workspace-library")).data.workspaces.find((row) => row.cwd === cwd);
   assert.equal(remaining.registered, false);
+  assert.equal((await desktop("/workspace-library", { scope: "workspaces" })).data.workspaces.some((row) => row.cwd === cwd), false);
   assert.deepEqual(remaining.sessions.map((row) => row.id), [otherId]);
   assert.deepEqual(new WorkspaceRegistry(registryFile).list(), []);
+});
+
+test("workspace browsing pages registered folders without adding an opened session directory", { timeout: 15000 }, async (context) => {
+  const root = await realpath(await mkdtemp("/tmp/pigo-scoped-catalog-"));
+  const cwd = join(root, "project");
+  const other = join(root, "other");
+  const agent = join(root, "agent");
+  const sessions = join(agent, "sessions");
+  const ipc = join(root, "ipc");
+  for (const [key, value] of Object.entries({
+    PI_CODING_AGENT_DIR: agent, CODEX_HOME: join(root, "codex"), PIGO_IPC_DIR: ipc, PIGO_STATE_DIR: join(root, "state"),
+  })) {
+    const previous = process.env[key];
+    process.env[key] = value;
+    context.after(() => {
+      if (previous === undefined) delete process.env[key];
+      else process.env[key] = previous;
+    });
+  }
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const groups = [[cwd, 23], [other, 1]];
+  let nextId = 0;
+  let oldId;
+  const projectIds = [];
+  for (const [path, count] of groups) {
+    const store = join(sessions, `--${path.slice(1).replaceAll("/", "-")}--`);
+    await Promise.all([path, store, ipc].map((dir) => mkdir(dir, { recursive: true, mode: 0o700 })));
+    for (let index = 0; index < count; index++) {
+      const id = `aaaaaaaa-0000-4000-8000-${String(++nextId).padStart(12, "0")}`;
+      const file = join(store, id + ".jsonl");
+      await writeFile(file, [
+        { type: "session", id, cwd: path },
+        { type: "message", message: { role: "user", content: path === other ? "Old task elsewhere" : "Project task" } },
+      ].map(JSON.stringify).join("\n") + "\n");
+      await utimes(file, 1700000000 + nextId, 1700000000 + nextId);
+      if (path === other) oldId = id;
+      else projectIds.unshift(id);
+    }
+  }
+
+  const registry = new WorkspaceRegistry(join(root, "registry", "workspaces.json"));
+  const opened = [];
+  const host = createDaemonHost({
+    registry,
+    runtimes: {
+      list: () => [],
+      start: (path, sessionPath) => ({
+        async awaitReady(id) { opened.push([path, sessionPath, id]); return { sessionId: id }; },
+        async sendCommand() { return {}; },
+      }),
+    },
+  });
+  host.server.listen(host.path);
+  await once(host.server, "listening");
+  context.after(() => host.shutdown());
+  const desktop = (path, input = {}) => localRequest(host.path, "POST", path, input);
+  assert.equal((await desktop("/authorize", { cwd })).status, 200);
+
+  const port = await reservePort();
+  const phone = await pairBroker(context, ipc, port);
+  await localRequest(join(ipc, `bridge-${port}.sock`), "POST", "/computer-access");
+  const initial = await phone.get("/sessions?scope=workspaces");
+  assert.deepEqual(initial.projects, [cwd]);
+  assert.deepEqual(initial.sessions, []);
+
+  const workspace = "/sessions?scope=workspace&limit=10&cwd=" + encodeURIComponent(cwd);
+  const pinned = await phone.post("/session-meta", { id: projectIds.at(-1), cwd, pinned: true, revision: 0 });
+  assert.equal(pinned.status, 200);
+  const first = await phone.get(workspace);
+  const second = await phone.get(workspace + "&cursor=" + first.nextCursor);
+  const last = await phone.get(workspace + "&cursor=" + second.nextCursor);
+  assert.deepEqual(first.sessions.map(({ id }) => id), projectIds.slice(0, 10));
+  assert.deepEqual(second.sessions.map(({ id }) => id), projectIds.slice(10, 20));
+  assert.equal(last.sessions.length, 3);
+  assert.deepEqual(last.sessions.map(({ id }) => id), projectIds.slice(20));
+  assert.equal(last.sessions.at(-1).pinned, true);
+  assert.equal(last.nextCursor, undefined);
+  assert.deepEqual(new Set([...first.sessions, ...second.sessions, ...last.sessions].map((row) => row.cwd)), new Set([cwd]));
+
+  const newId = "aaaaaaaa-0000-4000-8000-000000000025";
+  const store = join(sessions, `--${cwd.slice(1).replaceAll("/", "-")}--`);
+  await writeFile(join(store, newId + ".jsonl"), [
+    { type: "session", id: newId, cwd },
+    { type: "message", message: { role: "user", content: "New desktop task" } },
+  ].map(JSON.stringify).join("\n") + "\n");
+  const refreshed = await phone.get(workspace + "&refresh=1");
+  assert.equal(refreshed.sessions.length, 10);
+  assert.equal(refreshed.sessions[0].id, newId);
+
+  assert.equal((await phone.get("/sessions?scope=history")).error, "invalid_scope");
+  assert.equal((await desktop("/workspace-library", { scope: "history" })).status, 400);
+  assert.equal((await desktop("/open", { cwd: other, id: oldId })).status, 200);
+  assert.deepEqual(opened.map(([path, , id]) => [path, id]), [[other, oldId]]);
+  assert.deepEqual(registry.list().map((row) => row.path), [cwd]);
 });

@@ -47,18 +47,20 @@ function coalescedOccurrences(job, latest) {
 
 function scheduleFields(input, now) {
   const { kind, time, interval, at, catchUp } = input;
+  const agent = input.agent === undefined || input.agent === 'pi' ? 'pi' : input.agent === 'codex' ? 'codex' : undefined;
   const name = typeof input.name === 'string' ? input.name.trim() : '';
   const prompt = typeof input.prompt === 'string' ? input.prompt.trim() : '';
-  if (!name || name.length > 80 || !prompt || prompt.length > 1600 || prompt.startsWith('/') ||
+  if (!agent || !name || name.length > 80 || !prompt || prompt.length > 1600 || prompt.startsWith('/') ||
     !Number.isInteger(catchUp) || catchUp < 0 || catchUp > 1440) return;
+  const extra = agent === 'pi' ? {} : { agent };
   if (kind === 'once' && Number.isSafeInteger(at) && at > now && at <= now + 366 * day) {
-    return { name, prompt, kind, at, catchUp, nextAt: at };
+    return { ...extra, name, prompt, kind, at, catchUp, nextAt: at };
   }
   if (kind === 'daily' && typeof time === 'string' && /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(time)) {
-    return { name, prompt, kind, time, catchUp, nextAt: nextDaily(time, now) };
+    return { ...extra, name, prompt, kind, time, catchUp, nextAt: nextDaily(time, now) };
   }
   if (kind === 'interval' && Number.isInteger(interval) && interval >= 1 && interval <= 10080) {
-    return { name, prompt, kind, interval, catchUp, nextAt: now + interval * minute };
+    return { ...extra, name, prompt, kind, interval, catchUp, nextAt: now + interval * minute };
   }
 }
 
@@ -223,7 +225,7 @@ export class ScheduleService {
     let runtime;
     let result;
     try {
-      runtime = this.runtimes.start(job.cwd, undefined, true);
+      runtime = this.runtimes.start(job.cwd, undefined, true, job.agent ?? 'pi');
       const { sessionId } = await runtime.awaitReady();
       this.save({ ...this.state, runs: this.state.runs.map((row) => row.id === run.id ? { ...row, sessionId } : row) });
       result = await runtime.runScheduledPrompt(job.prompt, runTimeout);

@@ -232,14 +232,15 @@ function selectionFor(live) {
   return selected && live.find(({ socket, session }) => socket === selected.socket && session.id === selected.id && session.cwd === selected.cwd);
 }
 
-async function catalog(live, hostSocket, granted = [], includeComputerHistory = true, revision) {
+async function catalog(live, hostSocket, granted = [], includeComputerHistory = true, revision, workspace, refresh = false) {
+  if (workspace) live = live.filter(({ session }) => session.cwd === workspace);
   const counts = new Map();
   for (const { session } of live) counts.set(session.id, (counts.get(session.id) ?? 0) + 1);
   const rows = new Map(live.map(({ session }) => [session.id, {
-    ...session, active: true, occupied: counts.get(session.id) > 1,
+    ...session, agent: session.agent ?? 'pi', active: true, occupied: counts.get(session.id) > 1,
   }]));
   const projects = new Map(live.map((worker) => [worker.session.cwd, worker]));
-  const native = computerAccess && includeComputerHistory ? await computerSessions(revision) : [];
+  const native = computerAccess && includeComputerHistory ? await computerSessions(revision, workspace, refresh) : [];
   const nativeProjectsById = new Map(native.map((row) => [row.id, row.cwd]));
   let nativeRoot;
   if (computerAccess && includeComputerHistory) {
@@ -256,9 +257,10 @@ async function catalog(live, hostSocket, granted = [], includeComputerHistory = 
       const result = await localRequest(socket, 'GET', path).catch(() => undefined);
       if (result?.status !== 200 || result.data.current?.cwd !== cwd || !Array.isArray(result.data.sessions)) return;
       for (const record of result.data.sessions) {
+        const agent = record.agent ?? session.agent ?? 'pi';
         const prior = rows.get(record.id);
-        if (!prior) rows.set(record.id, { ...record, cwd, active: false });
-        else if (prior.cwd === cwd && prior.active) rows.set(record.id, { ...record, ...prior, name: prior.name || record.name });
+        if (!prior) rows.set(record.id, { ...record, agent, cwd, active: false });
+        else if (prior.cwd === cwd && prior.active) rows.set(record.id, { ...record, ...prior, agent: prior.agent ?? agent, name: prior.name || record.name });
       }
       const next = result.data.nextCursor;
       if (!Number.isInteger(next) || next <= cursor) break;
@@ -267,15 +269,21 @@ async function catalog(live, hostSocket, granted = [], includeComputerHistory = 
   }));
   // In computer-wide mode the native store supplies history without asking
   // the host to register a workspace during a read-only listing.
-  if (hostSocket && !computerAccess) await Promise.all(granted.filter((cwd) => !projects.has(cwd)).map(async (cwd) => {
-    const result = await localRequest(hostSocket, 'POST', '/catalog', { cwd }).catch(() => undefined);
+  if (hostSocket && !computerAccess) await Promise.all(granted.filter((cwd) => workspace ? cwd === workspace : !projects.has(cwd)).map(async (cwd) => {
+    const result = await localRequest(hostSocket, 'POST', '/catalog', { cwd, scoped: Boolean(workspace), refresh }).catch(() => undefined);
     if (!grants.has(cwd) || result?.status !== 200 || !Array.isArray(result.data.sessions)) return;
     for (const record of result.data.sessions) {
-      if (!rows.has(record.id)) rows.set(record.id, { ...record, cwd, active: false });
+      if (!rows.has(record.id)) rows.set(record.id, { ...record, agent: record.agent ?? 'pi', cwd, active: false });
     }
   }));
-  for (const record of native) if (!rows.has(record.id)) rows.set(record.id, record);
-  return [...rows.values()].sort((left, right) => Number(right.active) - Number(left.active) || (right.modified ?? '').localeCompare(left.modified ?? '')).slice(0, computerAccess ? undefined : 250);
+  for (const record of native) {
+    const liveRow = rows.get(record.id);
+    if (!liveRow) rows.set(record.id, { ...record, agent: record.agent ?? 'pi' });
+    else if (!liveRow.modified && record.modified) liveRow.modified = record.modified;
+  }
+  return [...rows.values()].sort((left, right) =>
+    Number(right.active) - Number(left.active) || (right.modified ?? '').localeCompare(left.modified ?? '') ||
+    left.id.localeCompare(right.id)).slice(0, computerAccess || workspace ? undefined : 250);
 }
 
 async function hostContext() {
@@ -303,7 +311,8 @@ async function hostContext() {
   const workspaces = registered?.filter(({ cwd }) => granted.includes(cwd)).map(({ cwd, name }) => ({ cwd, name }));
   return { socket, profile, granted: [...new Set(granted)], workspaces, revision: workspaceReply?.data?.revision,
     canCreateWorkspace: computerAccess && health.canCreateWorkspace === true,
-    schedules: health.schedules === true };
+    schedules: health.schedules === true,
+    agents: Array.isArray(health.agents) ? health.agents : [{ id: 'pi', label: 'Pi', installed: true }] };
 }
 
 async function sharedWorkspace(cwd, live, granted) {
@@ -333,8 +342,8 @@ async function scheduleRequest(request, response, path) {
     if (typeof input.cwd !== 'string' || !context.granted.includes(input.cwd)) {
       return error(response, 403, 'desktop_workspace_unshared');
     }
-    const { cwd, operation, id, name, prompt, kind, time, at, interval, catchUp, scheduleVersion, requestId } = input;
-    payload = { cwd, operation, id, name, prompt, kind, time, at, interval, catchUp, version: scheduleVersion, requestId };
+    const { cwd, operation, id, name, prompt, kind, time, at, interval, catchUp, scheduleVersion, requestId, agent } = input;
+    payload = { cwd, operation, id, name, prompt, kind, time, at, interval, catchUp, version: scheduleVersion, requestId, ...(agent !== undefined ? { agent } : {}) };
     if (Buffer.byteLength(JSON.stringify(payload)) > 7900) return error(response, 400, 'invalid_schedule');
   }
   const result = await localRequest(context.socket, 'POST', path, payload).catch(() => undefined);
@@ -346,6 +355,12 @@ async function scheduleRequest(request, response, path) {
 const workerIdentity = ({ socket, session }) => ({ id: session.id, pid: Number(/(?:^|\/)w-(\d+)-/.exec(socket)?.[1]) });
 
 async function pendingInteraction(worker) {
+  if (worker.session?.interactions === 'worker') {
+    const path = workerPath('/pending', worker.session, true);
+    const pending = await localRequest(worker.socket, 'GET', path, undefined, 700).catch(() => undefined);
+    if (pending?.status === 200) return pending.data.interaction;
+    return undefined;
+  }
   const hosts = registry.hosts();
   if (hosts.length !== 1) return undefined;
   const pending = await localRequest(hosts[0].socket, 'POST', '/pending', workerIdentity(worker), 700).catch(() => undefined);
@@ -412,7 +427,7 @@ async function replyOpen(request, response, worker, includeHistory) {
   return reply(response, 200, chat);
 }
 
-async function nativeHandoff(request, response, route, cwd, id, context, hasLiveProject, includeHistory = false, fork) {
+async function nativeHandoff(request, response, route, cwd, id, context, hasLiveProject, includeHistory = false, fork, agent) {
   if (handoffPending) return error(response, 409, 'desktop_busy');
   handoffPending = true;
   try {
@@ -432,9 +447,11 @@ async function nativeHandoff(request, response, route, cwd, id, context, hasLive
       if (!branch) return error(response, 409, 'session_unavailable');
       if (branch.status !== 200) return reply(response, branch.status, branch.data);
       id = branch.data.id;
+      agent = branch.data.agent ?? worker.session.agent;
       if (typeof id !== 'string' || id === worker.session.id) return error(response, 409, 'session_changed');
     }
-    const result = await localRequest(context.socket, 'POST', route, { cwd, id }, 12000).catch(() => undefined);
+    const payload = agent ? { cwd, id, agent } : { cwd, id };
+    const result = await localRequest(context.socket, 'POST', route, payload, 12000).catch(() => undefined);
     if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
     if (!result) return error(response, 409, 'desktop_handoff_unconfirmed');
     if (result.status !== 200) return error(response, result.status, result.data.error ?? 'desktop_handoff_failed');
@@ -659,43 +676,60 @@ const publicHandler = async (request, response) => {
           running.push({ id: session.id, name: session.name, cwd: session.cwd,
             started: !!session.runId || session.queued === true,
             state: session.idle === false ? 'streaming' : 'queued',
+            worker: { socket, session },
             pid: Number(/(?:^|\/)w-(\d+)-/.exec(socket)?.[1]) });
         }
       }
-      const hosts = registry.hosts();
-      if (hosts.length === 1 && running.length) {
+      if (running.length) {
         await Promise.all(running.map(async (row) => {
-          const pending = await localRequest(hosts[0].socket, 'POST', '/pending', { id: row.id, pid: row.pid }, 700).catch(() => undefined);
-          if (pending?.status === 200 && pending.data.interaction) row.state = 'waiting';
+          const interaction = await pendingInteraction(row.worker);
+          if (interaction) row.state = 'waiting';
         }));
       }
-      for (const row of running) delete row.pid;
+      for (const row of running) { delete row.pid; delete row.worker; }
       return reply(response, 200, { runningSessionIds: [...seen], runningSessions: running,
         idleSessionIds: [...idle].filter((id) => !seen.has(id)) });
     }
     if (route === 'GET /sessions') {
       const parameters = new URL(request.url ?? '/', 'http://pi-go').searchParams;
+      const scope = parameters.get('scope');
+      if (scope !== null && !['workspaces', 'workspace', 'filtered'].includes(scope)) return error(response, 400, 'invalid_scope');
       const query = (parameters.get('query') ?? '').trim().toLowerCase().slice(0, 100);
       const cursor = Number(parameters.get('cursor') ?? '0');
       const limit = Math.min(Math.max(Math.floor(Number(parameters.get('limit') ?? '50') || 50), 1), 100);
       const context = await hostContext();
-      const merged = await catalog(live, context.socket, context.granted, true, context.revision);
       if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
       const view = parameters.get('view') ?? 'all';
       if (!['all', 'archived', 'pinned', 'recent'].includes(view)) return error(response, 400, 'invalid_view');
+      if (scope === 'filtered' && view === 'all') return error(response, 400, 'invalid_view');
+      const catalogInfo = {
+        current: current?.session,
+        desktopHandoff: Boolean(context.socket), canCreateWorkspace: context.canCreateWorkspace === true,
+        workspaces: context.workspaces,
+        agents: context.agents,
+        projects: scope === null ? [...new Set([...live.map(({ session }) => session.cwd), ...context.granted])].sort()
+          : (context.workspaces ?? []).map(({ cwd }) => cwd),
+      };
+      if (scope === 'workspaces') return reply(response, 200, { ...catalogInfo, sessions: [] });
+      const cwd = scope === 'workspace' ? parameters.get('cwd') : undefined;
+      if (scope === 'workspace' && !catalogInfo.projects.includes(cwd)) return error(response, 403, 'desktop_workspace_unshared');
+      const merged = await catalog(live, context.socket, context.granted, true, context.revision, cwd, parameters.get('refresh') === '1');
+      if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
       const decorated = merged.map((row) => ({ ...row, ...metadata.get(row) }));
       const visible = decorated.filter((row) => view === 'archived' ? row.archived :
         !row.archived && (view === 'pinned' ? row.pinned : view === 'recent' ? !!row.lastVisited : true));
-      visible.sort((left, right) => view === 'recent' ? (right.lastVisited ?? '').localeCompare(left.lastVisited ?? '') :
-        Number(right.pinned) - Number(left.pinned));
+      if (scope === 'workspace' && view === 'all') {
+        visible.sort((left, right) => (right.modified ?? right.lastVisited ?? '').localeCompare(left.modified ?? left.lastVisited ?? '') ||
+          left.id.localeCompare(right.id));
+      } else {
+        visible.sort((left, right) => view === 'recent' ? (right.lastVisited ?? '').localeCompare(left.lastVisited ?? '') :
+          Number(right.pinned) - Number(left.pinned));
+      }
       const filtered = query ? visible.filter((row) =>
         `${row.name ?? ''} ${row.id} ${row.cwd ?? ''}`.toLowerCase().includes(query)) : visible;
       const start = Number.isInteger(cursor) && cursor >= 0 ? Math.min(cursor, filtered.length) : 0;
-      return reply(response, 200, { current: current?.session, sessions: filtered.slice(start, start + limit),
-        total: filtered.length, nextCursor: start + limit < filtered.length ? start + limit : undefined,
-        desktopHandoff: Boolean(context.socket), canCreateWorkspace: context.canCreateWorkspace === true,
-        workspaces: context.workspaces,
-        projects: [...new Set([...live.map(({ session }) => session.cwd), ...context.granted])].sort() });
+      return reply(response, 200, { ...catalogInfo, sessions: filtered.slice(start, start + limit),
+        total: filtered.length, nextCursor: start + limit < filtered.length ? start + limit : undefined });
     }
     if (route === 'POST /open') {
       if (handoffPending) return error(response, 409, 'desktop_busy');
@@ -703,11 +737,11 @@ const publicHandler = async (request, response) => {
       const includeHistory = input.history === true;
       const targets = live.filter(({ session }) => session.id === input.id);
       if (targets.length === 0) {
-        const [context, native] = await Promise.all([hostContext(), computerAccess ? findComputerSession(input.id) : undefined]);
+        const [context, native] = await Promise.all([hostContext(), computerAccess ? findComputerSession(input.id, input.agent) : undefined]);
         const row = native ?? (await catalog(live, context.socket, context.granted, false)).find(({ id }) => id === input.id);
         if (!row) return error(response, 409, 'desktop_handoff_required');
         return await nativeHandoff(request, response, '/open', row.cwd, row.id, context,
-          live.some(({ session }) => session.cwd === row.cwd), includeHistory);
+          live.some(({ session }) => session.cwd === row.cwd), includeHistory, undefined, input.agent ?? row.agent);
       }
       if (targets.length !== 1) return error(response, 409, 'session_occupied');
       return await replyOpen(request, response, targets[0], includeHistory);
@@ -715,7 +749,7 @@ const publicHandler = async (request, response) => {
     if (route === 'POST /new') {
       const context = await hostContext();
       if (typeof input.cwd !== 'string' || (!live.some(({ session }) => session.cwd === input.cwd) && !context.granted.includes(input.cwd))) return error(response, 403, 'desktop_workspace_unshared');
-      return await nativeHandoff(request, response, '/new', input.cwd, undefined, context, live.some(({ session }) => session.cwd === input.cwd));
+      return await nativeHandoff(request, response, '/new', input.cwd, undefined, context, live.some(({ session }) => session.cwd === input.cwd), false, undefined, input.agent);
     }
     if (route === 'POST /close-workspace') {
       // The host removes the workspace registration and preserves its files.
@@ -766,8 +800,14 @@ const publicHandler = async (request, response) => {
         input.history === true, { worker: current, messageId: input.messageId, version });
     }
     if (route === 'POST /answer') {
-      const hosts = registry.hosts();
       if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
+      if (current.session?.interactions === 'worker') {
+        const answer = await localRequest(current.socket, 'POST', workerPath('/answer', current.session, true),
+          { pendingId: input.pendingId, answer: input.answer }).catch(() => undefined);
+        if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
+        return reply(response, answer?.status ?? 409, answer?.data ?? { error: 'interaction_unavailable' });
+      }
+      const hosts = registry.hosts();
       if (hosts.length !== 1) return error(response, 409, 'interaction_unavailable');
       const answer = await localRequest(hosts[0].socket, 'POST', '/answer', { ...workerIdentity(current), pendingId: input.pendingId, answer: input.answer }).catch(() => undefined);
       if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
@@ -811,7 +851,7 @@ publicServer.setTimeout(18000, (socket) => socket.destroy());
 const admin = createServer(options, async (request, response) => {
   if (request.headers.origin !== undefined) return error(response, 403, 'invalid_source');
   if (request.method === 'GET' && request.url === '/status') return reply(response, 200, {
-    protocol: 'pi-go-pairing/1', workspaceLibrary: true, computerAccess, transport, host, port,
+    protocol: 'pi-go-pairing/1', workspaceLibrary: true, workspacePages: true, computerAccess, transport, host, port,
     ...(remote ? { address } : {}),
     paired: Boolean(bearer), lastSeen: bearer ? lastSeen : undefined, expiresAt: pairing?.expiresAt,
   });

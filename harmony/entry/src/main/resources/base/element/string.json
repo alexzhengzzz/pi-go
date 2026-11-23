@@ -6,11 +6,27 @@
     },
     {
       "name": "inbox_form_name",
-      "value": "Pi Go 收件箱"
+      "value": "Pi Go 智能工作台"
     },
     {
       "name": "inbox_form_description",
-      "value": "查看待处理任务，打开 Pi Go 收件箱。"
+      "value": "查看待处理确认、运行中任务与最新结果，一键直达会话或新建任务。"
+    },
+    {
+      "name": "quick_form_name",
+      "value": "Pi Go 快捷指令"
+    },
+    {
+      "name": "quick_form_description",
+      "value": "电脑连接状态概览，一键新建会话、进入当前对话、打开收件箱或工作区。"
+    },
+    {
+      "name": "schedule_form_name",
+      "value": "Pi Go 定时与后台看板"
+    },
+    {
+      "name": "schedule_form_description",
+      "value": "监控后台运行中会话、下次定时任务执行时间及最新定时运行结果。"
     }
   ]
 }

@@ -1,16 +1,46 @@
 {
-  "forms": [{
-    "name": "pigo_inbox",
-    "displayName": "$string:inbox_form_name",
-    "description": "$string:inbox_form_description",
-    "src": "./ets/widget/InboxCard.ets",
-    "uiSyntax": "arkts",
-    "isDynamic": true,
-    "isDefault": true,
-    "colorMode": "auto",
-    "updateEnabled": true,
-    "updateDuration": 1,
-    "defaultDimension": "2*2",
-    "supportDimensions": ["2*2"]
-  }]
+  "forms": [
+    {
+      "name": "pigo_inbox",
+      "displayName": "$string:inbox_form_name",
+      "description": "$string:inbox_form_description",
+      "src": "./ets/widget/InboxCard.ets",
+      "uiSyntax": "arkts",
+      "isDynamic": true,
+      "isDefault": true,
+      "colorMode": "auto",
+      "updateEnabled": true,
+      "updateDuration": 1,
+      "defaultDimension": "2*4",
+      "supportDimensions": ["2*2", "2*4", "4*4"]
+    },
+    {
+      "name": "pigo_quick",
+      "displayName": "$string:quick_form_name",
+      "description": "$string:quick_form_description",
+      "src": "./ets/widget/QuickActionsCard.ets",
+      "uiSyntax": "arkts",
+      "isDynamic": true,
+      "isDefault": false,
+      "colorMode": "auto",
+      "updateEnabled": true,
+      "updateDuration": 1,
+      "defaultDimension": "2*2",
+      "supportDimensions": ["1*2", "2*2", "2*4"]
+    },
+    {
+      "name": "pigo_schedule",
+      "displayName": "$string:schedule_form_name",
+      "description": "$string:schedule_form_description",
+      "src": "./ets/widget/ScheduleCard.ets",
+      "uiSyntax": "arkts",
+      "isDynamic": true,
+      "isDefault": false,
+      "colorMode": "auto",
+      "updateEnabled": true,
+      "updateDuration": 1,
+      "defaultDimension": "2*4",
+      "supportDimensions": ["2*2", "2*4"]
+    }
+  ]
 }

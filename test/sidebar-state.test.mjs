@@ -121,9 +121,9 @@ test('toggles without a connected computer never enter the book', () => {
 test('the drawer connects the filter and virtualized rows to the session store', () => {
   const sidebar = harmonyFile('components/SessionSidebar.ets');
   const page = harmonyFile('pages/Index.ets');
-  assert.doesNotMatch(sidebar, /\.id\('session-(query|search)'\)/);
-  assert.match(page, /this\.sessionView = view;\s+this\.scheduleSidebarSave\(\);/);
-  assert.match(page, /this\.applySidebar\(record\.address\);/);
+  assert.doesNotMatch(sidebar, /电脑历史|searchComputerHistory/);
+  assert.match(page, /this\.sessionView = view;/);
+  assert.match(page, /this\.resetCatalog\(\);/);
   assert.match(sidebar, /view === 'recent' \? '最近'/);
   assert.match(sidebar, /this\.expandedSpaces\.includes\(path\) \? 0 : -90/);
   assert.match(sidebar, /LazyForEach\(this\.sidebarRows/);

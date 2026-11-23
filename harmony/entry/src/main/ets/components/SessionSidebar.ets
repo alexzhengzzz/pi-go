@@ -18,20 +18,20 @@ function chatAction() {
 @Component
 export struct SessionSidebar {
   @StorageProp('pigoDark') private darkMode: boolean = false;
+  @State private refreshing: boolean = false;
   @Link activeTab: string;
   @Prop base: string;
   @Prop busy: boolean;
   @Prop canCreateWorkspace: boolean;
   @Require confirmCloseSpace: (path: string, epoch: number) => void = unboundAction;
-  @Require createSpaceTask: (path: string) => void = unboundAction;
+  @Require createSpaceTask: (path: string, agent?: string) => void = unboundAction;
   @Prop currentId: string;
   @Link expandedSpaces: string[];
-  @Prop hasWorkspaceDetails: boolean;
   @Prop hostAvailable: boolean;
   @Prop idle: boolean;
   @Prop interaction?: PendingInteraction;
   @Require library: Scroller = new Scroller();
-  @Require loadSessions: () => Promise<void> = unboundAction;
+  @Require loadMoreSessions: (path: string) => void = unboundAction;
   @Prop loadedView: string;
   @Link offlineDismissed: boolean;
   @Require openComputers: () => void = unboundAction;
@@ -40,6 +40,7 @@ export struct SessionSidebar {
   @Link projects: string[];
   @Prop queued: boolean;
   @Prop reachable: boolean;
+  @Require refreshSessions: () => Promise<void> = unboundAction;
   @Require requestAction: (path: string, input?: Payload) => Promise<boolean> = unboundAction;
   @Require revealLibraryAnchor: () => void = unboundAction;
   @Link runningSessionIds: string[];
@@ -157,7 +158,7 @@ export struct SessionSidebar {
           Text('正在加载任务…').fontSize(13).fontColor($r('app.color.pigo_muted')).width('100%')
         } else if (this.sessionCatalogFailed) {
           Button('任务加载失败，重试').chatAction().id('session-retry').width('100%').height(38)
-            .enabled(this.reachable && !this.busy && !this.openingSession).onClick(() => { void this.loadSessions(); })
+            .enabled(this.reachable && !this.busy && !this.openingSession).onClick(() => { void this.refreshSessions(); })
         }
         this.sessionLibrary()
         Row({ space: 6 }) {
@@ -239,6 +240,13 @@ export struct SessionSidebar {
               .fontSize(16).fontColor($r('app.color.pigo_text')).maxLines(1)
               .textOverflow({ overflow: TextOverflow.Ellipsis }).layoutWeight(1)
           }
+          if (session.agent && session.agent !== 'pi') {
+            Text(session.agent === 'codex' ? 'Codex' : session.agent.toUpperCase())
+              .fontSize(10).fontWeight(FontWeight.Medium).fontColor(this.accent)
+              .padding({ left: 6, right: 6, top: 2, bottom: 2 }).borderRadius(6)
+              .backgroundColor(this.accentTint)
+              .margin({ left: this.compactSessionPane ? 0 : 6, top: this.compactSessionPane ? 2 : 0 })
+          }
           if (session.id === this.openingSessionId) {
             Text('正在打开…').id('session-opening').fontSize(11).fontColor(this.accent).maxLines(1)
               .margin({ left: this.compactSessionPane ? 0 : 8, top: this.compactSessionPane ? 2 : 0 })
@@ -261,7 +269,7 @@ export struct SessionSidebar {
           if (this.openingSession) return;
           this.activeTab = 'tasks'; this.showSettings = false; this.showFiles = false;
           if (session.id === this.currentId) this.setDrawer(false);
-          else void this.requestAction('/open', { id: session.id });
+          else void this.requestAction('/open', { id: session.id, agent: session.agent });
         })
       Button({ type: ButtonType.Normal }) {
         Image($r('app.media.ic_more')).width(16).height(16).fillColor($r('app.color.pigo_muted'))
@@ -276,8 +284,7 @@ export struct SessionSidebar {
   @Builder
   spaceMenu(path: string, epoch: number) {
     Menu() {
-      if ((!this.hasWorkspaceDetails && this.projects.includes(path)) ||
-        this.workspaces.some((row: WorkspaceRow): boolean => row.cwd === path)) {
+      if (this.projects.includes(path)) {
         MenuItem({ content: '移除空间' }).id('space-remove').contentFontColor($r('app.color.pigo_error'))
           .onClick(() => { this.confirmCloseSpace(path, epoch); })
       }
@@ -291,9 +298,6 @@ export struct SessionSidebar {
         Text(workspaceName(this.workspaces, path)).fontSize(14).fontWeight(FontWeight.Medium)
           .fontColor($r('app.color.pigo_text'))
           .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).layoutWeight(1)
-        if (this.hasWorkspaceDetails && !this.workspaces.some((row: WorkspaceRow): boolean => row.cwd === path)) {
-          Text('未登记').fontSize(10).fontColor($r('app.color.pigo_muted'))
-        }
         SymbolGlyph($r('sys.symbol.chevron_down'))
           .fontSize(this.compactSessionPane ? 12 : 14).fontColor([$r('app.color.pigo_muted')])
           .rotate({ angle: this.expandedSpaces.includes(path) ? 0 : -90 })
@@ -307,29 +311,58 @@ export struct SessionSidebar {
         .visibility(this.projects.includes(path) ? Visibility.Visible : Visibility.Hidden)
         .enabled(!this.busy && !this.openingSession && this.projects.includes(path))
         .onClick(() => { this.createSpaceTask(path); })
+        .bindContextMenu(this.spaceNewAgentMenu(path), ResponseType.LongPress, { placement: Placement.BottomRight })
     }.width('100%').padding({ left: this.compactSessionPane ? 4 : 8 })
   }
   @Builder
+  spaceNewAgentMenu(path: string) {
+    Menu() {
+      MenuItem({ content: '新建 Pi 会话' }).onClick(() => { this.createSpaceTask(path, 'pi'); })
+      MenuItem({ content: '新建 Codex 会话' }).onClick(() => { this.createSpaceTask(path, 'codex'); })
+    }
+  }
+  @Builder
   sessionLibrary() {
-    if (!this.sessionLoading && !this.sessionCatalogFailed && this.loadedView === this.sessionView &&
-      (this.sessionView === 'all' ? this.sidebarRows.totalCount() === 0 : this.sessions.length === 0)) {
-      Text(this.reachable ? (this.sessionView === 'all' ? '暂无空间' : '暂无任务') : '连接电脑后加载任务')
-        .fontSize(14).fontColor($r('app.color.pigo_muted')).width('100%').padding(this.compactSessionPane ? 6 : 16)
-        .layoutWeight(1).align(Alignment.TopStart)
-    } else {
+    Refresh({ refreshing: $$this.refreshing }) {
       List({ scroller: this.library, space: 5 }) {
+        if (!this.sessionLoading && !this.sessionCatalogFailed && this.loadedView === this.sessionView &&
+          (this.sessionView === 'all' ? this.projects.length === 0 : this.sessions.length === 0)) {
+          ListItem() {
+            Text(this.reachable ? (this.sessionView === 'all' ? '暂无空间' : '暂无任务') : '连接电脑后加载任务')
+              .fontSize(14).fontColor($r('app.color.pigo_muted')).width('100%').padding(this.compactSessionPane ? 6 : 16)
+          }
+        }
         LazyForEach(this.sidebarRows, (row: SidebarRow) => {
           ListItem() {
             if (row.path !== undefined) {
               this.librarySpace(row.path)
             } else if (row.session !== undefined) {
               this.taskRow(row.session, row.nested)
+            } else if (row.more !== undefined) {
+              Button(row.label ?? '加载更多').fontSize(13).width('100%')
+                .backgroundColor(Color.Transparent).fontColor(this.accent)
+                .enabled(this.reachable && !this.busy && !this.openingSession && !this.sessionLoading)
+                .onClick(() => { this.loadMoreSessions(row.more ?? ''); })
+            } else if (row.label !== undefined) {
+              Text(row.label).fontSize(13).fontColor($r('app.color.pigo_muted')).padding({ left: 18, top: 6, bottom: 6 })
             }
           }
         }, (row: SidebarRow): string => row.key)
-      }.cachedCount(4).layoutWeight(1).width('100%').scrollBar(BarState.Off)
+      }.cachedCount(4).width('100%').height('100%').scrollBar(BarState.Off)
+        .edgeEffect(EdgeEffect.Spring, { alwaysEnabled: true })
         .padding({ bottom: 20 })
         .onAreaChange(() => { this.revealLibraryAnchor(); })
+    }
+    .layoutWeight(1).width('100%')
+    .pullToRefresh(this.reachable && !this.busy && !this.openingSession && !this.sessionLoading)
+    .onRefreshing(() => { void this.refreshLibrary(); })
+  }
+
+  private async refreshLibrary(): Promise<void> {
+    try {
+      await this.refreshSessions();
+    } finally {
+      this.refreshing = false;
     }
   }
   private sessionMoreOptions(session: SessionRow): MenuElement[] {
@@ -346,10 +379,18 @@ export struct SessionSidebar {
   }
 
   private newTaskOptions(): MenuElement[] {
-    const options = this.projects.map((path: string): MenuElement => ({
-      value: workspaceName(this.workspaces, path),
-      action: (): void => { this.createSpaceTask(path); }
-    }));
+    const options: MenuElement[] = [];
+    for (const path of this.projects) {
+      const name = workspaceName(this.workspaces, path);
+      options.push({
+        value: `${name} · Pi`,
+        action: (): void => { this.createSpaceTask(path, 'pi'); }
+      });
+      options.push({
+        value: `${name} · Codex`,
+        action: (): void => { this.createSpaceTask(path, 'codex'); }
+      });
+    }
     if (this.canCreateWorkspace) options.push({ value: '新空间', action: this.openNewSpace });
     return options;
   }
@@ -380,6 +421,6 @@ export struct SessionSidebar {
   }
 
   private sessionViewLabel(view: string): string {
-    return view === 'all' ? '空间' : view === 'pinned' ? '置顶' : view === 'recent' ? '最近' : '归档';
+    return view === 'all' ? '工作区' : view === 'pinned' ? '置顶' : view === 'recent' ? '最近' : '归档';
   }
 }

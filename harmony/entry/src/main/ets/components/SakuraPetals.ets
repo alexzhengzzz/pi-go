@@ -447,18 +447,22 @@ export struct SakuraScene {
   private drawWarpedImage(bitmap: image.PixelMap, w: number, h: number, alpha: number): void {
     const imgRatio = this.imgWidth / this.imgHeight;
     const viewRatio = w / h;
+    const wideScreen = viewRatio > imgRatio;
     let drawW = w;
     let drawH = h;
     let drawX = 0;
     let drawY = 0;
-    if (imgRatio > viewRatio) {
+    if (wideScreen) {
+      // 折叠屏展开 / 平板 / 横屏：按高度完整适配并靠右对齐，保留完整樱花树与少女不裁切，左侧自然延展天空留白。
+      drawH = h;
+      drawW = h * imgRatio;
+      drawX = w - drawW;
+      drawY = 0;
+    } else {
       drawH = h;
       drawW = h * imgRatio;
       drawX = (w - drawW) * 0.5;
-    } else {
-      drawW = w;
-      drawH = w / imgRatio;
-      drawY = (h - drawH) * 0.5;
+      drawY = 0;
     }
 
     const strips = 36;
@@ -492,7 +496,7 @@ export struct SakuraScene {
       const stripY = i * dstStripH;
       this.ctx.save();
       this.ctx.beginPath();
-      this.ctx.rect(0, stripY, w, dstStripH + 1.2);
+      this.ctx.rect(wideScreen ? Math.max(0, drawX - 2) : 0, stripY, wideScreen ? (w - Math.max(0, drawX - 2)) : w, dstStripH + 1.2);
       this.ctx.clip();
       this.ctx.drawImage(
         bitmap,
@@ -502,6 +506,21 @@ export struct SakuraScene {
         drawH
       );
       this.ctx.restore();
+    }
+
+    // 宽屏模式下在画作左边缘叠加柔和羽化过渡，使画作无缝融入左侧天空画布
+    if (wideScreen && drawX > 0) {
+      const featherW = Math.min(84, drawW * 0.22);
+      const edgeGrad = this.ctx.createLinearGradient(drawX, 0, drawX + featherW, 0);
+      if (this.darkMode) {
+        edgeGrad.addColorStop(0, 'rgba(28, 18, 23, 1)');
+        edgeGrad.addColorStop(1, 'rgba(28, 18, 23, 0)');
+      } else {
+        edgeGrad.addColorStop(0, 'rgba(255, 246, 249, 1)');
+        edgeGrad.addColorStop(1, 'rgba(255, 246, 249, 0)');
+      }
+      this.ctx.fillStyle = edgeGrad;
+      this.ctx.fillRect(drawX - 1, 0, featherW + 2, h);
     }
     this.ctx.restore();
   }

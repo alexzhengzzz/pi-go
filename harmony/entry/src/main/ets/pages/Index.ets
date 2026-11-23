@@ -1,7 +1,7 @@
 import { CommandList, CommandState, commandDraft, skillDraft } from '../model/CommandState';
 import { ConnectionManager, PairingRequest } from '../model/ConnectionManager';
 import { ChatState } from '../model/ChatState';
-import { SessionCatalog, SessionStore, SIDEBAR_VIEWS, SidebarBook, workspaceName } from '../model/SessionStore';
+import { SessionCatalog, SessionStore, SIDEBAR_VIEWS, WorkspacePage, workspaceName } from '../model/SessionStore';
 import { headerSymbol } from '../components/HeaderSymbol';
 import { PiGoClient } from '../model/PiGoClient';
 import { ScheduleOverlay } from '../components/ScheduleOverlay';
@@ -15,8 +15,9 @@ import { toolActionTitle } from '../TranscriptTurns';
 import { SakuraScene } from '../components/SakuraPetals';
 import { ThemeLiveCanvas } from '../components/ThemeLiveCanvas';
 import { InkScene } from '../components/InkScene';
+import { SunsetScene } from '../components/SunsetScene';
 import { RunResultView } from '../components/RunResultView';
-import { DiffLine, InboxRun, pushDeviceId, RunEvent, RunFile, RunScreenshot } from '../RunResults';
+import { DiffLine, InboxRun, pushDeviceId, RunEvent, RunFile, RunScreenshot, runStatus } from '../RunResults';
 import { notificationManager } from '@kit.NotificationKit';
 import { pushService } from '@kit.PushKit';
 import { KeyboardAvoidMode, window } from '@kit.ArkUI';
@@ -59,7 +60,7 @@ import { MAX_IMAGE_ATTACHMENTS, MAX_TOTAL_IMAGE_DRAFTS, MAX_TOTAL_FILE_DRAFTS, U
   SHORT_WINDOW_HEIGHT, MAX_TEXT_PREVIEW_BYTES, RUN_NOTICE_SETTING, LIVE_VIEW_SETTING } from '../model/PiGoConstants';
 import { SidebarRows } from '../model/SidebarRows';
 import { IncomingShare, MAX_SHARED_DRAFT_BYTES, releaseIncomingShare, sharedDraftSize } from '../IncomingShare';
-import { InboxWidget } from '../InboxWidget';
+import { InboxWidget, WidgetItem, WidgetSnapshot } from '../InboxWidget';
 
 @Extend(Button)
 function chatAction() {
@@ -90,6 +91,11 @@ struct Index {
   @StorageLink('pigoIncomingShare') @Watch('onIncomingShare') private incomingShare: IncomingShare =
     { text: '', attachments: [], skipped: false };
   @StorageLink('pigoInboxFormLaunch') @Watch('onInboxFormLaunch') private inboxFormLaunch: boolean = false;
+  @StorageLink('pigoFormDestination') private formDestination: string = '';
+  @StorageLink('pigoFormSessionId') private formSessionId: string = '';
+  @StorageLink('pigoFormAddress') private formAddress: string = '';
+  @StorageLink('pigoFormPendingId') private formPendingId: string = '';
+  @StorageLink('pigoFormEventId') private formEventId: string = '';
   @State private shareError: string = '';
   @State private shareTargetPicker: string = '';
   private readonly inboxWidget: InboxWidget = new InboxWidget();
@@ -187,6 +193,8 @@ struct Index {
   @State private showSkillPicker: boolean = false;
   @State private project: string = '';
   @State private workspaceCwd: string = '';
+  @State private currentAgent: string = 'pi';
+  @State private currentPermission: string = '';
   private imageQueue: Promise<void> = Promise.resolve();
   private lastImageCachePrune: number = 0;
   @State private showFiles: boolean = false;
@@ -260,11 +268,14 @@ struct Index {
   @State private sakuraBloomY: number = 0;
   @State private sakuraGirlTapSeq: number = 0;
   @State private sakuraCelebrateSeq: number = 0;
+  private themeTapDownX: number = 0;
+  private themeTapDownY: number = 0;
+  private themeTapDownAt: number = 0;
+  private themeTapMoved: boolean = false;
   @State private runNotice?: RunNotice = undefined;
   private pendingRunNotices: RunNotice[] = [];
   private runNoticeTimer: number = -1;
   private sessionStatusAt: number = 0;
-  private runningCatalogAt: number = 0;
   private sessionStatusLoading: boolean = false;
   @State private messages: ChatMessage[] = [];
   @State private loadingMessageText: string = '';
@@ -335,7 +346,8 @@ struct Index {
   @State private speakingReply: string = '';
   @State @Watch('updateSidebarRows') private projects: string[] = [];
   @State @Watch('updateSidebarRows') private workspaces: WorkspaceRow[] = [];
-  @State @Watch('updateSidebarRows') private hasWorkspaceDetails: boolean = false;
+  @State @Watch('updateSidebarRows') private workspacePages: WorkspacePage[] = [];
+  @State @Watch('updateSidebarRows') private sessionNextCursor?: number = undefined;
   @State private base: string = '';
   private readonly connection: ConnectionManager = new ConnectionManager();
   private epoch: number = 0;
@@ -351,6 +363,8 @@ struct Index {
   @State private commandError: string = '';
   private readonly commandState: CommandState = new CommandState();
   private sessionCatalogVersion: number = 0;
+  private catalogConnection: number = 0;
+  private workspacePageRequestId: number = 0;
   private readonly sessionStore: SessionStore = new SessionStore();
   private vault?: CredentialVault;
   private readonly transcript: Scroller = new Scroller();
@@ -433,7 +447,6 @@ struct Index {
       this.stopStream();
     }
     this.resetVoice();
-    this.flushSidebarSave();
   }
   aboutToDisappear(): void {
     this.stopReplySpeech();
@@ -449,7 +462,6 @@ struct Index {
     liveActivity.sync(undefined);
     this.stopRecordClock();
     this.resetVoice();
-    this.flushSidebarSave();
   }
 
   private async restore(): Promise<void> {
@@ -458,7 +470,6 @@ struct Index {
     const epoch = this.epoch;
     try {
       this.vault = await CredentialVault.open(context);
-      this.sessionStore.restoreSidebar(await this.vault.loadSidebar());
       const saved = await this.vault.load();
       if (!saved || epoch !== this.epoch) return;
       this.computers = this.connection.restoreComputers(saved.computers, (): string => util.generateRandomUUID());
@@ -565,8 +576,7 @@ struct Index {
     this.status = '';
     this.noSession = '正在加载该电脑的会话…';
     this.showSessions = this.windowWidth < SPLIT_WINDOW_WIDTH;
-    this.sessionCatalogLoaded = false;
-    this.applySidebar(record.address);
+    this.resetCatalog();
     this.reachable = false;
     this.isPaired = true;
     this.queueScheduleSync(true);
@@ -688,13 +698,8 @@ struct Index {
       if (this.visible) {
         this.inboxRuns = this.inboxRuns.filter((row: InboxRun): boolean =>
           this.computers.some((computer: Companion): boolean => computer.address === row.address));
-        const context = this.getUIContext().getHostContext();
-        if (context && (synced.some((ready: boolean): boolean => ready) || !this.computers.length)) {
-          const pending = new Set<string>();
-          for (const row of this.inboxRuns) {
-            if (row.run.status === 'waiting') pending.add(row.run.id);
-          }
-          void this.inboxWidget.publish(context, pending.size, this.computers.length ? Date.now() : 0);
+        if (synced.some((ready: boolean): boolean => ready) || !this.computers.length) {
+          this.publishWidgets();
         }
       }
     } finally {
@@ -821,6 +826,7 @@ struct Index {
       run: row.run, address: row.address, computer: row.computer, unread: false
     } : row);
     void this.saveSetting('run_inbox_read', JSON.stringify(this.runRead)).catch(() => {});
+    this.publishWidgets();
   }
 
   private async openInboxRun(row: InboxRun): Promise<void> {
@@ -1049,6 +1055,7 @@ struct Index {
       if (this.scheduleBannerTimer !== -1) clearTimeout(this.scheduleBannerTimer);
       this.scheduleBannerTimer = setTimeout(() => { this.scheduleBanner = undefined; }, 6500);
     }
+    this.publishWidgets();
   }
 
   private readScheduleRuns(source: string, dismissed: boolean = false): string[] {
@@ -1141,11 +1148,178 @@ struct Index {
     }
   }
 
+  private publishWidgets(): void {
+    const context = this.getUIContext().getHostContext();
+    if (!context) return;
+    const pendingSet = new Set<string>();
+    const unreadSet = new Set<string>();
+    for (const row of this.inboxRuns) {
+      if (row.run.status === 'waiting') pendingSet.add(row.run.id);
+      if (row.unread) unreadSet.add(row.run.id);
+    }
+    for (const msg of this.scheduleMessages) {
+      if (!msg.dismissed && msg.unread) unreadSet.add(msg.key);
+    }
+    const displayedInbox = this.displayedInboxRuns();
+    const runningRows = this.taskPanelRows();
+    const activeSchedules = this.standaloneScheduleRuns();
+
+    const runningItems: WidgetItem[] = runningRows.slice(0, 4).map((row: RunningRow): WidgetItem => {
+      const state = row.state ?? this.sessionState(row.id);
+      return {
+        id: row.id,
+        sessionId: row.id,
+        address: this.base,
+        computer: this.computerTitle(),
+        title: row.name || '后台任务',
+        subtitle: row.cwd ? this.workspaceName(row.cwd) : this.computerTitle(),
+        status: state || 'streaming',
+        statusText: this.stateLabel(state || 'streaming'),
+        timeText: '进行中',
+        unread: state === 'waiting'
+      };
+    }).concat(activeSchedules.slice(0, 2).map((row: RunMessage): WidgetItem => ({
+      id: row.run.id,
+      sessionId: row.run.sessionId ?? '',
+      address: row.address,
+      computer: row.computer,
+      title: row.run.name || '定时任务',
+      subtitle: `${row.computer} · 定时运行中`,
+      status: 'running',
+      statusText: '运行中',
+      timeText: '进行中',
+      unread: false
+    }))).slice(0, 5);
+
+    const inboxItems: WidgetItem[] = displayedInbox.slice(0, 6).map((row: InboxRun): WidgetItem => ({
+      id: row.run.id,
+      sessionId: row.run.sessionId,
+      pendingId: row.run.pendingId ?? '',
+      address: row.address,
+      computer: row.computer,
+      title: row.run.title || 'Pi 会话',
+      subtitle: `${row.computer} · ${scheduleTime(row.run.finishedAt).slice(5)}`,
+      status: row.run.status,
+      statusText: runStatus(row.run.status),
+      timeText: scheduleTime(row.run.finishedAt).slice(5),
+      unread: row.unread
+    }));
+
+    const scheduleItems: WidgetItem[] = this.scheduleMessages
+      .filter((msg: RunMessage): boolean => !msg.dismissed)
+      .slice(0, 5)
+      .map((msg: RunMessage): WidgetItem => ({
+        id: msg.run.id,
+        sessionId: msg.run.sessionId ?? '',
+        address: msg.address,
+        computer: msg.computer,
+        title: msg.run.name || '定时任务',
+        subtitle: msg.run.summary || `${msg.computer} · ${scheduleTime(msg.run.finishedAt ?? msg.run.scheduledAt).slice(5)}`,
+        status: msg.run.status,
+        statusText: scheduleRunStatus(msg.run.status),
+        timeText: scheduleTime(msg.run.finishedAt ?? msg.run.scheduledAt).slice(5),
+        unread: msg.unread
+      }));
+
+    const combinedItems: WidgetItem[] = inboxItems
+      .filter((item: WidgetItem): boolean => item.status === 'waiting')
+      .concat(runningItems.filter((runItem: WidgetItem): boolean =>
+        !inboxItems.some((inItem: WidgetItem): boolean => inItem.status === 'waiting' && inItem.sessionId === runItem.sessionId)))
+      .concat(inboxItems.filter((item: WidgetItem): boolean => item.status !== 'waiting'))
+      .concat(scheduleItems)
+      .slice(0, 6);
+
+    const nextJob = this.scheduleJobs.find((job: ScheduleJob): boolean => job.enabled && job.nextAt !== null);
+    const snapshot: WidgetSnapshot = {
+      pending: pendingSet.size,
+      unread: unreadSet.size,
+      running: this.runningTaskCount(),
+      scheduleCount: this.scheduleJobs.filter((job: ScheduleJob): boolean => job.enabled).length,
+      syncedAt: this.computers.length ? Date.now() : 0,
+      paired: this.isPaired || this.computers.length > 0,
+      reachable: this.reachable,
+      computer: this.computers.length ? this.computerTitle() : '',
+      workspace: this.project || (this.workspaceCwd ? this.workspaceName(this.workspaceCwd) : ''),
+      currentSessionId: this.currentId,
+      currentSessionTitle: this.currentId && !this.noSession ? this.chatTitle() : '',
+      nextScheduleName: nextJob?.name ?? '',
+      nextScheduleTime: nextJob?.nextAt ? scheduleTime(nextJob.nextAt).slice(5) : '',
+      items: combinedItems,
+      runningItems: runningItems,
+      scheduleItems: scheduleItems
+    };
+    void this.inboxWidget.publish(context, snapshot);
+  }
+
   private onInboxFormLaunch(): void {
     if (!this.inboxFormLaunch || !this.visible || this.loading) return;
     this.inboxFormLaunch = false;
+    const destination = this.formDestination || 'inbox';
+    const sessionId = this.formSessionId;
+    const address = this.formAddress;
+    const pendingId = this.formPendingId;
+    const eventId = this.formEventId;
+    this.formDestination = '';
+    this.formSessionId = '';
+    this.formAddress = '';
+    this.formPendingId = '';
+    this.formEventId = '';
     this.reviewedRun = undefined;
     if (this.markdownTableReader) this.closeMarkdownTableReader();
+    if (destination === 'computers' || (!this.isPaired && destination !== 'inbox')) {
+      this.schedulePage = '';
+      this.openComputers();
+      return;
+    }
+    if (destination === 'session' && sessionId) {
+      const target = (address ? this.computers.find((item: Companion): boolean =>
+        item.address === address && validCompanion(item)) : undefined) ??
+        this.computers.find((item: Companion): boolean => item.address === this.base && validCompanion(item));
+      if (target) {
+        void this.openNotifiedSession(target, sessionId, pendingId, eventId).then((opened: boolean) => {
+          if (opened && eventId) this.markRunRead(eventId);
+          else if (!opened) this.showScheduleInbox();
+        });
+        return;
+      }
+    }
+    if (destination === 'new_task') {
+      this.schedulePage = '';
+      this.selectRootTab('tasks');
+      const cwd = this.projects.includes(this.workspaceCwd) ? this.workspaceCwd : (this.projects[0] ?? '');
+      if (cwd && this.reachable && this.hostAvailable) {
+        void this.requestAction('/new', { cwd: cwd });
+      } else if (!this.dockedSessions()) {
+        this.setDrawer(true);
+      }
+      return;
+    }
+    if (destination === 'pending') {
+      this.schedulePage = '';
+      this.selectRootTab('pending');
+      return;
+    }
+    if (destination === 'new_schedule') {
+      this.selectRootTab('pending');
+      this.editSchedule();
+      return;
+    }
+    if (destination === 'schedule_history') {
+      this.selectRootTab('pending');
+      this.scheduleError = '';
+      this.schedulePage = 'history';
+      return;
+    }
+    if (destination === 'files') {
+      this.schedulePage = '';
+      if (!this.selectRootTab('files')) this.selectRootTab('tasks');
+      return;
+    }
+    if (destination === 'tasks') {
+      this.schedulePage = '';
+      this.selectRootTab('tasks');
+      return;
+    }
     this.showScheduleInbox();
   }
 
@@ -1215,6 +1389,7 @@ struct Index {
       (left.nextAt ?? Number.MAX_SAFE_INTEGER) - (right.nextAt ?? Number.MAX_SAFE_INTEGER));
     this.scheduleZone = result.timezone ?? '';
     this.scheduleListError = '';
+    this.publishWidgets();
   }
 
   private resetScheduleJobs(): void {
@@ -1687,9 +1862,6 @@ struct Index {
     this.runningSessions = [];
     this.observedRuns.clear();
     this.clearRunNotices();
-    this.sessionView = 'all';
-    this.loadedView = 'all';
-    this.sessionCatalogFailed = false;
     this.draft = '';
     this.showSessions = false;
     this.showSettings = false;
@@ -1704,7 +1876,7 @@ struct Index {
     this.newSpaceError = '';
     this.projects = [];
     this.workspaces = [];
-    this.hasWorkspaceDetails = false;
+    this.resetCatalog();
     this.isPaired = false;
     this.runId = '';
     this.queued = false;
@@ -1720,11 +1892,9 @@ struct Index {
     if (revoked) {
       this.computers = this.computers.filter((record: Companion): boolean => record.address !== address);
       this.forgetDrafts(address);
-      this.sessionStore.removeSidebar(address);
       this.queueRunSync(0);
     }
     this.status = revoked ? '该电脑的配对已撤销，请重新连接。' : '';
-    this.flushSidebarSave();
     if (next) this.activateComputer(next);
     this.syncLiveActivity();
     void this.persistComputers().catch(() => { this.status = '无法保存电脑列表的本次更改。'; });
@@ -1796,6 +1966,8 @@ struct Index {
       if (this.showFiles) { this.showFiles = false; this.activeTab = 'tasks'; }
     }
     this.workspaceCwd = session.cwd;
+    this.currentAgent = session.agent ?? 'pi';
+    this.currentPermission = session.permission ?? '';
     this.project = session.cwd.split('/').pop() ?? session.cwd;
     this.sessionName = session.name ?? '';
     this.updateCachedSessionTitle(session.id, session.name);
@@ -1824,7 +1996,7 @@ struct Index {
       this.offlineDismissed = false;
       const libraryVisible = this.showSessions || this.dockedSessions();
       const catalogStale = Date.now() - this.sessionCatalogUpdatedAt >= 30000;
-      if (libraryVisible && (connected || (!this.sessionCatalogFailed && (!this.sessionCatalogLoaded || catalogStale))) && !this.busy) {
+      if (libraryVisible && (connected || (!this.sessionCatalogFailed && (!this.sessionCatalogLoaded || (catalogStale && this.sessionView === 'all')))) && !this.busy) {
         void this.loadSessions();
       }
       if (libraryVisible) {
@@ -2121,13 +2293,6 @@ struct Index {
         else this.observedRuns.delete(id);
       }
     }
-    // A background task unknown to the cached catalog needs its name for the header pill.
-    const unknown = this.backgroundActive() && this.runningSessionIds.some((id: string): boolean =>
-      id !== this.currentId && !this.sessions.some((session: SessionRow): boolean => session.id === id));
-    if (unknown && Date.now() - this.runningCatalogAt >= 30000 && !this.busy && !this.sessionLoading) {
-      this.runningCatalogAt = Date.now();
-      void this.loadSessions();
-    }
   }
 
   private observeSessionRun(session: SessionState): void {
@@ -2275,40 +2440,83 @@ struct Index {
     return '运行中';
   }
 
-  private async loadSessions(): Promise<void> {
-    if (this.busy || this.openingSession || this.sessionLoading) return;
-    const epoch = this.epoch;
+  private async loadSessions(more: boolean = false, refresh: boolean = false): Promise<void> {
+    if (this.busy || this.openingSession || this.sessionLoading || (more && this.sessionNextCursor === undefined)) return;
+    const connection = this.catalogConnection;
     const version = this.sessionCatalogVersion;
     const view = this.sessionView;
-    const current = (): boolean => epoch === this.epoch && version === this.sessionCatalogVersion;
+    const current = (): boolean => connection === this.catalogConnection && version === this.sessionCatalogVersion;
     this.sessionLoading = true;
     this.sessionCatalogFailed = false;
     try {
-      const showFirstPage = !this.sessions.length || this.loadedView !== view;
       const catalog = await this.sessionStore.loadCatalog(view, (path: string): Promise<BridgeReply> => this.request(path),
-        current, (page: SessionCatalog): void => {
-          if (showFirstPage) this.applyCatalog(page, view);
-        });
-      if (!catalog || !current()) return;
+        more ? this.sessionNextCursor : 0, '', refresh);
+      if (!current()) return;
       this.sessionCatalogUpdatedAt = Date.now();
-      this.applyCatalog(catalog, view);
+      this.applyCatalog(catalog, view, more);
+      if (refresh && view === 'all') {
+        const spaces = this.expandedSpaces.filter((path: string): boolean => this.projects.includes(path));
+        await Promise.all(spaces.map((path: string): Promise<void> => this.loadWorkspacePage(path, false, true)));
+      }
     } catch (error) {
       if (!current()) return;
       if (error instanceof BridgeFailure && error.status === 401) this.leaveComputer(true);
       else this.sessionCatalogFailed = true;
-    } finally { this.sessionLoading = false; }
+    } finally {
+      if (connection === this.catalogConnection) this.sessionLoading = false;
+    }
   }
 
-  private applyCatalog(catalog: SessionCatalog, view: string): void {
+  private applyCatalog(catalog: SessionCatalog, view: string, more: boolean): void {
     const result = catalog.reply;
-    this.sessions = catalog.sessions;
+    this.sessions = more ? this.appendSessionPage(this.sessions, catalog.sessions) : catalog.sessions;
+    this.sessionNextCursor = result.nextCursor;
     this.loadedView = view;
-    this.projects = result.projects ?? [];
     this.workspaces = result.workspaces ?? [];
-    this.hasWorkspaceDetails = result.workspaces !== undefined;
+    this.projects = this.workspaces.map((workspace: WorkspaceRow): string => workspace.cwd);
+    this.workspacePages = this.workspacePages.filter((page: WorkspacePage): boolean => this.projects.includes(page.path));
     this.hostAvailable = result.desktopHandoff ?? false;
     this.canCreateWorkspace = result.canCreateWorkspace ?? false;
     this.sessionCatalogLoaded = true;
+  }
+
+  private appendSessionPage(rows: SessionRow[], page: SessionRow[]): SessionRow[] {
+    const ids = new Set<string>(rows.map((row: SessionRow): string => row.id));
+    return rows.concat(page.filter((row: SessionRow): boolean => !ids.has(row.id)));
+  }
+
+  private setWorkspacePage(page: WorkspacePage): void {
+    this.workspacePages = this.workspacePages.filter((item: WorkspacePage): boolean => item.path !== page.path).concat([page]);
+  }
+
+  private async loadWorkspacePage(path: string, more: boolean = false, refresh: boolean = false): Promise<void> {
+    const previous = this.workspacePages.find((page: WorkspacePage): boolean => page.path === path);
+    if (!this.reachable || (previous?.loading && !refresh) || (more && previous?.nextCursor === undefined)) return;
+    const connection = this.catalogConnection;
+    const requestId = ++this.workspacePageRequestId;
+    const current = (): boolean => connection === this.catalogConnection && this.projects.includes(path) &&
+      this.workspacePages.some((item: WorkspacePage): boolean => item.path === path && item.requestId === requestId);
+    const page: WorkspacePage = {
+      path: path, sessions: previous?.sessions ?? [], nextCursor: previous?.nextCursor,
+      loading: true, failed: false, requestId: requestId
+    };
+    this.setWorkspacePage(page);
+    try {
+      const catalog = await this.sessionStore.loadCatalog('all', (address: string): Promise<BridgeReply> => this.request(address),
+        more ? page.nextCursor : 0, path, refresh);
+      if (!current()) return;
+      this.setWorkspacePage({
+        path: path, sessions: more ? this.appendSessionPage(page.sessions, catalog.sessions) : catalog.sessions,
+        nextCursor: catalog.reply.nextCursor, loading: false, failed: false
+      });
+    } catch (error) {
+      if (!current()) return;
+      if (error instanceof BridgeFailure && error.status === 401) this.leaveComputer(true);
+      else this.setWorkspacePage({
+        path: path, sessions: page.sessions, nextCursor: page.nextCursor,
+        loading: false, failed: true, retryRefresh: refresh
+      });
+    }
   }
 
   private closeFileEditor(): void {
@@ -3123,10 +3331,13 @@ struct Index {
     const payload: Payload = { id: session.id, cwd: session.cwd, revision: session.revision ?? 0 };
     if (pin) payload.pinned = !session.pinned;
     else payload.archived = !session.archived;
-    if (await this.requestAction('/session-meta', payload)) await this.loadSessions();
+    if (await this.requestAction('/session-meta', payload)) {
+      if (this.sessionView === 'all' && session.cwd) await this.loadWorkspacePage(session.cwd);
+      else await this.loadSessions();
+    }
   }
 
-  private createSpaceTask(path: string): void {
+  private createSpaceTask(path: string, agent?: string): void {
     if (!this.projects.includes(path)) return;
     if (!this.reachable || !this.hostAvailable) {
       this.getUIContext().getPromptAction().showToast({
@@ -3135,7 +3346,8 @@ struct Index {
       return;
     }
     this.activeTab = 'tasks';
-    void this.requestAction('/new', { cwd: path });
+    const payload: Payload = agent && agent !== 'pi' ? { cwd: path, agent: agent } : { cwd: path };
+    void this.requestAction('/new', payload);
   }
 
   private workspaceName(path: string): string {
@@ -3200,11 +3412,12 @@ struct Index {
     }
     if (!cwd) return;
     this.closeNewSpace();
-    if (!this.projects.includes(cwd)) this.projects = this.projects.concat([cwd]).sort();
-    if (!this.expandedSpaces.includes(cwd)) this.expandedSpaces = this.expandedSpaces.concat([cwd]);
+    if (!this.projects.includes(cwd)) {
+      this.projects = this.projects.concat([cwd]).sort();
+      this.workspaces = this.workspaces.concat([{ cwd: cwd, name: name }]);
+    }
     this.sessionCatalogLoaded = false;
     this.sessionCatalogVersion += 1;
-    this.scheduleSidebarSave();
     this.activeTab = 'tasks';
     if (!(await this.requestAction('/new', { cwd: cwd })) && this.epoch === epoch + 1) {
       this.getUIContext().getPromptAction().showToast({
@@ -3249,8 +3462,8 @@ struct Index {
     // 移除成功后立刻更新本地列表。
     this.projects = this.projects.filter((item: string): boolean => item !== path);
     this.expandedSpaces = this.expandedSpaces.filter((item: string): boolean => item !== path);
+    this.workspacePages = this.workspacePages.filter((page: WorkspacePage): boolean => page.path !== path);
     this.workspaces = this.workspaces?.filter((row: WorkspaceRow): boolean => row.cwd !== path) ?? [];
-    this.scheduleSidebarSave();
     this.getUIContext().getPromptAction().showToast({ message: `已移除空间「${name}」` });
     if (this.workspaceCwd === path) {
       // 当前会话所在的电脑端工作区已关闭，回到任务列表等桥接状态刷新。
@@ -3266,6 +3479,7 @@ struct Index {
     if (previous?.session) this.cacheChat(previous.session);
     const cached = path === '/open' && input?.id ? this.chatState.chatCache.get(this.draftKey(input.id)) : undefined;
     let navigationConfirmed = false;
+    let refreshSpace = '';
     const epoch = navigation ? ++this.epoch : this.epoch;
     const liveRevision = this.liveRevision;
     if (navigation) {
@@ -3283,14 +3497,18 @@ struct Index {
     } else this.busy = true;
     this.status = '';
     try {
-      const payload: Payload | undefined = path === '/open' && this.syncMode !== 'legacy'
-        ? { id: input?.id, history: true } : input;
+      let payload: Payload | undefined = input;
+      if (path === '/open' && this.syncMode !== 'legacy') {
+        payload = { id: input?.id, history: true };
+        if (input?.agent) payload.agent = input.agent;
+      }
       const result = await this.request(path, payload);
       if (epoch !== this.epoch) return false;
       if (path === '/new' || path === '/fork' || path === '/rename' || path === '/session-meta' || path === '/close-workspace') {
         this.sessionCatalogLoaded = false;
         this.sessionCatalogVersion += 1;
       }
+      if (path === '/new' || path === '/fork' || path === '/rename') refreshSpace = result.session?.cwd ?? '';
       if (path === '/models' && result.session?.id === this.currentId) {
         this.models = result.models ?? [];
         this.selectedModel = this.models.findIndex((model: ModelOption): boolean =>
@@ -3393,6 +3611,9 @@ struct Index {
           this.schedule(this.reachable && !this.idle ? 650 : 1500);
         }
       } else this.busy = false;
+      if (epoch === this.epoch && refreshSpace && this.expandedSpaces.includes(refreshSpace)) {
+        void this.loadWorkspacePage(refreshSpace);
+      }
     }
   }
 
@@ -3664,23 +3885,76 @@ struct Index {
       if (epoch !== this.epoch) return;
       if (error instanceof BridgeFailure && error.status === 401) this.leaveComputer(true);
       else if (error instanceof BridgeFailure && ['session_busy', 'session_not_streaming', 'session_changed',
-        'invalid_prompt', 'invalid_request_id', 'probe_request_limit', 'invalid_image', 'image_not_supported', 'payload_too_large',
+        'session_occupied', 'invalid_prompt', 'invalid_request_id', 'probe_request_limit', 'invalid_image', 'image_not_supported', 'payload_too_large',
         'invalid_attachment', 'unknown_attachment', 'invalid_content_type', 'not_found',
         'unknown_command', 'command_attachments'].includes(error.message)) {
         this.chatState.unconfirmed.delete(key);
         this.pendingSend = undefined;
-        this.status = error.message === 'image_not_supported' ? '此模型不支持图片；草稿已保留。' :
-          ['invalid_image', 'payload_too_large'].includes(error.message) ? '发送内容过大（单文件 8MB 内）或图片格式无效；草稿已保留。' :
-            ['invalid_attachment', 'unknown_attachment', 'invalid_content_type'].includes(error.message) ? '附件无效或已过期；草稿已保留。' :
-              error.message === 'not_found' ? '电脑端扩展版本过旧，不支持附件上传；草稿已保留。' :
-                error.message === 'unknown_command' ? '电脑未找到该命令；输入 / 可查看可用命令，草稿已保留。' :
-                  error.message === 'command_attachments' ? '命令发送不支持附件；草稿已保留。' :
-                    '电脑未接收此次发送。请检查会话是否仍在运行；草稿已保留。';
+        if (error.message === 'session_occupied') {
+          this.status = '该会话正被电脑 Codex 桌面端占用，可一键创建分支接力。';
+          this.promptForkAndContinue(id, text, attachments);
+        } else {
+          this.status = error.message === 'image_not_supported' ? '此模型不支持图片；草稿已保留。' :
+            ['invalid_image', 'payload_too_large'].includes(error.message) ? '发送内容过大（单文件 8MB 内）或图片格式无效；草稿已保留。' :
+              ['invalid_attachment', 'unknown_attachment', 'invalid_content_type'].includes(error.message) ? '附件无效或已过期；草稿已保留。' :
+                error.message === 'not_found' ? '电脑端扩展版本过旧，不支持附件上传；草稿已保留。' :
+                  error.message === 'unknown_command' ? '电脑未找到该命令；输入 / 可查看可用命令，草稿已保留。' :
+                    error.message === 'command_attachments' ? '命令发送不支持附件；草稿已保留。' :
+                      '电脑未接收此次发送。请检查会话是否仍在运行；草稿已保留。';
+        }
       } else this.status = '发送结果未知。草稿已保留，不会自动重发。';
     } finally {
       this.busy = false;
       this.schedule(0);
     }
+  }
+
+  private promptForkAndContinue(sessionId: string, text: string, attachments: DraftAttachment[]): void {
+    const ui = this.getUIContext();
+    if (!ui.showAlertDialog) return;
+    let lastAssistantId: string | undefined = undefined;
+    for (let index = this.messages.length - 1; index >= 0; index -= 1) {
+      if (this.messages[index].role === 'assistant') {
+        lastAssistantId = this.messages[index].id;
+        break;
+      }
+    }
+    const epoch = this.epoch;
+    ui.showAlertDialog({
+      title: '会话正被电脑 Codex 占用',
+      message: '电脑上的 Codex 桌面端正停在该会话上（持有独占写入锁）。是否一键创建分支会话并立即发送这条消息？',
+      autoCancel: true,
+      alignment: DialogAlignment.Bottom,
+      primaryButton: {
+        value: '稍后',
+        fontColor: $r('app.color.pigo_muted'),
+        action: () => {}
+      },
+      secondaryButton: {
+        value: '一键分支接力',
+        fontColor: this.accent(),
+        action: () => {
+          if (epoch !== this.epoch || this.currentId !== sessionId) return;
+          void this.forkAndContinue(sessionId, lastAssistantId, text, attachments);
+        }
+      }
+    });
+  }
+
+  private async forkAndContinue(sessionId: string, messageId: string | undefined,
+    text: string, attachments: DraftAttachment[]): Promise<void> {
+    const forked = await this.requestAction('/fork', {
+      id: sessionId,
+      messageId: messageId,
+      history: this.syncMode !== 'legacy'
+    });
+    if (!forked || !this.currentId || this.currentId === sessionId) return;
+    const oldKey = this.draftKey(sessionId);
+    this.chatState.drafts.delete(oldKey);
+    this.chatState.draftAttachments.delete(oldKey);
+    this.draft = text;
+    this.attachments = attachments;
+    await this.send();
   }
 
   private trackDispatchedLiveRun(revision: number): void {
@@ -4865,6 +5139,12 @@ struct Index {
             Blank().width(7).height(7).borderRadius(4)
               .backgroundColor(this.reachable ? $r('app.color.pigo_success') : $r('app.color.pigo_warning'))
               .accessibilityText(this.reachable ? '电脑已连接' : '电脑离线')
+            if (this.currentAgent && this.currentAgent !== 'pi') {
+              Text(this.currentAgent === 'codex' ? 'Codex' : this.currentAgent.toUpperCase())
+                .fontSize(10).fontWeight(FontWeight.Medium).fontColor(this.accent())
+                .padding({ left: 5, right: 5, top: 1, bottom: 1 }).borderRadius(5)
+                .backgroundColor(this.accentTint())
+            }
             Text(this.reachable ? (this.project ? `${this.project} · ${this.computerTitle()}` : this.computerTitle()) :
               `离线 · ${this.computerTitle()}`)
               .fontSize(12).fontColor($r('app.color.pigo_muted')).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -4885,7 +5165,12 @@ struct Index {
           }.id('new-task').headerAction().attributeModifier(immersiveSurface(this.darkMode)).accessibilityText('在当前工作区新建会话')
             .enabled(this.reachable && !this.busy && !this.openingSession && this.hostAvailable &&
               !!this.workspaceCwd && this.projects.includes(this.workspaceCwd))
-            .onClick(() => { this.activeTab = 'tasks'; void this.requestAction('/new', { cwd: this.workspaceCwd }); })
+            .onClick(() => {
+              this.activeTab = 'tasks';
+              const payload: Payload = this.currentAgent && this.currentAgent !== 'pi'
+                ? { cwd: this.workspaceCwd, agent: this.currentAgent } : { cwd: this.workspaceCwd };
+              void this.requestAction('/new', payload);
+            })
           Button({ type: ButtonType.Normal }) {
             Stack() {
               Image($r('app.media.ic_more')).width(20).height(20).fillColor($r('app.color.pigo_text'))
@@ -5022,11 +5307,6 @@ struct Index {
           }
           this.chatTranscript()
         }.width('100%').height('100%')
-          .onClick((event: ClickEvent) => {
-            if (!this.sakuraConversationFocus()) {
-              this.triggerSakuraBloom(event.windowX, event.windowY);
-            }
-          })
         Column({ space: 6 }) {
           if (this.commandPalette && this.commandPaletteActive()) {
             Column({ space: 2 }) {
@@ -5198,13 +5478,12 @@ struct Index {
     if (open && this.dockedSessions()) return;
     if (open) {
       this.dismissKeyboard();
-      this.focusActiveSpace();
     }
     this.getUIContext().animateTo({ duration: 220, curve: Curve.EaseOut }, () => { this.showSessions = open; });
     if (open) void this.loadSessionStatus();
     // Reuse the catalog for quick drawer toggles; stale data stays usable during refresh.
     if (open && this.reachable && (!this.sessionCatalogLoaded ||
-      Date.now() - this.sessionCatalogUpdatedAt >= 30000 ||
+      (this.sessionView === 'all' && Date.now() - this.sessionCatalogUpdatedAt >= 30000) ||
       this.loadedView !== this.sessionView)) {
       void this.loadSessions();
     }
@@ -5237,22 +5516,16 @@ struct Index {
     if (this.dockedSessions()) this.showSessions = false;
   }
 
-  private focusActiveSpace(): void {
-    if (!this.currentId) return;
-    const path = this.workspaceCwd || this.sessions.find((row: SessionRow): boolean => row.id === this.currentId)?.cwd;
-    if (path && (this.expandedSpaces.length !== 1 || this.expandedSpaces[0] !== path)) this.expandedSpaces = [path];
-  }
-
   private updateSidebarRows(): void {
     this.sidebarRows.replace(this.sessionStore.rows({
       view: this.sessionView, loadedView: this.loadedView, sessions: this.sessions, projects: this.projects,
-      workspaces: this.workspaces, hasWorkspaceDetails: this.hasWorkspaceDetails, expandedSpaces: this.expandedSpaces
+      workspaces: this.workspaces, expandedSpaces: this.expandedSpaces,
+      workspacePages: this.workspacePages, nextCursor: this.sessionNextCursor
     }));
     if (this.pendingLibraryReveal) setTimeout(() => { this.revealLibraryAnchor(); }, 0);
   }
 
   private onSidebarAppear(): void {
-    if (!this.dockedSessions()) this.focusActiveSpace();
     this.pendingLibraryReveal = !!this.currentId;
     this.updateSidebarRows();
   }
@@ -5296,17 +5569,17 @@ struct Index {
   private toggleSpace(path: string): void {
     this.pendingLibraryReveal = false;
     this.expandedSpaces = this.sessionStore.toggleSpace(this.expandedSpaces, path);
-    this.scheduleSidebarSave();
+    if (this.expandedSpaces.includes(path)) void this.loadWorkspacePage(path);
   }
 
   private sessionViewLabel(view: string): string {
-    return view === 'all' ? '空间' : view === 'pinned' ? '置顶' : view === 'recent' ? '最近' : '归档';
+    return view === 'all' ? '工作区' : view === 'pinned' ? '置顶' : view === 'recent' ? '最近' : '归档';
   }
 
   private selectSessionView(view: string): void {
     if (this.busy || this.sessionLoading || !this.reachable) return;
     this.sessionView = view;
-    this.scheduleSidebarSave();
+    this.sessionNextCursor = undefined;
     void this.loadSessions();
   }
 
@@ -5316,25 +5589,17 @@ struct Index {
     }));
   }
 
-  // Sidebar choices are per computer: folders stay collapsed on connect unless the user opened them.
-  private applySidebar(address: string): void {
-    const saved = this.sessionStore.sidebarFor(address);
-    this.expandedSpaces = saved.expandedSpaces;
-    this.sessionView = saved.sessionView;
-    this.loadedView = saved.sessionView;
-  }
-
-  private scheduleSidebarSave(): void {
-    this.sessionStore.saveSidebar(this.base, { expandedSpaces: this.expandedSpaces, sessionView: this.sessionView },
-      (book: SidebarBook): void => { this.persistSidebar(book); });
-  }
-
-  private flushSidebarSave(): void {
-    this.sessionStore.flushSidebar((book: SidebarBook): void => { this.persistSidebar(book); });
-  }
-
-  private persistSidebar(book: SidebarBook): void {
-    if (this.vault) this.vault.saveSidebar(book).catch(() => {});
+  private resetCatalog(): void {
+    this.catalogConnection += 1;
+    this.sessionLoading = false;
+    this.sessionCatalogLoaded = false;
+    this.sessionCatalogFailed = false;
+    this.sessionCatalogUpdatedAt = 0;
+    this.workspacePages = [];
+    this.sessionNextCursor = undefined;
+    this.expandedSpaces = [];
+    this.sessionView = 'all';
+    this.loadedView = 'all';
   }
 
   @Builder
@@ -5483,9 +5748,6 @@ struct Index {
     }.width('100%').padding({ top: inTranscript && this.windowHeight >= SHORT_WINDOW_HEIGHT ? 36 : 8,
       bottom: inTranscript && this.windowHeight >= SHORT_WINDOW_HEIGHT ? 24 : 8, left: 16, right: 16 })
       .layoutWeight(inTranscript ? 0 : 1).justifyContent(FlexAlign.Center)
-      .onClick((event: ClickEvent) => {
-        this.triggerSakuraBloom(event.windowX, event.windowY);
-      })
   }
 
   @Builder
@@ -5560,15 +5822,21 @@ struct Index {
       busy: this.busy,
       canCreateWorkspace: this.canCreateWorkspace,
       confirmCloseSpace: (path: string, epoch: number): void => this.confirmCloseSpace(path, epoch),
-      createSpaceTask: (path: string): void => this.createSpaceTask(path),
+      createSpaceTask: (path: string, agent?: string): void => this.createSpaceTask(path, agent),
       currentId: this.currentId,
       expandedSpaces: this.$expandedSpaces,
-      hasWorkspaceDetails: this.hasWorkspaceDetails,
       hostAvailable: this.hostAvailable,
       idle: this.idle,
       interaction: this.interaction,
       library: this.library,
-      loadSessions: (): Promise<void> => this.loadSessions(),
+      loadMoreSessions: (path: string): void => {
+        if (!path) void this.loadSessions(true);
+        else {
+          const page = this.workspacePages.find((item: WorkspacePage): boolean => item.path === path);
+          const retryRefresh = page?.retryRefresh === true;
+          void this.loadWorkspacePage(path, !retryRefresh && page?.nextCursor !== undefined, retryRefresh);
+        }
+      },
       loadedView: this.loadedView,
       offlineDismissed: this.$offlineDismissed,
       openComputers: (): void => this.openComputers(),
@@ -5577,6 +5845,7 @@ struct Index {
       projects: this.$projects,
       queued: this.queued,
       reachable: this.reachable,
+      refreshSessions: (): Promise<void> => this.reachable ? this.loadSessions(false, true) : Promise.resolve(),
       requestAction: (path: string, input?: Payload): Promise<boolean> => this.requestAction(path, input),
       revealLibraryAnchor: (): void => this.revealLibraryAnchor(),
       runningSessionIds: this.$runningSessionIds,
@@ -6027,9 +6296,30 @@ struct Index {
     this.sakuraBloomSeq += 1;
   }
 
-  private tapSakuraGirl(event: ClickEvent): void {
+  private tapSakuraGirl(): void {
     this.sakuraGirlTapSeq += 1;
-    this.triggerSakuraBloom(event.windowX, event.windowY - 18);
+  }
+
+  private observeThemeTap(event: TouchEvent): void {
+    if (this.recording || this.holdActive || this.sessionPaneDragging || this.drawerOpen()) return;
+    const touch = event.changedTouches.length ? event.changedTouches[0] : (event.touches.length ? event.touches[0] : undefined);
+    if (!touch) return;
+    if (event.type === TouchType.Down) {
+      this.themeTapDownX = touch.x;
+      this.themeTapDownY = touch.y;
+      this.themeTapDownAt = Date.now();
+      this.themeTapMoved = false;
+    } else if (event.type === TouchType.Move) {
+      if (Math.abs(touch.x - this.themeTapDownX) > 12 || Math.abs(touch.y - this.themeTapDownY) > 12) {
+        this.themeTapMoved = true;
+      }
+    } else if (event.type === TouchType.Up) {
+      if (!this.themeTapMoved && Date.now() - this.themeTapDownAt < 320) {
+        this.triggerSakuraBloom(touch.x, touch.y);
+      }
+    } else if (event.type === TouchType.Cancel) {
+      this.themeTapMoved = true;
+    }
   }
 
   @Builder
@@ -6038,7 +6328,7 @@ struct Index {
       .width(175)
       .height(210)
       .margin({ right: 6, bottom: this.noSession ? this.bottomContentClearance() : this.chatBottomClearance() })
-      .onClick((event: ClickEvent) => { this.tapSakuraGirl(event); })
+      .onClick(() => { this.tapSakuraGirl(); })
   }
 
   @Builder
@@ -6091,8 +6381,44 @@ struct Index {
           burstKind: this.sakuraBurstKind,
           tapSeq: this.sakuraBloomSeq,
           tapX: this.sakuraBloomX,
-          tapY: this.sakuraBloomY
+          tapY: this.sakuraBloomY,
+          sceneOpacity: this.sakuraConversationFocus()
+            ? (this.darkMode ? 0.56 : 0.60)
+            : (this.darkMode ? 0.90 : 0.94)
         })
+        if (this.sakuraConversationFocus()) {
+          Column()
+            .width('100%').height('100%')
+            .linearGradient({
+              angle: 90,
+              colors: this.darkMode
+                ? [['#B8111317', 0], ['#8A111317', 0.62], ['#24111317', 1]]
+                : [['#C4F6F5F0', 0], ['#96F6F5F0', 0.62], ['#26F6F5F0', 1]]
+            })
+        }
+      } else if (this.themeId === 'sunset') {
+        SunsetScene({
+          darkMode: this.darkMode,
+          dimmed: this.sakuraConversationFocus(),
+          burstSeq: this.sakuraBurstSeq,
+          burstKind: this.sakuraBurstKind,
+          tapSeq: this.sakuraBloomSeq,
+          tapX: this.sakuraBloomX,
+          tapY: this.sakuraBloomY,
+          sceneOpacity: this.sakuraConversationFocus()
+            ? (this.darkMode ? 0.56 : 0.60)
+            : (this.darkMode ? 0.90 : 0.94)
+        })
+        if (this.sakuraConversationFocus()) {
+          Column()
+            .width('100%').height('100%')
+            .linearGradient({
+              angle: 90,
+              colors: this.darkMode
+                ? [['#B81A1210', 0], ['#8A1A1210', 0.62], ['#241A1210', 1]]
+                : [['#C4FDF6F2', 0], ['#96FDF6F2', 0.62], ['#26FDF6F2', 1]]
+            })
+        }
       } else {
         ThemeLiveCanvas({
           themeId: this.themeId,
@@ -6122,6 +6448,7 @@ struct Index {
             }.width('100%').justifyContent(FlexAlign.End).hitTestBehavior(HitTestMode.Transparent)
           }
         }.height('100%').layoutWeight(1)
+          .onTouch((event: TouchEvent) => { this.observeThemeTap(event); })
           .onGestureJudgeBegin(() => this.dockedSessions() || this.showSessions || this.holdActive || this.recording ||
             this.voicePreparing || this.voiceFinishing || !this.isPaired || this.activeTab === 'mine'
             ? GestureJudgeResult.REJECT : GestureJudgeResult.CONTINUE)

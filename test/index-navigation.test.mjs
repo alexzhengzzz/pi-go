@@ -22,8 +22,9 @@ function method(name) {
   return page.slice(start, end);
 }
 const methods = ['setDrawer', 'loadSessions', 'applyCatalog', 'requestAction', 'positionTranscript', 'poll', 'loadSessionStatus', 'applyRunningStatus', 'backgroundRunning', 'backgroundActive', 'sessionState', 'sessionRunning'];
-methods.push('focusActiveSpace', 'toggleSpace', 'updateSidebarRows', 'revealLibraryAnchor');
-methods.push('cacheChat', 'presentChat', 'revealChat', 'send', 'mergeTranscript', 'applyLiveSnapshot',
+methods.push('toggleSpace', 'updateSidebarRows', 'revealLibraryAnchor',
+  'appendSessionPage', 'setWorkspacePage', 'loadWorkspacePage', 'resetCatalog');
+methods.push('cacheChat', 'presentChat', 'revealChat', 'send', 'promptForkAndContinue', 'forkAndContinue', 'mergeTranscript', 'applyLiveSnapshot',
   'handleFrame', 'applyStreamFrame', 'requestSessionSnapshot', 'applySessionSnapshot', 'refreshSessionHistory',
   'applySessionHistory', 'stopStream', 'streamDown', 'queueStreamPaint', 'flushStreamDeltas', 'finishSend', 'reconcileSteering');
 methods.push('chooseComputer', 'leaveComputer', 'persistComputers', 'pair', 'resetFileTree', 'closeFileEditor');
@@ -62,12 +63,13 @@ function fixture() {
     queueRunSync: () => {}, tryPublicConnection: async () => {},
     fileDirectories: new Map(),
     syncMode: 'legacy', busy: false, sessionLoading: false, epoch: 1, reachable: true,
-    runningSessionIds: [], runningSessions: [], sessionStatusAt: 0, runningCatalogAt: 0, currentId: '', idle: true, queued: false,
+    runningSessionIds: [], runningSessions: [], sessionStatusAt: 0, currentId: '', idle: true, queued: false,
     observedRuns: new Map(), pendingRunNotices: [], runNoticeTimer: -1, runNoticesEnabled: true, messages: [],
     settingsWrite: Promise.resolve(), liveViewsEnabled: true, liveViewSessionKey: '', liveViewRunId: '', syncLiveActivity: () => {},
     liveText: '', liveThinking: '', liveThinkSeq: 0, liveThinkingOpen: false, thinkingOpenIds: [],
     liveTools: [], liveSeq: 0, liveRevision: 0, streamAlive: false, queuedSteering: [],
-    sessionCatalogLoaded: true, sessionCatalogUpdatedAt: Date.now(), sessionCatalogVersion: 0,
+    sessionCatalogLoaded: true, sessionCatalogUpdatedAt: Date.now(), sessionCatalogVersion: 0, catalogConnection: 0,
+    workspacePageRequestId: 0, workspacePages: [], workspaces: [],
     sessions: [{ id: 'one', cwd: '/project', name: 'Cached task' }], projects: ['/project'],
     sessionView: 'all', loadedView: 'all', expandedSpaces: [], scheduleSidebarSave: () => {},
     showSessions: false,
@@ -457,77 +459,55 @@ test('stale catalog refresh keeps cached rows interactive and respects closing t
 });
 
 
-test('repeated opens share one stale refresh and reuse the loaded catalog', async () => {
+test('repeated drawer opens share one registration request and reuse the result', async () => {
   const state = fixture();
   state.sessionCatalogUpdatedAt = 0;
   let requests = 0;
   let finish;
   state.request = () => {
-    if (++requests === 1) return new Promise(resolve => { finish = resolve; });
-    return Promise.resolve({ sessions: [{ id: 'page-two' }] });
+    requests++;
+    return new Promise((resolve) => { finish = resolve; });
   };
   state.setDrawer(true);
   state.setDrawer(false);
   state.setDrawer(true);
   assert.equal(requests, 1);
   assert.equal(state.busy, false);
-  finish({ sessions: [{ id: 'one' }], nextCursor: 100 });
-  await new Promise(resolve => setImmediate(resolve));
+  finish({ workspaces: [{ cwd: '/project', name: 'Project' }] });
+  await new Promise((resolve) => setImmediate(resolve));
   state.setDrawer(false);
   state.setDrawer(true);
-  assert.equal(requests, 2);
-  assert.deepEqual(state.sessions.map(session => session.id), ['one', 'page-two']);
+  assert.equal(requests, 1);
+  assert.deepEqual(state.projects, ['/project']);
 });
 
-test('the drawer opens only the active session space and allows selecting another space', () => {
+test('opening the drawer leaves folders collapsed until the user expands one', () => {
   const state = fixture();
   state.currentId = 'one';
   state.workspaceCwd = '/project';
-  state.expandedSpaces = ['/old', '/other'];
+  const loads = [];
+  state.loadWorkspacePage = async (path) => { loads.push(path); };
   state.setDrawer(true);
+  assert.deepEqual(state.expandedSpaces, []);
+  assert.deepEqual(loads, []);
+  state.toggleSpace('/project');
   assert.deepEqual(state.expandedSpaces, ['/project']);
-  state.toggleSpace('/other');
-  assert.deepEqual(state.expandedSpaces, ['/project', '/other']);
+  assert.deepEqual(loads, ['/project']);
   state.setDrawer(false);
   state.setDrawer(true);
   assert.deepEqual(state.expandedSpaces, ['/project']);
 });
 
-test('a cold drawer shows the first page while later pages are pending', async () => {
+test('a failed catalog refresh keeps the cached workspaces and can be retried', async () => {
   const state = fixture();
-  state.sessions = [];
-  state.projects = [];
-  state.sessionCatalogLoaded = false;
-  let resolveTail;
-  state.request = async path => path.includes('cursor=0&')
-    ? { sessions: [{ id: 'first' }], projects: ['/project'], nextCursor: 100 }
-    : new Promise(resolve => { resolveTail = resolve; });
-  const pending = state.loadSessions();
-  await new Promise(resolve => setImmediate(resolve));
-  assert.deepEqual(state.sessions.map(row => row.id), ['first']);
-  assert.deepEqual(state.projects, ['/project']);
-  resolveTail({ sessions: [{ id: 'later' }], projects: ['/project'] });
-  await pending;
-  assert.deepEqual(state.sessions.map(row => row.id), ['first', 'later']);
-});
-
-test('a failed catalog page keeps the cached spaces and tasks and can be retried', async () => {
-  const state = fixture();
-  let fail = true;
-  state.request = async path => {
-    if (path.includes('cursor=0&')) return { sessions: [{ id: 'two' }], projects: ['/new'], nextCursor: 100 };
-    if (fail) throw new Error('offline');
-    return { sessions: [{ id: 'three' }], projects: ['/new'] };
-  };
+  state.request = async () => { throw new Error('offline'); };
   await state.loadSessions();
   assert.equal(state.sessions[0].id, 'one');
   assert.deepEqual(state.projects, ['/project']);
-  assert.equal(state.busy, false);
   assert.equal(state.sessionLoading, false);
   assert.equal(state.sessionCatalogFailed, true);
-  fail = false;
+  state.request = async () => ({ workspaces: [{ cwd: '/new', name: 'New' }] });
   await state.loadSessions();
-  assert.deepEqual(state.sessions.map(session => session.id), ['two', 'three']);
   assert.deepEqual(state.projects, ['/new']);
   assert.equal(state.sessionCatalogFailed, false);
 });
@@ -567,7 +547,7 @@ test('the empty new-task menu can create one space and open its first task', asy
   await Promise.all([state.createWorkspaceTask(), state.createWorkspaceTask()]);
   assert.deepEqual(requests, [['/create-workspace', { name: '测试 空间' }], ['/new', { cwd }]]);
   assert.deepEqual(state.projects, [cwd]);
-  assert.deepEqual(state.expandedSpaces, [cwd]);
+  assert.deepEqual(state.expandedSpaces, []);
   assert.equal(state.showNewSpace, false);
 });
 
@@ -637,12 +617,13 @@ test('removing a space reports errors in the drawer and removes the row after co
 });
 
 test('results from before a computer switch or catalog mutation are discarded', async () => {
-  for (const field of ['epoch', 'sessionCatalogVersion']) {
+  for (const field of ['catalogConnection', 'sessionCatalogVersion']) {
     const state = fixture();
     let finish;
     state.request = () => new Promise(resolve => { finish = resolve; });
     const pending = state.loadSessions();
-    state[field]++;
+    if (field === 'catalogConnection') state.resetCatalog();
+    else state[field]++;
     finish({ sessions: [{ id: 'outdated' }] });
     await pending;
     assert.equal(state.sessions[0].id, 'one');
@@ -650,42 +631,97 @@ test('results from before a computer switch or catalog mutation are discarded', 
   }
 });
 
-test('recent tasks load and paginate through the recent catalog', async () => {
+test('recent tasks request another page only on demand', async () => {
   const state = fixture();
   state.sessionView = 'recent';
   const paths = [];
-  state.request = async path => {
+  state.request = async (path) => {
     paths.push(path);
-    return paths.length === 1 ? { sessions: [{ id: 'recent' }], nextCursor: 100 } : { sessions: [{ id: 'older' }] };
+    return paths.length === 1 ? { sessions: [{ id: 'recent' }], nextCursor: 20 } : { sessions: [{ id: 'older' }] };
   };
   await state.loadSessions();
-  assert.deepEqual(paths, ['/sessions?limit=100&cursor=0&view=recent', '/sessions?limit=100&cursor=100&view=recent']);
-  assert.deepEqual(state.sessions.map(session => session.id), ['recent', 'older']);
+  assert.deepEqual(paths, ['/sessions?scope=filtered&limit=20&cursor=0&view=recent']);
+  await state.loadSessions(true);
+  assert.equal(paths[1], '/sessions?scope=filtered&limit=20&cursor=20&view=recent');
+  assert.deepEqual(state.sessions.map((session) => session.id), ['recent', 'older']);
   assert.equal(state.loadedView, 'recent');
 });
 
-test('opening the sidebar loads older tasks even when whole pages belong to a collapsed space', async () => {
+test('sidebar fetches only registrations until a workspace is expanded', async () => {
   const state = fixture();
   state.sessionCatalogLoaded = false;
-  const cursors = [];
-  state.request = async path => {
+  const requests = [];
+  state.request = async (path) => {
     const { searchParams } = new URL(path, 'http://test');
-    const cursor = Number(searchParams.get('cursor'));
-    const limit = Number(searchParams.get('limit'));
-    const projects = ['/project', '/other'];
-    cursors.push(cursor);
-    if (cursor === 0) return { projects, sessions: Array.from({ length: limit }, (_, index) =>
-      ({ id: `other-${index}`, cwd: '/other' })), nextCursor: limit };
-    return { projects, sessions: [{ id: 'other-0', cwd: '/other' }, { id: 'older', cwd: '/project' }] };
+    requests.push([...searchParams]);
+    if (searchParams.get('scope') === 'workspaces') {
+      return { projects: ['/project', '/unregistered'], workspaces: [{ cwd: '/project', name: 'Project' }] };
+    }
+    return searchParams.get('cursor') === '0'
+      ? { sessions: [{ id: 'first', cwd: '/project' }], nextCursor: 10 }
+      : { sessions: [{ id: 'first', cwd: '/project' }, { id: 'older', cwd: '/project' }] };
   };
   state.setDrawer(true);
-  await new Promise(resolve => setImmediate(resolve));
-  assert.deepEqual(state.sessions.filter(session => session.cwd === '/project').map(session => session.id), ['older']);
-  assert.equal(state.sessions.filter(session => session.id === 'other-0').length, 1);
-  assert.equal(cursors.length, 2);
-  assert.doesNotMatch(page, /\.id\('session-more'\)/);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(state.projects, ['/project']);
+  assert.deepEqual(requests.map((params) => Object.fromEntries(params).scope), ['workspaces']);
+  state.toggleSpace('/project');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(requests.length, 2);
+  assert.deepEqual(Object.fromEntries(requests[1]), { scope: 'workspace', limit: '10', cursor: '0', view: 'all', cwd: '/project' });
+  await state.loadWorkspacePage('/project', true);
+  assert.deepEqual(Object.fromEntries(requests[2]), { scope: 'workspace', limit: '10', cursor: '10', view: 'all', cwd: '/project' });
+  assert.deepEqual(state.workspacePages[0].sessions.map(({ id }) => id), ['first', 'older']);
+  assert.equal(state.workspacePages[0].nextCursor, undefined);
 });
 
+test('pull-to-refresh reloads only expanded registered workspaces and replaces a stale pagination response', async () => {
+  const state = fixture();
+  state.expandedSpaces = ['/project', '/removed'];
+  state.workspacePages = [{ path: '/project', sessions: [{ id: 'old' }], nextCursor: 10 }];
+  const requests = [];
+  let finishMore;
+  state.request = async (address) => {
+    const params = Object.fromEntries(new URL(address, 'http://test').searchParams);
+    requests.push(params);
+    if (params.cursor === '10') return new Promise(resolve => { finishMore = resolve; });
+    if (params.scope === 'workspaces') return { workspaces: [{ cwd: '/project' }, { cwd: '/closed' }] };
+    return { sessions: [{ id: 'new' }], nextCursor: 10 };
+  };
+
+  const more = state.loadWorkspacePage('/project', true);
+  await state.loadSessions(false, true);
+  finishMore({ sessions: [{ id: 'older' }] });
+  await more;
+
+  assert.deepEqual(requests.map(({ scope, cwd, cursor, refresh }) => [scope, cwd, cursor, refresh]), [
+    ['workspace', '/project', '10', undefined],
+    ['workspaces', undefined, '0', undefined],
+    ['workspace', '/project', '0', '1'],
+  ]);
+  assert.deepEqual(state.workspacePages[0].sessions.map(({ id }) => id), ['new']);
+  assert.equal(state.workspacePages[0].nextCursor, 10);
+  assert.equal(state.sessionLoading, false);
+});
+
+test('pull-to-refresh restarts the active filter and keeps cached sessions on failure', async () => {
+  const state = fixture();
+  state.sessionView = state.loadedView = 'archived';
+  state.sessionNextCursor = 40;
+  let request;
+  state.request = async address => {
+    request = address;
+    throw new Error('offline');
+  };
+
+  await state.loadSessions(false, true);
+
+  assert.equal(request, '/sessions?scope=filtered&limit=20&cursor=0&view=archived&refresh=1');
+  assert.deepEqual(state.sessions.map(({ id }) => id), ['one']);
+  assert.equal(state.sessionNextCursor, 40);
+  assert.equal(state.sessionCatalogFailed, true);
+  assert.equal(state.sessionLoading, false);
+});
 
 function navigationFixture() {
   const state = fixture();
@@ -1106,26 +1142,14 @@ test('legacy bridges without runningSessions still produce header pills from raw
     [['two', 'Live name'], ['three', 'Deploy site']]);
 });
 
-test('an unknown background task triggers a catalog refresh at most every 30 seconds', async () => {
+test('running status does not trigger a history request', () => {
   const state = fixture();
   state.currentId = 'one';
   state.sessions = [];
-  let catalogLoads = 0;
-  state.loadSessions = async () => { catalogLoads++; };
+  state.loadSessions = async () => assert.fail('status polling must not refresh the history catalog');
   state.applyRunningStatus({ runningSessionIds: ['two'] });
   assert.equal(state.backgroundActive(), true);
-  await new Promise(resolve => setImmediate(resolve));
-  state.applyRunningStatus({ runningSessionIds: ['two'] });
-  await new Promise(resolve => setImmediate(resolve));
-  assert.equal(catalogLoads, 1, 'second status update within 30s must not reload the catalog');
-  state.runningCatalogAt -= 31000;
-  state.applyRunningStatus({ runningSessionIds: ['two'] });
-  await new Promise(resolve => setImmediate(resolve));
-  assert.equal(catalogLoads, 2);
-  state.sessions = [{ id: 'two', name: 'Known now' }];
-  state.applyRunningStatus({ runningSessionIds: ['two'] });
-  await new Promise(resolve => setImmediate(resolve));
-  assert.equal(catalogLoads, 2, 'known tasks never trigger a catalog reload');
+  assert.equal(state.backgroundRunning()[0].id, 'two');
 });
 
 test('chat polling keeps watching background tasks with the drawer closed', async () => {

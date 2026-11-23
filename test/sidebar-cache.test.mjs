@@ -9,7 +9,7 @@ function rowsFor(catalog) {
   const rows = new SidebarRows();
   rows.replace(new SessionStore().rows({
     view: 'all', loadedView: 'all', projects: ['/project'], workspaces: [],
-    hasWorkspaceDetails: false, expandedSpaces: [], sessions: [], ...catalog,
+    expandedSpaces: [], sessions: [], ...catalog,
   }));
   return rows;
 }
@@ -17,11 +17,10 @@ function rowsFor(catalog) {
 test('only expanded spaces expose their tasks, with a space anchor for hidden tasks', () => {
   const rows = rowsFor({
     projects: ['/project', '/other'], expandedSpaces: ['/project'],
-    sessions: [
+    workspacePages: [{ path: '/project', sessions: [
       { id: 'one', cwd: '/project', revision: 0 },
       { id: 'offscreen', cwd: '/project', revision: 0 },
-      { id: 'hidden', cwd: '/other', revision: 0 },
-    ],
+    ] }],
   });
   assert.equal(rows.totalCount(), 4);
   assert.equal(rows.anchor('offscreen', '/project'), 2);
@@ -29,31 +28,23 @@ test('only expanded spaces expose their tasks, with a space anchor for hidden ta
   assert.equal(rows.getData(2).session.id, 'offscreen');
 });
 
-test('registered space names and discovered history appear in the sidebar', () => {
+test('discovered history does not create rows in the workspace list', () => {
   const rows = rowsFor({
-    hasWorkspaceDetails: true, workspaces: [{ cwd: '/project', name: 'Renamed workspace' }],
-    expandedSpaces: ['/history'], sessions: [{ id: 'history', cwd: '/history', name: 'Previous task' }],
+    workspaces: [{ cwd: '/project', name: 'Renamed workspace' }],
+    sessions: [{ id: 'history', cwd: '/history', name: 'Previous task' }],
   });
   assert.equal(rows.getData(0).key, 'space:/project:Renamed workspace');
-  assert.equal(rows.getData(1).path, '/history');
-  assert.equal(rows.getData(2).session.id, 'history');
+  assert.equal(rows.totalCount(), 1);
 });
 
-test('pagination publishes a stable first page and deduplicates the final catalog', async () => {
+test('a workspace path is encoded and returns one requested page', async () => {
   const store = new SessionStore();
-  const first = [];
   const paths = [];
-  const tail = Promise.withResolvers();
-  const load = store.loadCatalog('recent', async path => {
+  const catalog = await store.loadCatalog('all', async (path) => {
     paths.push(path);
-    if (paths.length === 1) return { sessions: [{ id: 'one' }], nextCursor: 100 };
-    return tail.promise;
-  }, () => true, page => first.push(page));
-  await new Promise(resolve => setImmediate(resolve));
-  assert.deepEqual(first[0].sessions.map(row => row.id), ['one']);
-  tail.resolve({ sessions: [{ id: 'one' }, { id: 'two' }], nextCursor: 100 });
-  const catalog = await load;
-  assert.deepEqual(catalog.sessions.map(row => row.id), ['one', 'two']);
-  assert.deepEqual(first[0].sessions.map(row => row.id), ['one']);
-  assert.deepEqual(paths, ['/sessions?limit=100&cursor=0&view=recent', '/sessions?limit=100&cursor=100&view=recent']);
+    return { sessions: [{ id: 'one' }], nextCursor: 10 };
+  }, 0, '/a & b');
+  assert.deepEqual(catalog.sessions.map((row) => row.id), ['one']);
+  assert.equal(catalog.reply.nextCursor, 10);
+  assert.deepEqual(paths, ['/sessions?scope=workspace&limit=10&cursor=0&view=all&cwd=%2Fa%20%26%20b']);
 });

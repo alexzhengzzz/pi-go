@@ -4,13 +4,15 @@ host_root="${0:A:h:h}"
 app_dir="${host_root:h}/build/Pi Go.app"
 resources="$app_dir/Contents/Resources"
 node_path="$(command -v node)"
-mkdir -p "$app_dir/Contents/MacOS" "$resources/"{desktop,daemon,scripts}
+mkdir -p "$app_dir/Contents/MacOS" "$resources/"{desktop,daemon,scripts,agents/codex}
 swiftc -parse-as-library -O -target "$(uname -m)-apple-macosx14.0" \
   "$host_root/macos/PairingApp.swift" "$host_root/macos/ScreenCapture.swift" -o "$app_dir/Contents/MacOS/PiGoPairing"
 touch "$resources/screen-capture-v1"
 cp "$host_root/macos/AppIcon.icns" "$resources/AppIcon.icns"
 cp "$host_root"/bridge/*.mjs "$resources/desktop/"
 cp "$host_root"/daemon/*.mjs "$resources/daemon/"
+cp "$host_root"/agents/*.mjs "$resources/agents/"
+cp "$host_root"/agents/codex/*.mjs "$resources/agents/codex/"
 cp "$host_root/scripts/run-remote-tunnel.py" "$resources/scripts/"
 # Existing LaunchAgents use Resources/desktop, while daemon imports use ../bridge.
 ln -sfn desktop "$resources/bridge"

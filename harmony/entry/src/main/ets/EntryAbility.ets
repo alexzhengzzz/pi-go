@@ -99,7 +99,19 @@ export default class EntryAbility extends UIAbility {
       if (typeof params === 'string') {
         try {
           const payload = JSON.parse(params) as Record<string, string>;
-          if (payload.destination === 'inbox') AppStorage.setOrCreate<boolean>('pigoInboxFormLaunch', true);
+          const destination = typeof payload.destination === 'string' ? payload.destination : '';
+          if (destination) {
+            AppStorage.setOrCreate<string>('pigoFormDestination', destination);
+            AppStorage.setOrCreate<string>('pigoFormSessionId', typeof payload.sessionId === 'string' &&
+              /^[a-zA-Z0-9._-]{1,200}$/.test(payload.sessionId) ? payload.sessionId : '');
+            AppStorage.setOrCreate<string>('pigoFormAddress', typeof payload.address === 'string' &&
+              payload.address.length <= 2048 ? payload.address : '');
+            AppStorage.setOrCreate<string>('pigoFormPendingId', typeof payload.pendingId === 'string' &&
+              /^[a-zA-Z0-9._:-]{1,200}$/.test(payload.pendingId) ? payload.pendingId : '');
+            AppStorage.setOrCreate<string>('pigoFormEventId', typeof payload.eventId === 'string' &&
+              /^[a-zA-Z0-9._:-]{1,200}$/.test(payload.eventId) ? payload.eventId : '');
+            AppStorage.setOrCreate<boolean>('pigoInboxFormLaunch', true);
+          }
         } catch { /* Ignore malformed card parameters. */ }
       }
     }

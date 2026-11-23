@@ -77,13 +77,13 @@ export function invalidateSessionCatalog() {
 }
 
 // List the session history of one project directory (realpath-matched).
-export async function listSessions(cwd) {
+export async function listSessions(cwd, refresh = false) {
   const root = await realpath(sessionsRoot()).catch((error) => {
     if (error.code === 'ENOENT') return undefined;
     throw error;
   });
   if (!root) return [];
-  if (cache?.root === root && Date.now() - cache.time < cacheMs) {
+  if (!refresh && cache?.root === root && Date.now() - cache.time < cacheMs) {
     return cache.rows.filter((row) => row.cwd === cwd);
   }
   const scanGeneration = generation;

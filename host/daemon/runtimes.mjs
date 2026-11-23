@@ -1,15 +1,19 @@
-// Pi RPC runtime pool for the Pi Go daemon.
+// Managed runtime pool for the Pi Go daemon (Pi RPC + non-Pi agent worker shims).
 //
-// Each managed runtime is one `pi --mode rpc [--session <file>]` child process
-// spawned in the workspace. The daemon speaks the public JSON-lines RPC protocol
-// over the child's stdio: commands on stdin, responses and events on stdout.
-// Extension UI requests (`extension_ui_request`, methods confirm/select/input/
-// editor) are surfaced so the phone can answer them through the host's
-// /pending and /answer routes; answers are written back as
-// `extension_ui_response` lines.
+// - For `pi`: each managed runtime is one `pi --mode rpc [--session <file>]`
+//   child process spawned in the workspace. Extension UI requests
+//   (`extension_ui_request`, methods confirm/select/input/editor) are surfaced
+//   so the phone can answer them through the host's /pending and /answer routes.
+// - For `codex` (and future agents): spawns `node host/agents/agent-worker.mjs`
+//   which directly serves a `w-<pid>-<hex>.sock` worker socket and handles its
+//   own `/pending` and `/answer` routes.
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
+import { randomUUID } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
+import { localRequest } from '../bridge/local-ipc.mjs';
 
+const agentWorkerScript = fileURLToPath(new URL('../agents/agent-worker.mjs', import.meta.url));
 const blockingMethods = new Set(['confirm', 'select', 'input', 'editor']);
 const textLimit = 1024;
 const commandTimeoutMs = 15000;
@@ -38,6 +42,7 @@ const admissible = (event) => {
 
 export class RpcRuntime {
   constructor(pool, cwd, sessionPath, scheduled = false) {
+    this.agent = 'pi';
     this.pool = pool;
     this.cwd = cwd;
     this.sessionPath = sessionPath;
@@ -149,8 +154,6 @@ export class RpcRuntime {
     });
   }
 
-  // Poll get_state until the runtime reports the expected session (or any
-  // session when expectedId is omitted) and is neither streaming nor compacting.
   async awaitReady(expectedId) {
     let last;
     for (let attempt = 0; attempt < statePollAttempts; attempt += 1) {
@@ -168,7 +171,6 @@ export class RpcRuntime {
     throw new Error(`runtime_not_ready:${JSON.stringify(last ?? null)}`);
   }
 
-  // Snapshot of the currently pending interaction, skipping expired entries.
   pendingInteraction() {
     const now = Date.now();
     const entry = this.uiQueue.find((item) => item.expires === undefined || item.expires > now);
@@ -188,8 +190,6 @@ export class RpcRuntime {
     } catch { return false; }
   }
 
-  // Confirm accepts a boolean, select accepts an offered option, and input
-  // and editor accept up to 1024 characters. False cancels select, input, or editor.
   respondFromPiGo(pendingId, answer) {
     const interaction = this.pendingInteraction();
     if (!interaction || interaction.id !== pendingId) return false;
@@ -213,13 +213,105 @@ export class RpcRuntime {
   }
 }
 
+export class AgentWorkerRuntime {
+  constructor(pool, agent, cwd, sessionId, scheduled = false) {
+    this.agent = agent;
+    this.pool = pool;
+    this.cwd = cwd;
+    this.sessionPath = sessionId;
+    this.sessionId = sessionId;
+    this.socketPath = undefined;
+    this.readyEvent = undefined;
+    this.exited = false;
+    this.exitCode = null;
+    const args = [agentWorkerScript, '--agent', agent, '--cwd', cwd, ...(sessionId ? ['--session', sessionId] : [])];
+    const env = scheduled ? { ...process.env, PIGO_SCHEDULED_RESULTS: '1' } : process.env;
+    this.child = spawn(process.execPath, args, { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
+    this.startedAt = Date.now();
+    createInterface({ input: this.child.stdout }).on('line', (line) => {
+      try {
+        const msg = JSON.parse(line);
+        if (msg?.type === 'worker_ready' && typeof msg.sessionId === 'string') {
+          this.readyEvent = msg;
+          this.sessionId = msg.sessionId;
+          this.socketPath = msg.socket;
+        }
+      } catch {}
+    });
+    let stderr = '';
+    this.child.stderr.setEncoding('utf8').on('data', (chunk) => { stderr = (stderr + chunk).slice(-4000); });
+    this.child.on('error', () => this.onExit(null));
+    this.child.on('exit', (code) => this.onExit(code));
+    this.stderr = () => stderr;
+  }
+
+  get pid() { return this.child.pid; }
+
+  onExit(code) {
+    if (this.exited) return;
+    this.exited = true;
+    this.exitCode = code;
+    this.pool.forget(this);
+  }
+
+  async awaitReady(expectedId) {
+    for (let attempt = 0; attempt < statePollAttempts; attempt += 1) {
+      if (this.exited) throw new Error(`runtime_exited:${this.exitCode}:${this.stderr().slice(-500)}`);
+      if (this.readyEvent) {
+        if (expectedId && this.sessionId !== expectedId) {
+          throw new Error(`runtime_not_ready:${JSON.stringify(this.readyEvent)}`);
+        }
+        return { sessionId: this.sessionId, socketPath: this.socketPath };
+      }
+      await new Promise((resolve) => setTimeout(resolve, statePollMs));
+    }
+    throw new Error('runtime_not_ready:timeout');
+  }
+
+  async runScheduledPrompt(prompt, timeout) {
+    const { sessionId, socketPath } = await this.awaitReady();
+    if (!socketPath) return { reason: 'prompt_failed' };
+    const dispatched = await localRequest(socketPath, 'POST', '/prompt', {
+      id: sessionId,
+      requestId: `sched-${randomUUID()}`,
+      text: prompt,
+      mode: 'send',
+    }, 10000).catch(() => undefined);
+    if (dispatched?.status !== 202) return { reason: 'prompt_failed' };
+    const deadline = Date.now() + timeout;
+    while (Date.now() < deadline) {
+      if (this.exited) return { reason: 'runtime_exited' };
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      const pending = await localRequest(socketPath, 'GET', '/pending', undefined, 1500).catch(() => undefined);
+      if (pending?.status === 200 && pending.data?.interaction) {
+        return { reason: 'interaction_required' };
+      }
+      const chat = await localRequest(socketPath, 'GET', '/chat', undefined, 3000).catch(() => undefined);
+      if (chat?.status === 200 && chat.data?.session?.idle === true) {
+        if (chat.data.promptError) return { reason: 'model_failed' };
+        const last = [...(chat.data.messages ?? [])].reverse().find((m) => m.role === 'assistant');
+        const summary = typeof last?.text === 'string' ? last.text.trim().slice(0, 500) : undefined;
+        return { summary };
+      }
+    }
+    return { reason: 'run_timeout' };
+  }
+
+  pendingInteraction() { return undefined; }
+  respondFromPiGo() { return false; }
+
+  kill() {
+    if (!this.exited) { try { this.child.kill('SIGTERM'); } catch {} }
+  }
+}
+
 export class RuntimePool {
   constructor() { this.runtimes = new Map(); }
 
-  // Spawn a fresh runtime. The caller validates readiness and triggers
-  // /pi-go-share so the extension's worker socket appears for the broker.
-  start(cwd, sessionPath, scheduled = false) {
-    const runtime = new RpcRuntime(this, cwd, sessionPath, scheduled);
+  start(cwd, sessionPath, scheduled = false, agent = 'pi') {
+    const runtime = agent === 'pi'
+      ? new RpcRuntime(this, cwd, sessionPath, scheduled)
+      : new AgentWorkerRuntime(this, agent, cwd, sessionPath, scheduled);
     this.runtimes.set(`${runtime.pid}`, runtime);
     return runtime;
   }
@@ -232,9 +324,9 @@ export class RuntimePool {
     return runtime && !runtime.exited ? runtime : undefined;
   }
 
-  findBySession(cwd, sessionId) {
+  findBySession(cwd, sessionId, agent = 'pi') {
     return [...this.runtimes.values()].find((runtime) =>
-      !runtime.exited && runtime.cwd === cwd && runtime.sessionId === sessionId);
+      !runtime.exited && (runtime.agent ?? 'pi') === agent && runtime.cwd === cwd && runtime.sessionId === sessionId);
   }
 
   list() { return [...this.runtimes.values()].filter((runtime) => !runtime.exited); }

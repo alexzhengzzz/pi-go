@@ -13,6 +13,8 @@ import { ipcDirectory, localRequest, pairingRuntimes, workers } from '../bridge/
 import { registerSocket } from '../bridge/socket-registry.mjs';
 import { computerSessions } from '../bridge/computer-sessions.mjs';
 import { listSessions, findSession, invalidateSessionCatalog } from './catalog.mjs';
+import { listCodexSessions, findCodexSession, invalidateCodexCatalog } from '../agents/codex/catalog.mjs';
+import { currentAgents, normalizeAgent } from '../agents/registry.mjs';
 
 const sessionIdPattern = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
 const mutatingRoutes = new Set(['/open', '/new', '/authorize', '/create-workspace', '/close-workspace', '/rename-workspace', '/remove-workspace', '/delete-session', '/schedules/update']);
@@ -89,7 +91,8 @@ export function createDaemonHost({ registry, runtimes, schedules, profile = daem
   });
 
   const health = () => ({
-    protocol: 'pi-go-desktop-host/1', profile, canCreateWorkspace: true, workspaceLibrary: true, schedules: schedules?.closing === false,
+    protocol: 'pi-go-desktop-host/1', profile, canCreateWorkspace: true, workspaceLibrary: true, workspacePages: true,
+    schedules: schedules?.closing === false, agents: currentAgents(),
   });
   const registration = registerSocket(server, health);
 
@@ -109,8 +112,7 @@ export function createDaemonHost({ registry, runtimes, schedules, profile = daem
     return JSON.parse(Buffer.concat(chunks).toString('utf8'));
   }
 
-  // Register a workspace when Pi Go is entitled to: opening a native history
-  // file, an explicit /authorize, or /new.
+  // Add an existing directory only on explicit authorization.
   async function ensureRegistered(cwd, registered, wants) {
     if (!wants || registered.length > 0 || !cwd) return registered;
     if (!(await stat(cwd).catch(() => undefined))?.isDirectory()) return registered;
@@ -126,11 +128,11 @@ export function createDaemonHost({ registry, runtimes, schedules, profile = daem
 
   // Shared tail of /open and /new: bring a live or freshly spawned runtime to
   // readiness, share it into the extension bridge, and report the session id.
-  async function handoff(cwd, expectedId, sessionPath) {
+  async function handoff(cwd, expectedId, sessionPath, agent = 'pi') {
     const existing = expectedId === undefined
       ? undefined
-      : runtimes.list().find((runtime) => runtime.cwd === cwd && runtime.sessionId === expectedId);
-    const runtime = existing ?? runtimes.start(cwd, sessionPath);
+      : runtimes.list().find((runtime) => (runtime.agent ?? 'pi') === agent && runtime.cwd === cwd && runtime.sessionId === expectedId);
+    const runtime = existing ?? runtimes.start(cwd, agent === 'pi' ? sessionPath : expectedId, false, agent);
     let state;
     try { state = await runtime.awaitReady(expectedId); }
     catch (error) {
@@ -141,11 +143,13 @@ export function createDaemonHost({ registry, runtimes, schedules, profile = daem
       if (!existing) runtime.kill();
       throw new Error('desktop_session_not_ready');
     }
-    try {
-      if (!(await shareRuntime(runtime))) throw new Error('desktop_share_failed');
-    } catch {
-      if (!existing) runtime.kill();
-      throw new Error('desktop_share_failed');
+    if (agent === 'pi') {
+      try {
+        if (!(await shareRuntime(runtime))) throw new Error('desktop_share_failed');
+      } catch {
+        if (!existing) runtime.kill();
+        throw new Error('desktop_share_failed');
+      }
     }
     return state.sessionId;
   }
@@ -196,7 +200,20 @@ export function createDaemonHost({ registry, runtimes, schedules, profile = daem
         if (request.url === '/workspaces') {
           return reply(response, 200, { workspaces: registered, revision: currentRevision });
         }
-        const [history, live] = await Promise.all([computerSessions(currentRevision), liveSessions()]);
+        const scope = input.scope;
+        if (scope !== undefined && !['workspaces', 'workspace'].includes(scope)) {
+          return reply(response, 400, { error: 'invalid_scope' });
+        }
+        if (scope === 'workspaces') {
+          return reply(response, 200, { workspaces: registered.map(({ id, name, cwd, path }) =>
+            ({ id, name, cwd: cwd ?? path, registered: true, sessions: [] })) });
+        }
+        const workspace = scope === 'workspace' ? registered.find(({ cwd, path }) => (cwd ?? path) === input.cwd) : undefined;
+        if (scope === 'workspace' && !workspace) return reply(response, 404, { error: 'desktop_workspace_not_registered' });
+        const [history, live] = await Promise.all([
+          workspace && !workspace.cwd ? [] : computerSessions(currentRevision, workspace?.cwd),
+          liveSessions(),
+        ]);
         const groups = new Map(registered.map(({ id, name, cwd, path }) => {
           const location = cwd ?? path;
           return [location, { id, name, cwd: location, registered: true, sessions: [] }];
@@ -209,22 +226,32 @@ export function createDaemonHost({ registry, runtimes, schedules, profile = daem
         const historyById = new Map();
         for (const row of history) {
           const cwd = await canonicalPath(row.cwd);
-          historyById.set(JSON.stringify([cwd, row.id]), { ...row, cwd });
+          const agent = row.agent ?? 'pi';
+          historyById.set(JSON.stringify([cwd, agent, row.id]), { ...row, agent, cwd });
         }
         for (const row of live) {
           const cwd = await canonicalPath(row.cwd);
-          const key = JSON.stringify([cwd, row.id]);
+          const agent = row.agent ?? 'pi';
+          const key = JSON.stringify([cwd, agent, row.id]);
           const prior = historyById.get(key);
-          historyById.set(key, { ...prior, id: row.id, cwd, name: row.name ?? prior?.name, active: true });
+          historyById.set(key, { ...prior, id: row.id, agent, cwd, name: row.name ?? prior?.name, active: true });
         }
-        for (const { id, name, modified, cwd, active } of historyById.values()) {
+        for (const { id, agent, name, modified, cwd, active } of historyById.values()) {
           if (!groups.has(cwd)) groups.set(cwd, { name: basename(cwd) || cwd, cwd, registered: false, sessions: [] });
-          groups.get(cwd).sessions.push({ id, name, modified, active });
+          groups.get(cwd).sessions.push({ id, agent, name, modified, active });
         }
         const workspaces = [...groups.values()].sort((a, b) =>
           Number(b.registered) - Number(a.registered) || a.name.localeCompare(b.name));
         for (const group of workspaces) {
-          group.sessions.sort((a, b) => Number(b.active) - Number(a.active) || (b.modified ?? '').localeCompare(a.modified ?? ''));
+          group.sessions.sort((a, b) => Number(b.active) - Number(a.active) ||
+            (b.modified ?? '').localeCompare(a.modified ?? '') || a.id.localeCompare(b.id));
+        }
+        if (workspace) {
+          const rows = groups.get(input.cwd).sessions.map((row) => ({ ...row, cwd: input.cwd }));
+          const cursor = Number(input.cursor);
+          const start = Number.isSafeInteger(cursor) && cursor >= 0 ? cursor : 0;
+          return reply(response, 200, { history: rows.slice(start, start + 20),
+            nextCursor: start + 20 < rows.length ? start + 20 : undefined });
         }
         return reply(response, 200, { workspaces });
       }
@@ -241,7 +268,7 @@ export function createDaemonHost({ registry, runtimes, schedules, profile = daem
         }
         const cwd = await realpath(input.cwd).catch(() => undefined);
         const deleted = cwd !== undefined && deletedSessions.get(input.id) === cwd &&
-          !await findSession(cwd, input.id);
+          !await findSession(cwd, input.id) && !await findCodexSession(cwd, input.id);
         return reply(response, 200, { deleted });
       }
       if (request.url === '/delete-session') {
@@ -249,7 +276,12 @@ export function createDaemonHost({ registry, runtimes, schedules, profile = daem
           return reply(response, 400, { error: 'invalid_target' });
         }
         const cwd = await realpath(input.cwd).catch(() => undefined);
-        const session = cwd && await findSession(cwd, input.id);
+        const requestedAgent = input.agent !== undefined ? normalizeAgent(input.agent) : undefined;
+        if (input.agent !== undefined && !requestedAgent) return reply(response, 400, { error: 'invalid_target' });
+        const piMatch = (!requestedAgent || requestedAgent === 'pi') && cwd ? await findSession(cwd, input.id) : undefined;
+        const codexMatch = !piMatch && (!requestedAgent || requestedAgent === 'codex') && cwd
+          ? await findCodexSession(cwd, input.id) : undefined;
+        const session = piMatch ? { ...piMatch, agent: 'pi' } : codexMatch;
         if (!session) return reply(response, 404, { error: 'desktop_session_not_found' });
         const before = await lstat(session.path);
         const managed = runtimes.list();
@@ -257,7 +289,7 @@ export function createDaemonHost({ registry, runtimes, schedules, profile = daem
         const knownPids = new Set([...managed, ...live].map(({ pid }) => pid));
         if (managed.some((runtime) => runtime.sessionId === input.id || runtime.sessionPath === session.path ||
           (runtime.cwd === cwd && !runtime.sessionId)) ||
-          live.some(({ id }) => id === input.id) || await hasExternalPi(knownPids)) {
+          live.some(({ id }) => id === input.id) || (session.agent === 'pi' && await hasExternalPi(knownPids))) {
           return reply(response, 409, { error: 'session_occupied' });
         }
         const after = await lstat(session.path);
@@ -271,6 +303,7 @@ export function createDaemonHost({ registry, runtimes, schedules, profile = daem
         deletedSessions.set(input.id, cwd);
         if (deletedSessions.size > 128) deletedSessions.delete(deletedSessions.keys().next().value);
         invalidateSessionCatalog();
+        invalidateCodexCatalog();
         revision = randomUUID();
         return reply(response, 200, { deleted: true });
       }
@@ -323,25 +356,51 @@ export function createDaemonHost({ registry, runtimes, schedules, profile = daem
         return reply(response, 200, { closed: true, cwd: cwd ?? registered[0].path });
       }
       const opening = request.url === '/open';
-      if (typeof input.cwd !== 'string' || (opening && (typeof input.id !== 'string' || !sessionIdPattern.test(input.id)))) {
+      const requestedAgent = input.agent !== undefined ? normalizeAgent(input.agent) : undefined;
+      if (typeof input.cwd !== 'string' || (input.agent !== undefined && !requestedAgent) ||
+        (opening && (typeof input.id !== 'string' || !sessionIdPattern.test(input.id)))) {
         return reply(response, 400, { error: 'invalid_target' });
       }
       const cwd = await realpath(input.cwd).catch(() => undefined);
       let registered = await registry.findByRealpath(cwd);
-      const session = opening && cwd ? await findSession(cwd, input.id) : undefined;
-      const wantsRegistration = Boolean(session) || request.url === '/authorize' || request.url === '/new';
-      registered = await ensureRegistered(cwd, registered, wantsRegistration);
-      if (!cwd || registered.length === 0 || registered.length > 1) {
+      let session;
+      if (opening && cwd) {
+        if (!requestedAgent || requestedAgent === 'pi') {
+          const found = await findSession(cwd, input.id);
+          if (found) session = { ...found, agent: 'pi' };
+        }
+        if (!session && (!requestedAgent || requestedAgent === 'codex')) {
+          const found = await findCodexSession(cwd, input.id);
+          if (found) session = found;
+        }
+      }
+      registered = await ensureRegistered(cwd, registered, request.url === '/authorize');
+      const transient = Boolean(session) || request.url === '/new';
+      if (!cwd || (registered.length === 0 && !transient) || registered.length > 1) {
         return reply(response, 403, { error: 'desktop_workspace_untrusted' });
       }
       if (opening && !session) return reply(response, 404, { error: 'desktop_session_not_found' });
       if (request.url === '/catalog') {
-        const sessions = (await listSessions(cwd)).map(({ id, name, modified }) => ({ id, name, modified }));
+        const refresh = input.refresh === true;
+        if (input.scoped === true) {
+          const sessions = (await computerSessions(revision, cwd, refresh))
+            .map(({ id, agent, name, modified }) => ({ id, agent, name, modified }));
+          return reply(response, 200, { sessions });
+        }
+        const [piList, codexList] = await Promise.all([
+          listSessions(cwd, refresh),
+          listCodexSessions(cwd, refresh).catch(() => []),
+        ]);
+        const sessions = [
+          ...piList.map(({ id, name, modified }) => ({ agent: 'pi', id, name, modified })),
+          ...codexList.map(({ id, name, modified }) => ({ agent: 'codex', id, name, modified })),
+        ].sort((a, b) => (b.modified ?? '').localeCompare(a.modified ?? ''));
         return reply(response, 200, { sessions });
       }
       if (request.url === '/authorize') return reply(response, 200, { cwd, profile });
-      const sessionId = await handoff(cwd, opening ? input.id : undefined, session?.path);
-      return reply(response, 200, { id: sessionId });
+      const targetAgent = opening ? (session.agent ?? 'pi') : (requestedAgent ?? 'pi');
+      const sessionId = await handoff(cwd, opening ? input.id : undefined, session?.path, targetAgent);
+      return reply(response, 200, { id: sessionId, agent: targetAgent });
     } catch (error) {
       const known = ['desktop_busy', 'desktop_session_not_ready', 'desktop_share_failed'];
       const code = known.includes(String(error?.message)) ? error.message : 'desktop_handoff_failed';

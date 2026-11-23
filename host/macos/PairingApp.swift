@@ -16,20 +16,26 @@ struct Workspace: Decodable, Identifiable {
     let registrationID: String?
     let name: String
     let cwd: String
-    let registered: Bool
-    let sessions: [HistorySession]
 
     enum CodingKeys: String, CodingKey {
         case registrationID = "id"
-        case name, cwd, registered, sessions
+        case name, cwd
     }
 }
 
 struct HistorySession: Decodable, Identifiable {
-    let id: String
+    var id: String { "\(agent ?? "pi"):\(sessionID)" }
+    let sessionID: String
+    let cwd: String
+    let agent: String?
     let name: String?
     let modified: String?
     let active: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case sessionID = "id"
+        case cwd, agent, name, modified, active
+    }
 }
 
 struct Bridge: Decodable {
@@ -48,6 +54,8 @@ struct Services: Decodable {
 }
 struct Payload: Decodable {
     var workspaces: [Workspace]?
+    var history: [HistorySession]?
+    var nextCursor: Int?
     var sessions: [Session]?
     var addresses: [String]?
     var bridge: Bridge?
@@ -308,6 +316,8 @@ struct PairingView: View {
 
 @MainActor final class WorkspaceModel: ObservableObject {
     @Published var workspaces: [Workspace] = []
+    @Published var history: [HistorySession] = []
+    @Published var nextCursor: Int?
     @Published var busy = false
     @Published var error = ""
     @Published var loaded = false
@@ -323,12 +333,49 @@ struct PairingView: View {
                 input["action"] = action
                 _ = try await PairingModel.request(input)
             }
-            let response = try await PairingModel.request(["action": "workspace-library"])
+            let response = try await PairingModel.request(["action": "workspace-library", "scope": "workspaces"])
             workspaces = response.workspaces ?? []
             loaded = true
         } catch {
             self.error = error.localizedDescription
         }
+    }
+
+    func loadHistory(cwd: String, more: Bool = false) async {
+        guard !busy, !more || nextCursor != nil else { return }
+        busy = true
+        error = ""
+        defer { busy = false }
+        if !more {
+            history = []
+            nextCursor = nil
+        }
+        let input = ["action": "workspace-library", "scope": "workspace",
+                     "cursor": String(nextCursor ?? 0), "cwd": cwd]
+        do {
+            let response = try await PairingModel.request(input)
+            let seen = Set(history.map(\.id))
+            history += (response.history ?? []).filter { !seen.contains($0.id) }
+            nextCursor = response.nextCursor
+        } catch {
+            self.error = error.localizedDescription
+        }
+    }
+
+    func deleteSession(_ session: HistorySession) async {
+        guard !busy else { return }
+        var input = ["action": "delete-session", "cwd": session.cwd, "id": session.sessionID]
+        input["agent"] = session.agent
+        busy = true
+        do {
+            _ = try await PairingModel.request(input)
+        } catch {
+            busy = false
+            self.error = error.localizedDescription
+            return
+        }
+        busy = false
+        await loadHistory(cwd: session.cwd)
     }
 }
 
@@ -341,7 +388,7 @@ struct WorkspaceView: View {
 
     private enum Deletion {
         case workspace(Workspace, String)
-        case session(Workspace, HistorySession)
+        case session(HistorySession)
 
         var title: String {
             switch self {
@@ -354,8 +401,8 @@ struct WorkspaceView: View {
             switch self {
             case .workspace(let workspace, _):
                 "将移除「\(workspace.name)」的登记并关闭 Pi Go 托管的会话。项目文件和会话历史会保留。"
-            case .session(let workspace, let session):
-                "将「\(workspace.name)」中的「\(session.name ?? "未命名会话")」移入废纸篓。"
+            case .session(let session):
+                "将「\(session.name ?? "未命名会话")」移入废纸篓。"
             }
         }
 
@@ -363,8 +410,8 @@ struct WorkspaceView: View {
             switch self {
             case .workspace(_, let id):
                 await model.run("remove-workspace", fields: ["id": id])
-            case .session(let workspace, let session):
-                await model.run("delete-session", fields: ["cwd": workspace.cwd, "id": session.id])
+            case .session(let session):
+                await model.deleteSession(session)
             }
         }
     }
@@ -375,7 +422,16 @@ struct WorkspaceView: View {
                 Text("工作区").font(.title2.bold())
                 Spacer()
                 if model.busy { ProgressView().controlSize(.small) }
-                Button("刷新", systemImage: "arrow.clockwise") { Task { await model.run() } }
+                Button("添加到工作区", systemImage: "folder.badge.plus", action: addWorkspace)
+                    .disabled(model.busy)
+                Button("刷新", systemImage: "arrow.clockwise") {
+                    Task {
+                        await model.run()
+                        if let selection, model.error.isEmpty {
+                            await model.loadHistory(cwd: selection)
+                        }
+                    }
+                }
                     .disabled(model.busy)
             }.padding(16)
             if !model.error.isEmpty {
@@ -385,16 +441,18 @@ struct WorkspaceView: View {
             Divider()
             HSplitView {
                 List(selection: $selection) {
-                    workspaceSection("已登记", workspaces: model.workspaces.filter(\.registered))
-                    workspaceSection("其他目录", workspaces: model.workspaces.filter { !$0.registered })
+                    ForEach(model.workspaces) { workspace in
+                        Label(workspace.name, systemImage: "folder").tag(workspace.id)
+                    }
                 }
                 .listStyle(.sidebar)
+                .disabled(model.busy)
                 .frame(minWidth: 170, idealWidth: 235, maxWidth: 280, maxHeight: .infinity)
                 Group {
                     if let workspace = model.workspaces.first(where: { $0.id == selection }) {
                         workspaceDetails(workspace)
                     } else if model.loaded {
-                        ContentUnavailableView(model.workspaces.isEmpty ? "还没有工作区或会话" : "选择工作区",
+                        ContentUnavailableView(model.workspaces.isEmpty ? "还没有工作区" : "选择工作区",
                                                systemImage: "folder")
                     } else if model.busy {
                         ProgressView("正在读取工作区")
@@ -407,8 +465,10 @@ struct WorkspaceView: View {
         }
         .task { await model.run() }
         .onChange(of: model.workspaces.map(\.id)) { _, ids in
-            if let selection, ids.contains(selection) { return }
-            selection = ids.first
+            if let selection, !ids.contains(selection) { self.selection = nil }
+        }
+        .onChange(of: selection) { _, target in
+            if let target { Task { await model.loadHistory(cwd: target) } }
         }
         .alert("编辑工作区名称", isPresented: Binding(get: { pendingRename != nil }, set: {
             if !$0 { pendingRename = nil }
@@ -431,14 +491,14 @@ struct WorkspaceView: View {
         }
     }
 
-    @ViewBuilder private func workspaceSection(_ title: String, workspaces: [Workspace]) -> some View {
-        if !workspaces.isEmpty {
-            Section(title) {
-                ForEach(workspaces) { workspace in
-                    Label(workspace.name, systemImage: "folder").tag(workspace.id)
-                }
-            }
-        }
+    private func addWorkspace() {
+        let picker = NSOpenPanel()
+        picker.canChooseDirectories = true
+        picker.canChooseFiles = false
+        picker.allowsMultipleSelection = false
+        picker.prompt = "添加"
+        guard picker.runModal() == .OK, let path = picker.url?.path else { return }
+        Task { await model.run("add-workspace", fields: ["cwd": path]) }
     }
 
     private func workspaceDetails(_ workspace: Workspace) -> some View {
@@ -459,13 +519,34 @@ struct WorkspaceView: View {
                 }
             }
             Text(workspace.cwd).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
-            if workspace.sessions.isEmpty {
-                ContentUnavailableView("还没有会话", systemImage: "bubble")
+            historyList(cwd: workspace.cwd)
+        }
+        .padding(16)
+    }
+
+    @ViewBuilder private func historyList(cwd: String) -> some View {
+        if model.history.isEmpty {
+            if model.busy {
+                ProgressView("正在读取会话")
             } else {
-                List(workspace.sessions) { session in
+                ContentUnavailableView("暂无会话", systemImage: "bubble")
+            }
+        } else {
+            List {
+                ForEach(model.history) { session in
                     HStack {
                         VStack(alignment: .leading, spacing: 4) {
-                            Text(session.name ?? "未命名会话")
+                            HStack(spacing: 6) {
+                                Text(session.name ?? "未命名会话")
+                                if let agent = session.agent, agent != "pi" {
+                                    Text(agent == "codex" ? "Codex" : agent.uppercased())
+                                        .font(.caption2.weight(.semibold))
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 2)
+                                        .background(Color.accentColor.opacity(0.15), in: Capsule())
+                                        .foregroundStyle(Color.accentColor)
+                                }
+                            }
                             if let modified = session.modified, let date = ISO8601DateFormatter.sessionDate.date(from: modified) {
                                 Text(date.formatted(date: .abbreviated, time: .shortened))
                                     .font(.caption).foregroundStyle(.secondary)
@@ -477,7 +558,7 @@ struct WorkspaceView: View {
                         } else {
                             Menu {
                                 Button("删除会话", role: .destructive) {
-                                    pendingDeletion = .session(workspace, session)
+                                    pendingDeletion = .session(session)
                                 }
                             } label: {
                                 Image(systemName: "ellipsis.circle")
@@ -487,9 +568,14 @@ struct WorkspaceView: View {
                     }
                     .padding(.vertical, 5)
                 }
-                .listStyle(.plain)
+                if model.nextCursor != nil {
+                    Button("加载更多") {
+                        Task { await model.loadHistory(cwd: cwd, more: true) }
+                    }.disabled(model.busy)
+                }
             }
-        }.padding(16)
+            .listStyle(.plain)
+        }
     }
 }
 

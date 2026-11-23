@@ -74,6 +74,7 @@ export async function usbLaunch(args, port, ticket) {
 const workspaceErrors = {
   desktop_busy: 'Pi Go 宿主正在处理另一项操作，请稍后重试。',
   desktop_workspace_not_registered: '该工作区已移除，请刷新。',
+  desktop_workspace_untrusted: '无法添加该目录，请检查路径是否可访问。',
   desktop_session_not_found: '该会话已移除或无法定位，请刷新。',
   invalid_workspace_name: '请输入 1–80 个字符的名称，且不要使用路径分隔符。',
   session_occupied: '会话可能仍被 Pi 使用。请退出对应会话以及终端中的 Pi 后重试。',
@@ -84,6 +85,7 @@ const workspaceErrors = {
 
 const workspaceActions = new Map([
   ['workspace-library', '/workspace-library'],
+  ['add-workspace', '/authorize'],
   ['rename-workspace', '/rename-workspace'],
   ['remove-workspace', '/remove-workspace'],
   ['delete-session', '/delete-session'],
@@ -93,7 +95,7 @@ async function workspaceControl(input, route) {
   let hosts = await desktopHosts();
   if (hosts.length === 1 && route === '/workspace-library') {
     const health = await localRequest(hosts[0], 'GET', '/health', undefined, 700).catch(() => undefined);
-    if (health?.data?.workspaceLibrary !== true && appServices) {
+    if (health?.data?.workspacePages !== true && appServices) {
       await appServices.startHost({ requireWorkspaceLibrary: true });
       hosts = await desktopHosts();
     }
@@ -103,7 +105,8 @@ async function workspaceControl(input, route) {
   }
   if (hosts.length !== 1) throw new Error('无法连接唯一的 Pi Go 宿主，请检查后台服务。');
   const { status, data } = await localRequest(hosts[0], 'POST', route,
-    { id: input.id, cwd: input.cwd, name: input.name }, 14000, 16 * 1024 * 1024);
+    { id: input.id, cwd: input.cwd, name: input.name, agent: input.agent,
+      scope: input.scope, cursor: input.cursor }, 14000, 16 * 1024 * 1024);
   if (status === 404 && data.error === 'not_found') throw new Error('请更新并重启 Pi Go 后台服务。');
   if (status !== 200) throw new Error(workspaceErrors[data.error] ?? '工作区操作失败，请刷新后重试。');
   return data;

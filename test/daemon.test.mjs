@@ -107,10 +107,11 @@ test('daemon host serves native open, new, interactions and close', { timeout: 3
 
   // Opening a foreign session in an unregistered project is refused first.
   assert.equal((await localRequest(hostSocket, 'POST', '/open', { cwd: first, id: b.sessionId })).status, 403);
-  assert.equal((await localRequest(hostSocket, 'POST', '/authorize', { cwd: first })).status, 200);
   const opened = await localRequest(hostSocket, 'POST', '/open', { cwd: first, id: a.sessionId }, 20000);
   assert.equal(opened.status, 200, JSON.stringify(opened));
   assert.equal(opened.data.id, a.sessionId);
+  assert.deepEqual((await localRequest(hostSocket, 'POST', '/workspaces', {})).data.workspaces, []);
+  assert.equal((await localRequest(hostSocket, 'POST', '/authorize', { cwd: first })).status, 200);
 
   const workerSockets = async () => (await readdir(ipc)).filter((name) => /^w-/.test(name)).map((name) => join(ipc, name));
   let firstWorker;

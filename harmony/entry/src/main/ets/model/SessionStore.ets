@@ -25,13 +25,24 @@ export interface SessionCatalog {
   reply: BridgeReply;
 }
 
+export interface WorkspacePage {
+  path: string;
+  sessions: SessionRow[];
+  nextCursor?: number;
+  loading: boolean;
+  failed: boolean;
+  requestId?: number;
+  retryRefresh?: boolean;
+}
+
 export interface SidebarCatalog {
   view: string;
   loadedView: string;
   sessions: SessionRow[];
   projects: string[];
   workspaces: WorkspaceRow[];
-  hasWorkspaceDetails: boolean;
+  workspacePages?: WorkspacePage[];
+  nextCursor?: number;
   expandedSpaces: string[];
 }
 
@@ -90,50 +101,40 @@ export class SessionStore {
   async loadCatalog(
     view: string,
     request: (path: string) => Promise<BridgeReply>,
-    current: () => boolean,
-    firstPage: (page: SessionCatalog) => void
-  ): Promise<SessionCatalog | undefined> {
-    const sessions: SessionRow[] = [];
-    const ids = new Set<string>();
-    let cursor: number | undefined = 0;
-    let reply: BridgeReply;
-    do {
-      reply = await request(`/sessions?limit=100&cursor=${cursor}&view=${view}`);
-      if (!current()) return undefined;
-      for (const row of reply.sessions ?? []) {
-        if (ids.has(row.id)) continue;
-        ids.add(row.id);
-        sessions.push(row);
-      }
-      const next = reply.nextCursor;
-      if (cursor === 0 && next !== undefined) firstPage({ sessions: sessions.slice(), reply: reply });
-      cursor = next !== undefined && next > cursor ? next : undefined;
-    } while (cursor !== undefined);
-    return { sessions: sessions, reply: reply };
+    cursor: number = 0,
+    workspace: string = '',
+    refresh: boolean = false
+  ): Promise<SessionCatalog> {
+    const scope = workspace ? 'workspace' : view === 'all' ? 'workspaces' : 'filtered';
+    const limit = workspace ? 10 : 20;
+    let path = `/sessions?scope=${scope}&limit=${limit}&cursor=${cursor}&view=${view}`;
+    if (workspace) path += '&cwd=' + encodeURIComponent(workspace);
+    if (refresh && scope !== 'workspaces') path += '&refresh=1';
+    const reply = await request(path);
+    return { sessions: reply.sessions ?? [], reply: reply };
   }
 
   rows(catalog: SidebarCatalog): SidebarRow[] {
     const rows: SidebarRow[] = [];
-    const visibleSessions = catalog.view === catalog.loadedView ? catalog.sessions : [];
     if (catalog.view !== 'all') {
-      for (const session of visibleSessions) rows.push(this.sessionRow(session, false));
+      if (catalog.view !== catalog.loadedView) return rows;
+      for (const session of catalog.sessions) rows.push(this.sessionRow(session, false));
+      if (catalog.nextCursor !== undefined) rows.push({ key: 'more:sessions', more: '', nested: false });
       return rows;
     }
 
-    const bySpace = new Map<string, SessionRow[]>();
-    const paths = new Set<string>(catalog.projects);
     const expanded = new Set<string>(catalog.expandedSpaces);
-    for (const session of visibleSessions) {
-      if (!session.cwd) continue;
-      if (catalog.hasWorkspaceDetails) paths.add(session.cwd);
-      if (!expanded.has(session.cwd)) continue;
-      let group = bySpace.get(session.cwd);
-      if (!group) { group = []; bySpace.set(session.cwd, group); }
-      group.push(session);
-    }
-    for (const path of paths) {
+    for (const path of catalog.projects) {
       rows.push({ key: `space:${path}:${workspaceName(catalog.workspaces, path)}`, path: path, nested: false });
-      for (const session of bySpace.get(path) ?? []) rows.push(this.sessionRow(session, true));
+      if (!expanded.has(path)) continue;
+      const page = catalog.workspacePages?.find((item: WorkspacePage): boolean => item.path === path);
+      if (!page) continue;
+      for (const session of page.sessions) rows.push(this.sessionRow(session, true));
+      if (page.loading || page.failed || page.nextCursor !== undefined || !page.sessions.length) {
+        const label = page.loading ? '正在加载会话…' : page.failed ? '重试' : page.nextCursor !== undefined ? '加载更多' : '暂无会话';
+        const actionable = !page.loading && (page.failed || page.nextCursor !== undefined);
+        rows.push({ key: `page:${path}:${label}`, more: actionable ? path : undefined, label: label, nested: true });
+      }
     }
     return rows;
   }

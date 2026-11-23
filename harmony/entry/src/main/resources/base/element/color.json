@@ -17,6 +17,8 @@
     {"name": "pigo_error_panel", "value": "#FCE4E4"},
     {"name": "pigo_widget_surface", "value": "#FCFBF7"},
     {"name": "pigo_widget_tint", "value": "#E5F2EF"},
+    {"name": "pigo_widget_card", "value": "#F2F7F5"},
+    {"name": "pigo_widget_pill", "value": "#DAEBE7"},
     {"name": "pigo_widget_ink", "value": "#162D36"},
     {"name": "pigo_widget_accent", "value": "#306D66"},
     {"name": "pigo_widget_muted", "value": "#476663"},

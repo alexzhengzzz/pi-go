@@ -22,7 +22,31 @@ export interface BridgeEndpoint {
   pin?: string;
 }
 
+export interface SessionCapabilities {
+  steer?: boolean;
+  followUp?: boolean;
+  images?: boolean;
+  models?: boolean;
+  thinking?: boolean;
+  commands?: boolean;
+  rename?: boolean;
+  fork?: boolean;
+  regenerate?: boolean;
+  approvals?: boolean;
+}
+
+export interface AgentInfo {
+  id: string;
+  label: string;
+  installed: boolean;
+  version?: string;
+  authed?: boolean;
+}
+
 export interface SessionState {
+  agent?: string;
+  permission?: string;
+  capabilities?: SessionCapabilities;
   id: string;
   cwd: string;
   name?: string;
@@ -35,6 +59,7 @@ export interface SessionState {
 }
 
 export interface SessionRow {
+  agent?: string;
   revision: number;
   pinned?: boolean;
   archived?: boolean;
@@ -52,6 +77,8 @@ export interface SidebarRow {
   key: string;
   path?: string;
   session?: SessionRow;
+  more?: string;
+  label?: string;
   nested: boolean;
 }
 
@@ -152,6 +179,7 @@ export interface StreamFrame extends SequencedFrame {
 export interface PendingInteraction {
   id: string;
   method: string;
+  kind?: string;
   title?: string;
   message?: string;
   options?: string[];
@@ -229,6 +257,7 @@ export interface BridgeReply {
   cwd?: string;
   projects?: string[];
   workspaces?: WorkspaceRow[];
+  agents?: AgentInfo[];
   token?: string;
   error?: string;
   session?: SessionState;
@@ -254,6 +283,7 @@ export interface HistoryImage {
 }
 
 export interface Payload {
+  agent?: string;
   enabled?: boolean;
   device?: string;
   token?: string;

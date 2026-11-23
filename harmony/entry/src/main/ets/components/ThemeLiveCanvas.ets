@@ -195,6 +195,16 @@ export struct ThemeLiveCanvas {
     const w = this.ctx.width;
     const h = this.ctx.height;
     if (w <= 0 || h <= 0) return;
+    // 折叠屏展开/合拢或横竖屏旋转时按比例重映射粒子坐标，保证满屏分布
+    if (this.canvasW > 0 && this.canvasH > 0 &&
+      (Math.abs(w - this.canvasW) > 36 || Math.abs(h - this.canvasH) > 36)) {
+      const sx = w / this.canvasW;
+      const sy = h / this.canvasH;
+      for (const p of this.particles) {
+        p.x = Math.max(0, Math.min(w, p.x * sx));
+        p.y = Math.max(0, Math.min(h, p.y * sy));
+      }
+    }
     this.canvasW = w;
     this.canvasH = h;
     this.initScene(w, h);

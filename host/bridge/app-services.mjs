@@ -75,7 +75,7 @@ export function createAppServices(root) {
     TMPDIR: tmpdir(),
     PIGO_PI_BIN: process.env.PIGO_PI_BIN || 'pi',
   };
-  for (const name of ['PI_CODING_AGENT_DIR', 'PIGO_IPC_DIR', 'PIGO_STATE_DIR', 'PIGO_PI_ARGS', 'HDC_BIN']) {
+  for (const name of ['PI_CODING_AGENT_DIR', 'PIGO_IPC_DIR', 'PIGO_STATE_DIR', 'PIGO_PI_ARGS', 'PIGO_CODEX_BIN', 'PIGO_CODEX_ARGS', 'CODEX_HOME', 'HDC_BIN']) {
     if (process.env[name] !== undefined) env[name] = process.env[name];
   }
 
@@ -152,7 +152,7 @@ export function createAppServices(root) {
       if (!active || !(await desktopHosts()).includes(socket)) return false;
       if (!requireWorkspaceLibrary) return true;
       const response = await localRequest(socket, 'GET', '/health', undefined, 700).catch(() => undefined);
-      return response?.data?.workspaceLibrary === true;
+      return response?.data?.workspacePages === true;
     };
     // Wait for hosted work to finish before replacing the old runtime parent.
     const installed = pid ? await parsePlist(plist(hostLabel)) : undefined;
@@ -184,7 +184,7 @@ export function createAppServices(root) {
       async () => {
         if (!jobPID(await jobInfo(label))) return false;
         const state = await bridgeStatus(port);
-        return state?.workspaceLibrary === true && (!current?.paired || state.paired);
+        return state?.workspacePages === true && (!current?.paired || state.paired);
       },
       async () => { if (mayStopLegacy) await stopBridge(port); });
     const status = await bridgeStatus(port);
