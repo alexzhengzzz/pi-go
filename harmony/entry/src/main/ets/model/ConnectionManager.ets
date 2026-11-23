@@ -1,3 +1,5 @@
+import { connection } from '@kit.NetworkKit';
+import type { BusinessError } from '@kit.BasicServicesKit';
 import type { Companion } from '../CredentialVault';
 import { validCompanion } from '../CompanionCheck';
 import { withComputerAssignment } from '../ComputerGroups';
@@ -15,6 +17,8 @@ export class ConnectionManager {
   private active: BridgeEndpoint = { address: '', token: '' };
   private pollTimer: number = -1;
   private retryTimer: number = -1;
+  private networkMonitor?: connection.NetConnection;
+  private networkRegistered: boolean = false;
 
   endpoint(): BridgeEndpoint {
     return this.active;
@@ -80,6 +84,37 @@ export class ConnectionManager {
 
   discover(): Promise<string[]> {
     return discoverLan();
+  }
+
+  watchNetwork(onChange: () => void): void {
+    if (this.networkMonitor) return;
+    try {
+      const monitor = connection.createNetConnection();
+      const onEvent = (): void => {
+        if (this.networkMonitor === monitor) onChange();
+      };
+      monitor.on('netAvailable', onEvent);
+      monitor.on('netLost', onEvent);
+      this.networkMonitor = monitor;
+      monitor.register((error: BusinessError): void => {
+        if (error) {
+          if (this.networkMonitor === monitor) this.networkMonitor = undefined;
+        } else if (this.networkMonitor === monitor) {
+          this.networkRegistered = true;
+        } else {
+          monitor.unregister((): void => {});
+        }
+      });
+    } catch {
+      this.networkMonitor = undefined;
+    }
+  }
+
+  stopWatchingNetwork(): void {
+    const monitor = this.networkMonitor;
+    this.networkMonitor = undefined;
+    if (monitor && this.networkRegistered) monitor.unregister((): void => {});
+    this.networkRegistered = false;
   }
 
   schedulePoll(delay: number, poll: () => void): void {

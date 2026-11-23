@@ -26,7 +26,8 @@ const systemMocks = new Map([
     RequestMethod: { GET: 'GET', POST: 'POST' },
     HttpDataType: { STRING: 'string' },
     createHttp: () => globalThis.pigoTestHttp.createHttp()
-  }; export const socket = {};`],
+  }; export const socket = {};
+  export const connection = { createNetConnection: () => globalThis.pigoTestNetwork.createNetConnection() };`],
   ['@kit.CoreFileKit', `export const fileIo = new Proxy({}, {
     get(_target, key) {
       const api = globalThis.pigoTestFiles;

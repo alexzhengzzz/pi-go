@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { stripTypeScriptTypes } from 'node:module';
 import { test } from 'node:test';
 import './harmony-modules.mjs';
-import { pageSource } from './harmony-source.mjs';
+import { harmonyFile, pageSource } from './harmony-source.mjs';
 
 const {
   MAX_SYSTEM_SHARE_TEXT_BYTES,
@@ -13,6 +13,61 @@ const {
   safeShareFileName,
   shareSessionViaSystem
 } = await import('../harmony/entry/src/main/ets/SessionShare.ets');
+
+test('a new share is visible when it arrives over the session drawer or computer list', () => {
+  const page = pageSource();
+  const methods = ['onIncomingShare', 'showIncomingShare'].map(name => {
+    const start = page.indexOf(`  private ${name}(`);
+    assert.ok(start >= 0, `Missing page method: ${name}`);
+    return page.slice(start, page.indexOf('\n  }', start) + 4);
+  });
+  const SharePage = new Function(stripTypeScriptTypes(`class SharePage {\n${methods.join('\n')}\n}`) + '; return SharePage;')();
+  const state = new SharePage();
+  Object.assign(state, {
+    incomingShare: { text: 'https://example.com/', attachments: [], skipped: false },
+    showSessions: true, activeTab: 'mine', minePage: 'computers', shareTargetPicker: 'computer',
+    drawerOpen() { return this.showSessions; },
+    setDrawer(open) { this.showSessions = open; }
+  });
+  assert.equal(state.showIncomingShare(), false, 'allow the user to choose a computer');
+  state.onIncomingShare();
+  assert.equal(state.showIncomingShare(), true, 'a new system share is presented over the previous selection');
+  assert.equal(state.showSessions, false);
+  state.shareTargetPicker = 'session';
+  state.showSessions = true;
+  assert.equal(state.showIncomingShare(), false, 'allow the user to choose a session');
+  state.showSessions = false;
+  assert.equal(state.showIncomingShare(), true);
+});
+
+test('incoming share accepts text, links and a granted image while skipping unsupported records', async () => {
+  const records = [
+    { utd: 'general.plain-text', content: 'Please inspect' },
+    { utd: 'general.hyperlink', content: 'https://example.com' },
+    { utd: 'general.png', uri: 'file://media/Photo/1/screenshot.png' },
+    { utd: 'general.plain-text', uri: 'file://com.example.pigo/private.txt' },
+    { utd: 'general.png', uri: '/data/local/tmp/file.png' },
+    { utd: 'general.plain-text', content: 'a'.repeat(12001) }
+  ];
+  const opened = [];
+  const source = harmonyFile('IncomingShare.ets').replace(/^import .*;\n|^export /gm, '');
+  const readIncomingShare = new Function('utd', 'util', 'systemShare', 'loadPromptImage', 'loadPromptFile',
+    'MAX_IMAGE_ATTACHMENTS', stripTypeScriptTypes(source) + '; return readIncomingShare;')({
+    UniformDataType: { IMAGE: 'general.image', TEXT: 'general.text', HYPERLINK: 'general.hyperlink' },
+    getTypeDescriptor: id => ({
+      belongsTo: type => (type === 'general.image' && id === 'general.png') ||
+        (type === 'general.text' && id === 'general.plain-text')
+    })
+  }, { TextEncoder: class { encodeInto(value) { return new TextEncoder().encode(value); } } },
+  { getSharedData: async () => ({ getRecords: () => records }) },
+  async uri => { opened.push(uri); return { jpeg: 'image' }; },
+  async uri => assert.fail(`Unexpected file read: ${uri}`), 4);
+  const share = await readIncomingShare({}, 'com.example.pigo');
+  assert.deepEqual(opened, ['file://media/Photo/1/screenshot.png']);
+  assert.equal(share.text, 'Please inspect\n\nhttps://example.com');
+  assert.deepEqual(share.attachments, [{ kind: 'image', name: 'photo.jpg', size: 5, image: { jpeg: 'image' } }]);
+  assert.equal(share.skipped, true);
+});
 
 function createMemoryFiles() {
   const dirs = new Set();

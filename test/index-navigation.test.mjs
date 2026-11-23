@@ -4,7 +4,8 @@ import { stripTypeScriptTypes } from 'node:module';
 import { test } from 'node:test';
 import './harmony-modules.mjs';
 import { pageSource } from './harmony-source.mjs';
-const { computerGroups, computerGroupTitle, moveComputerConnection, renameComputerGroup } = await import('../harmony/entry/src/main/ets/ComputerGroups.ets');
+const { computerGroupId, computerGroups, computerGroupTitle, moveComputerConnection, renameComputerGroup } = await import('../harmony/entry/src/main/ets/ComputerGroups.ets');
+const { connectionLabel, validCompanion } = await import('../harmony/entry/src/main/ets/CompanionCheck.ets');
 const { SidebarRows } = await import('../harmony/entry/src/main/ets/model/SidebarRows.ets');
 const { BridgeFailure } = await import('../harmony/entry/src/main/ets/model/PiGoTypes.ets');
 const { ChatState } = await import('../harmony/entry/src/main/ets/model/ChatState.ets');
@@ -31,12 +32,12 @@ methods.push('workspaceName', 'openNewSpace', 'closeNewSpace', 'createWorkspaceT
 methods.push('dockedSessions', 'sessionPaneWidth', 'compactSessionPane', 'onWindowWidthChange');
 methods.push('chatTitle', 'updateCachedSessionTitle', 'observeSessionRun', 'observeRun', 'advanceRunNotice', 'clearRunNotices');
 methods.push('restoreSettings', 'saveSetting', 'setRunNoticesEnabled', 'setLiveViewsEnabled');
-methods.push('backgroundLiveActivity', 'syncLiveActivity');
+methods.push('backgroundLiveActivity', 'syncLiveActivity', 'canSwitchNetwork', 'tryPublicConnection');
 const liveViewCalls = [];
 const liveActivity = { sync: snapshot => liveViewCalls.push(snapshot) };
 const Page = new Function('Curve', 'BridgeFailure', 'validUsb', 'Edge', '$r', 'DialogAlignment',
   'openSettings', 'themeStyle', 'appearanceMode', 'liveActivity', 'util', 'SPLIT_WINDOW_WIDTH',
-  'RUN_NOTICE_SETTING', 'LIVE_VIEW_SETTING', 'workspaceName',
+  'RUN_NOTICE_SETTING', 'LIVE_VIEW_SETTING', 'workspaceName', 'computerGroupId', 'connectionLabel', 'validCompanion',
   stripTypeScriptTypes(`class Harness {\n${methods.map(method).join('\n')}\n}`) + '; return Harness;')(
   { EaseOut: 0 },
   BridgeFailure,
@@ -49,7 +50,7 @@ const Page = new Function('Curve', 'BridgeFailure', 'validUsb', 'Edge', '$r', 'D
   (id) => ({ id }),
   liveActivity,
   { generateRandomUUID: randomUUID },
-  SPLIT_WINDOW_WIDTH, RUN_NOTICE_SETTING, LIVE_VIEW_SETTING, workspaceName
+  SPLIT_WINDOW_WIDTH, RUN_NOTICE_SETTING, LIVE_VIEW_SETTING, workspaceName, computerGroupId, connectionLabel, validCompanion
 );
 function fixture() {
   const state = new Page();
@@ -57,6 +58,7 @@ function fixture() {
     sidebarRows: new SidebarRows(), chatState: new ChatState(), connection: new ConnectionManager(),
     sessionStore: new SessionStore(),
     resetVoice: () => {}, resetCommands: () => {}, syncCommandPalette: () => {},
+    queueRunSync: () => {}, tryPublicConnection: async () => {},
     fileDirectories: new Map(),
     syncMode: 'legacy', busy: false, sessionLoading: false, epoch: 1, reachable: true,
     runningSessionIds: [], runningSessions: [], sessionStatusAt: 0, runningCatalogAt: 0, currentId: '', idle: true, queued: false,
@@ -74,6 +76,81 @@ function fixture() {
   });
   return state;
 }
+
+test('the network watcher tracks available and lost events and releases a late registration', () => {
+  const manager = new ConnectionManager();
+  const monitors = [];
+  const createNetConnection = () => {
+    const events = new Map();
+    const monitor = {
+      events,
+      on: (event, callback) => events.set(event, callback),
+      register(callback) { this.complete = callback; },
+      unregister() { this.unregistered = true; }
+    };
+    monitors.push(monitor);
+    return monitor;
+  };
+  globalThis.pigoTestNetwork = { createNetConnection };
+  let changes = 0;
+  try {
+    manager.watchNetwork(() => { changes += 1; });
+    manager.stopWatchingNetwork();
+    manager.watchNetwork(() => { changes += 1; });
+    monitors[0].complete();
+    assert.equal(monitors[0].unregistered, true);
+    monitors[0].events.get('netLost')();
+    monitors[1].complete();
+    monitors[1].events.get('netAvailable')();
+    monitors[1].events.get('netLost')();
+    manager.stopWatchingNetwork();
+    monitors[1].events.get('netAvailable')();
+    assert.equal(changes, 2);
+    assert.equal(monitors[1].unregistered, true);
+  } finally {
+    delete globalThis.pigoTestNetwork;
+  }
+});
+
+test('public fallback reopens the same session with its draft using a paired connection in the same group', async () => {
+  const state = fixture();
+  const credentials = {
+    token: 'a'.repeat(64),
+    ca: '-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----',
+    pin: 'A'.repeat(43) + '='
+  };
+  const lan = { ...credentials, address: 'https://192.168.1.5:18981', computerId: 'mac' };
+  const remote = { ...credentials, address: 'https://93.184.216.34:8443', computerId: 'mac' };
+  const unrelated = { ...remote, address: 'https://93.184.216.35:8443', computerId: 'other' };
+  const attachment = { kind: 'file', name: 'log.txt' };
+  const calls = [];
+  Object.assign(state, {
+    computers: [lan, unrelated, remote], base: lan.address, visible: true, isPaired: true,
+    reachable: false, activeTab: 'tasks', currentId: 'one', draft: 'keep this', attachments: [attachment],
+    lastNetworkFailover: 0, tryPublicConnection: Page.prototype.tryPublicConnection,
+    draftKey(id) { return `${this.base}|${id}`; },
+    scheduleEndpoint: computer => computer,
+    request: async (path, _input, endpoint) => {
+      calls.push([path, endpoint.address]);
+      return { session: { id: 'other-session' } };
+    },
+    leaveComputer(_revoked, next) {
+      assert.equal(next, remote);
+      this.chatState.drafts.set(this.draftKey(this.currentId), this.draft);
+      this.chatState.draftAttachments.set(this.draftKey(this.currentId), this.attachments);
+      this.base = next.address;
+    },
+    requestAction: async (path, input) => {
+      calls.push([path, input.id]);
+      assert.equal(state.chatState.drafts.get(state.draftKey(input.id)), 'keep this');
+      assert.deepEqual(state.chatState.draftAttachments.get(state.draftKey(input.id)), [attachment]);
+    }
+  });
+  await state.tryPublicConnection();
+  assert.deepEqual(calls, [['/session', remote.address], ['/open', 'one']]);
+  assert.equal(state.chatState.drafts.has(`${lan.address}|one`), false);
+  assert.equal(state.chatState.draftAttachments.has(`${lan.address}|one`), false);
+});
 
 test('editor keyboard events leave the hidden chat transcript alone', () => {
   const state = fixture();

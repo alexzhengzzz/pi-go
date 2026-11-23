@@ -1,1 +1,16 @@
-{ "string": [{ "name": "microphone_permission", "value": "按住说话时将语音在本机转换为文字后发送给电脑上的 Pi 会话" }] }
+{
+  "string": [
+    {
+      "name": "microphone_permission",
+      "value": "按住说话时将语音在本机转换为文字后发送给电脑上的 Pi 会话"
+    },
+    {
+      "name": "inbox_form_name",
+      "value": "Pi Go 收件箱"
+    },
+    {
+      "name": "inbox_form_description",
+      "value": "查看待处理任务，打开 Pi Go 收件箱。"
+    }
+  ]
+}

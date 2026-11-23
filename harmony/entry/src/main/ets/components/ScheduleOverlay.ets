@@ -131,11 +131,11 @@ export struct ScheduleOverlay {
   }
   @Builder
   scheduleInboxList() {
-    List({ space: 9 }) {
+    List({ space: 8 }) {
       ListItem() {
         Row({ space: 12 }) {
           Stack() {
-            headerSymbol($r('sys.symbol.inbox'), this.accent, 18)
+            headerSymbol($r('sys.symbol.bell'), this.accent, 17)
           }.width(36).height(36).borderRadius(11).backgroundColor(this.accentTint)
           Column({ space: 3 }) {
             Text('后台通知').fontSize(15).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
@@ -147,7 +147,8 @@ export struct ScheduleOverlay {
           Toggle({ type: ToggleType.Switch, isOn: this.pushEnabled }).id('inbox-push-toggle')
             .accessibilityText('后台通知').enabled(!this.pushSaving)
             .selectedColor(this.accent).onChange((enabled: boolean) => { void this.setPushEnabled(enabled); })
-        }.width('100%').padding(12).attributeModifier(themedCardSurface(this.darkMode, this.themeId))
+        }.width('100%').padding(12).borderRadius(16).backgroundColor($r('app.color.pigo_panel'))
+          .border({ width: 1, color: $r('app.color.pigo_line') })
       }
       if (this.scheduleError || this.scheduleOffline.length) {
         ListItem() {
@@ -196,7 +197,7 @@ export struct ScheduleOverlay {
 
   @Builder
   inboxSection(title: string) {
-    Text(title).fontSize(13).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_muted'))
+    Text(title).fontSize(13).fontWeight(FontWeight.Bold).fontColor($r('app.color.pigo_muted'))
       .padding({ left: 4, top: 10, bottom: 1 }).accessibilityGroup(true)
   }
 
@@ -214,11 +215,13 @@ export struct ScheduleOverlay {
           Text(`${row.computer} · ${scheduleTime(row.run.finishedAt)}`)
             .fontSize(11).fontColor($r('app.color.pigo_muted')).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
         }.alignItems(HorizontalAlign.Start).layoutWeight(1)
-        Text(runStatus(row.run.status)).fontSize(12).fontColor(runStatusInk(row.run.status, this.accent))
-        headerSymbol($r('sys.symbol.chevron_right'), $r('app.color.pigo_muted'), 13)
+        Text(runStatus(row.run.status)).fontSize(11).fontWeight(FontWeight.Medium)
+          .fontColor(runStatusInk(row.run.status, this.accent))
+          .backgroundColor(row.run.status === 'waiting' ? $r('app.color.pigo_warning_panel') : $r('app.color.pigo_control'))
+          .padding({ left: 8, right: 8, top: 4, bottom: 4 }).borderRadius(9)
       }.width('100%').padding(12)
-    }.id(`inbox-run-${row.run.id}`).width('100%').padding(0)
-      .attributeModifier(themedCardSurface(this.darkMode, this.themeId))
+    }.id(`inbox-run-${row.run.id}`).width('100%').padding(0).borderRadius(16)
+      .backgroundColor($r('app.color.pigo_panel')).border({ width: 1, color: $r('app.color.pigo_line') })
       .enabled(!this.busy && !this.openingSession).onClick(() => { void this.openInboxRun(row); })
   }
 

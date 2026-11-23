@@ -134,6 +134,9 @@ async function rawBody(request: IncomingMessage, limit: number): Promise<Buffer>
 }
 
 type PromptContentPart = { type: "text"; text: string } | { type: "image"; mimeType: string; data: string };
+const regenerateCommand = "pi-go-regenerate";
+const hasReplyContent = (content: readonly { type: string; text?: string }[]) =>
+  content.some((part) => part.type === "image" || (part.type === "text" && !!part.text));
 
 function createProbe() {
   let runtime: { pi: ExtensionAPI; ctx: ExtensionContext } | undefined;
@@ -149,6 +152,7 @@ function createProbe() {
   let token: Buffer | undefined;
   let expiry: NodeJS.Timeout | undefined;
   let dispatchTimer: NodeJS.Timeout | undefined;
+  let regenerate: { nonce: string; run: (ctx: ExtensionCommandContext) => Promise<void> } | undefined;
   let switching = false;
   let liveText = "";
   let liveSeq = 0;
@@ -212,6 +216,24 @@ function createProbe() {
     clearTimeout(dispatchTimer);
     dispatchTimer = undefined;
   };
+  const trackDispatch = (requestId?: string, onUnconfirmed?: () => Promise<void>) => {
+    activePrompt = requestId;
+    promptError = undefined;
+    const timer = setTimeout(async () => {
+      if (onUnconfirmed) {
+        try { await onUnconfirmed(); } catch { /* The previous reply is still in the session tree. */ }
+        if (dispatchTimer !== timer) return;
+      }
+      clearDispatch();
+      regenerate = undefined;
+      promptError = "unconfirmed";
+      activePrompt = undefined;
+      emit("prompt/unconfirmed", { requestId });
+    }, 5000).unref();
+    dispatchTimer = timer;
+    registration.publish();
+    return timer;
+  };
   const removeTicket = () => {
     ticket = undefined;
     code = undefined;
@@ -229,7 +251,7 @@ function createProbe() {
       }
       const path = (request.url ?? "").split("?")[0];
       const route = `${request.method} ${path}`;
-      if (privateSocket && !["GET /session", "GET /session/snapshot", "GET /chat", "GET /history", "GET /tool-detail", "GET /message-image", "GET /message-text", "GET /sessions", "GET /models", "GET /commands", "GET /events", "POST /prompt", "POST /upload", "POST /abort", "POST /receipt", "POST /model", "POST /rename"].includes(route)) {
+      if (privateSocket && !["GET /session", "GET /session/snapshot", "GET /chat", "GET /history", "GET /tool-detail", "GET /message-image", "GET /message-text", "GET /sessions", "GET /models", "GET /commands", "GET /events", "POST /prompt", "POST /upload", "POST /abort", "POST /receipt", "POST /model", "POST /rename", "POST /fork", "POST /regenerate"].includes(route)) {
         return fail(404, "not_found");
       }
       if (route === "POST /pair") {
@@ -300,7 +322,7 @@ function createProbe() {
         });
       }
       if (route === "GET /commands") {
-        const commands = active.pi.getCommands().map((command) => ({
+        const commands = active.pi.getCommands().filter((command) => command.name !== regenerateCommand).map((command) => ({
           name: command.name,
           description: typeof command.description === "string" ? command.description.slice(0, 300) : undefined,
           source: command.source,
@@ -450,6 +472,87 @@ function createProbe() {
         return reply(response, 200, { session: status(),
           current: current && { ...modelRow(current), thinkingLevel: active.ctx.thinkingLevel, levels: levelsOf(current) } });
       }
+      if ((privateSocket && route === "POST /fork") || route === "POST /regenerate") {
+        const input = await body(request);
+        const manager = active.ctx.sessionManager;
+        if (runtime !== active || switching || input.id !== status()?.id) return fail(409, "session_changed");
+        if (dispatchTimer || !active.ctx.isIdle() || active.ctx.hasPendingMessages()) return fail(409, "session_busy");
+        const branch = manager.getBranch();
+        const index = branch.findIndex((entry) => entry.id === input.messageId);
+        const answer = branch[index];
+        if (answer?.type !== "message" || answer.message.role !== "assistant" ||
+            !hasReplyContent(answer.message.content)) {
+          return fail(404, "message_not_found");
+        }
+        if (route === "POST /fork") {
+          const source = manager.getSessionFile();
+          if (!source) return fail(409, "session_not_persisted");
+          // Operate on a separate manager so the original Pi runtime stays on its current session.
+          const copy = SessionManager.open(source, manager.getSessionDir(), active.ctx.cwd);
+          copy.createBranchedSession(answer.id);
+          const name = status()?.name || "会话";
+          copy.appendSessionInfo(`${name.slice(0, 190)}（分支）`);
+          return reply(response, 200, { id: copy.getSessionId() });
+        }
+        const prompt = branch.slice(0, index).findLast((entry) => entry.type === "message" && entry.message.role === "user");
+        if (prompt?.type !== "message" || prompt.message.role !== "user" ||
+            branch.slice(index + 1).some((entry) => entry.type === "message" &&
+              (entry.message.role === "user" || (entry.message.role === "assistant" &&
+                hasReplyContent(entry.message.content))))) {
+          return fail(409, "reply_not_latest");
+        }
+        if (!active.ctx.model) return fail(409, "model_not_found");
+        if (Array.isArray(prompt.message.content) && prompt.message.content.some((part) => part.type === "image") &&
+            !active.ctx.model.input.includes("image")) return fail(409, "image_not_supported");
+        const content = prompt.message.content;
+        const leaf = manager.getLeafId();
+        const nonce = randomBytes(16).toString("hex");
+        let restoreReply: (() => Promise<void>) | undefined;
+        // Pi exposes tree navigation through its extension command context.
+        active.pi.registerCommand(regenerateCommand, {
+          description: "Pi Go bridge reply regeneration",
+          handler: async (arg, ctx) => {
+            const pending = regenerate;
+            if (!pending || pending.nonce !== arg) return;
+            regenerate = undefined;
+            await pending.run(ctx);
+          },
+        });
+        const outcome = new Promise<boolean>((resolve) => {
+          const timeout = setTimeout(() => resolve(false), 3000).unref();
+          regenerate = { nonce, run: async (ctx) => {
+            clearTimeout(timeout);
+            try {
+              if (runtime !== active || manager.getLeafId() !== leaf ||
+                  !ctx.isIdle() || ctx.hasPendingMessages()) return resolve(false);
+              const result = await ctx.navigateTree(prompt.id);
+              if (result.cancelled) return resolve(false);
+              const rewoundLeaf = manager.getLeafId();
+              restoreReply = async () => {
+                if (runtime === active && leaf && ctx.isIdle() && !ctx.hasPendingMessages() &&
+                    manager.getLeafId() === rewoundLeaf) await ctx.navigateTree(leaf);
+              };
+              if (dispatchTimer !== timer) {
+                await restoreReply();
+                return resolve(false);
+              }
+              active.pi.sendUserMessage(content, { expandPromptTemplates: false });
+              resolve(true);
+            } catch { resolve(false); }
+          } };
+        });
+        const timer = trackDispatch(undefined, async () => { await restoreReply?.(); });
+        active.pi.sendUserMessage(`/${regenerateCommand} ${nonce}`, { expandPromptTemplates: true });
+        if (!(await outcome)) {
+          if (dispatchTimer === timer) {
+            regenerate = undefined;
+            clearDispatch();
+            registration.publish();
+          }
+          return fail(409, "regenerate_failed");
+        }
+        return reply(response, 202, { dispatched: true });
+      }
       if (route === "POST /rename") {
         const input = await body(request);
         if (runtime !== active || switching || input.id !== status()?.id) return fail(409, "session_changed");
@@ -500,7 +603,7 @@ function createProbe() {
         const commandText = input.text.trimStart().startsWith("/") ? input.text.trimStart() : undefined;
         const commandName = commandText !== undefined ? (commandText.slice(1).split(/\s/, 1)[0] ?? "") : undefined;
         const command = commandName !== undefined && commandName !== "" && /^[\w:.-]{1,80}$/.test(commandName)
-          ? active.pi.getCommands().find((row) => row.name === commandName) : undefined;
+          ? active.pi.getCommands().find((row) => row.name === commandName && row.name !== regenerateCommand) : undefined;
         if (commandName !== undefined && commandName !== "" && !command) return fail(400, "unknown_command");
         if (command && (imageCount > 0 || fileCount > 0)) return fail(400, "command_attachments");
         if (commandName !== undefined && commandName === "") return fail(400, "invalid_prompt");
@@ -564,15 +667,7 @@ function createProbe() {
           }, 250).unref();
           return reply(response, 202, { dispatched: true, requestId: input.requestId });
         }
-        activePrompt = input.requestId;
-        promptError = undefined;
-        dispatchTimer = setTimeout(() => {
-          clearDispatch();
-          promptError = "unconfirmed";
-          activePrompt = undefined;
-          emit("prompt/unconfirmed", { requestId: input.requestId });
-        }, 5000).unref();
-        registration.publish();
+        trackDispatch(input.requestId);
         return reply(response, 202, { dispatched: true, requestId: input.requestId });
       }
       return fail(404, "not_found");
@@ -626,6 +721,7 @@ function createProbe() {
     },
     unbind() {
       clearDispatch();
+      regenerate = undefined;
       titleRequest?.abort();
       runtime = undefined;
       runId = undefined;

@@ -1,5 +1,6 @@
 import { glassCardSurface, themedCardSurface } from '../Immersive';
 import { SakuraPetals } from './SakuraPetals';
+import { ThemeLiveCanvas } from './ThemeLiveCanvas';
 import { unboundAction } from './ComponentAction';
 import { Companion } from '../CredentialVault';
 import { APPEARANCE_MODES, AppearanceMode, THEME_STYLES, ThemePalette, ThemeStyle, appearanceMode, themePalette, themeStyle } from '../Appearance';
@@ -428,6 +429,8 @@ export struct SettingsView {
             .objectFit(ImageFit.Cover)
             .opacity(this.darkMode ? 0.72 : 0.78)
           SakuraPetals({ darkMode: this.darkMode, compact: true })
+        } else if (this.themeId !== 'graphite') {
+          ThemeLiveCanvas({ themeId: this.themeId, darkMode: this.darkMode, compact: true })
         }
         Column({ space: 8 }) {
           Row() {

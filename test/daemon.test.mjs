@@ -257,6 +257,31 @@ test('daemon host serves native open, new, interactions and close', { timeout: 3
   assert.equal(phoneChat.data.session.id, a.sessionId);
   assert.equal(phoneChat.data.messages.some((message) => message.text === 'History from project A'), true);
 
+  const firstReply = phoneChat.data.messages.at(-1);
+  await waitIdle(firstWorker);
+  const regenerated = await phone('/regenerate', { id: a.sessionId, messageId: firstReply.id });
+  assert.equal(regenerated.status, 202, JSON.stringify(regenerated));
+  await waitIdle(firstWorker);
+  const regeneratedChat = (await phone('/chat')).data;
+  assert.equal(regeneratedChat.session.id, a.sessionId);
+  assert.deepEqual(regeneratedChat.messages.map(({ role }) => role), ['user', 'assistant']);
+  assert.equal(regeneratedChat.messages[0].text, 'History from project A');
+  const nextReply = regeneratedChat.messages.at(-1);
+  assert.notEqual(nextReply.id, firstReply.id);
+  assert.equal((await phone('/fork', { id: a.sessionId, messageId: firstReply.id })).status, 404);
+
+  assert.equal((await phone('/prompt', { id: a.sessionId, requestId: 'after-fork-point', text: 'A later message' })).status, 202);
+  await waitIdle(firstWorker);
+  assert.equal((await phone('/regenerate', { id: a.sessionId, messageId: nextReply.id })).data.error, 'reply_not_latest');
+  const branched = await phone('/fork', { id: a.sessionId, messageId: nextReply.id, history: true });
+  assert.equal(branched.status, 200, JSON.stringify(branched));
+  assert.notEqual(branched.data.session.id, a.sessionId);
+  assert.equal(branched.data.session.cwd, first);
+  assert.deepEqual(branched.data.messages.map(({ id }) => id), regeneratedChat.messages.map(({ id }) => id));
+  assert.equal((await phone('/session')).data.session.id, branched.data.session.id);
+  assert.equal((await phone('/open', { id: a.sessionId })).status, 200);
+  assert.ok((await phone('/chat')).data.messages.some(({ text }) => text === 'A later message'));
+
   await waitIdle(firstWorker);
   await writeFile(join(first, 'existing.txt'), 'unchanged pre-existing edit\n');
   await writeFile(join(first, 'example.txt'), 'old content\n');
@@ -380,7 +405,7 @@ test('daemon host serves native open, new, interactions and close', { timeout: 3
   const afterTitle = (await phone('/sessions')).data.sessions;
   assert.equal(afterTitle.find(({ id }) => id === titledId)?.name, `标题 ${promptText}`);
   assert.deepEqual(new Set(afterTitle.map(({ id }) => id)),
-    new Set([...directory.data.sessions.map(({ id }) => id), scheduledRun.sessionId, titledId]));
+    new Set([...directory.data.sessions.map(({ id }) => id), branched.data.session.id, scheduledRun.sessionId, titledId]));
   await phone('/open', { id: a.sessionId });
   const reopened = await phone('/open', { id: titledId, history: true });
   assert.equal(reopened.data.session.name, `标题 ${promptText}`);

@@ -29,18 +29,21 @@ export async function choosePromptFiles(max: number): Promise<PromptFile[]> {
   const uris = await new picker.DocumentViewPicker().select(options);
   const files: PromptFile[] = [];
   for (const uri of uris) {
-    const name = nameFromUri(uri);
-    if (!name) continue;
-    const file = await fileIo.open(uri, fileIo.OpenMode.READ_ONLY);
-    try {
-      const size = (await fileIo.stat(file.fd)).size;
-      if (size <= 0 || size > MAX_FILE_BYTES) throw new Error('file_limit');
-      const buffer = new ArrayBuffer(size);
-      if (fileIo.readSync(file.fd, buffer) !== size) throw new Error('file_limit');
-      files.push({ name: name, size: size, bytes: new Uint8Array(buffer) });
-    } finally {
-      await fileIo.close(file).catch((): void => {});
-    }
+    if (nameFromUri(uri)) files.push(await loadPromptFile(uri));
   }
   return files;
+}
+
+export async function loadPromptFile(uri: string, title: string = ''): Promise<PromptFile> {
+  const name = safeName(title) || nameFromUri(uri) || 'shared.txt';
+  const file = await fileIo.open(uri, fileIo.OpenMode.READ_ONLY);
+  try {
+    const size = (await fileIo.stat(file.fd)).size;
+    if (size <= 0 || size > MAX_FILE_BYTES) throw new Error('file_limit');
+    const buffer = new ArrayBuffer(size);
+    if (fileIo.readSync(file.fd, buffer) !== size) throw new Error('file_limit');
+    return { name: name, size: size, bytes: new Uint8Array(buffer) };
+  } finally {
+    await fileIo.close(file).catch((): void => {});
+  }
 }

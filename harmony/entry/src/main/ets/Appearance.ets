@@ -46,7 +46,7 @@ export const THEME_STYLES: ThemeStyle[] = [
   {
     id: 'mint',
     label: '雾松玻璃',
-    subtitle: '清新松绿 · 液态通透',
+    subtitle: '林间晨雾 · 萤火漫游',
     styleTag: '玻璃',
     surface: 'glass',
     bubble: 'gradient',
@@ -71,7 +71,7 @@ export const THEME_STYLES: ThemeStyle[] = [
   {
     id: 'aurora',
     label: '极光之境',
-    subtitle: '冰青幻紫 · 双色光晕',
+    subtitle: '北欧极光 · 流星闪烁',
     styleTag: '极光',
     surface: 'glass',
     bubble: 'gradient',
@@ -96,7 +96,7 @@ export const THEME_STYLES: ThemeStyle[] = [
   {
     id: 'ocean',
     label: '晴空蔚蓝',
-    subtitle: '深海晴空 · 澄澈玻璃',
+    subtitle: '深海光柱 · 浮泡微光',
     styleTag: '玻璃',
     surface: 'glass',
     bubble: 'gradient',
@@ -121,7 +121,7 @@ export const THEME_STYLES: ThemeStyle[] = [
   {
     id: 'sunset',
     label: '落日橘海',
-    subtitle: '晚霞暖橘 · 暮光微澜',
+    subtitle: '加州海岸 · 夕阳碎波',
     styleTag: '霞光',
     surface: 'glass',
     bubble: 'gradient',
@@ -171,7 +171,7 @@ export const THEME_STYLES: ThemeStyle[] = [
   {
     id: 'tokyo',
     label: '东京夜色',
-    subtitle: '霓虹靛紫 · 锐利线框',
+    subtitle: '赛博雨夜 · 霓虹网格',
     styleTag: '霓虹',
     surface: 'terminal',
     bubble: 'outline',
@@ -196,7 +196,7 @@ export const THEME_STYLES: ThemeStyle[] = [
   {
     id: 'terminal',
     label: '极客终端',
-    subtitle: 'OLED 黑底 · 荧光绿框',
+    subtitle: '黑客代码雨 · 扫描线',
     styleTag: '终端',
     surface: 'terminal',
     bubble: 'outline',
@@ -221,7 +221,7 @@ export const THEME_STYLES: ThemeStyle[] = [
   {
     id: 'paper',
     label: '京都纸墨',
-    subtitle: '暖宣护眼 · 朱砂印泥',
+    subtitle: '枯山水纹 · 水墨涟漪',
     styleTag: '纸墨',
     surface: 'paper',
     bubble: 'tinted',
@@ -246,7 +246,7 @@ export const THEME_STYLES: ThemeStyle[] = [
   {
     id: 'iris',
     label: '暮色鸢尾',
-    subtitle: '丁香星梦 · 柔雾渐变',
+    subtitle: '星河星座 · 紫雾连星',
     styleTag: '柔雾',
     surface: 'soft',
     bubble: 'gradient',
@@ -271,7 +271,7 @@ export const THEME_STYLES: ThemeStyle[] = [
   {
     id: 'amber',
     label: '焦糖拿铁',
-    subtitle: '暖金秋叶 · 温润哑光',
+    subtitle: '咖啡暖汽 · 炉火浮光',
     styleTag: '纸墨',
     surface: 'paper',
     bubble: 'tinted',
@@ -296,7 +296,7 @@ export const THEME_STYLES: ThemeStyle[] = [
   {
     id: 'crimson',
     label: '朱砂丹霞',
-    subtitle: '绯红鎏金 · 炽热光感',
+    subtitle: '孔明灯火 · 鎏金星火',
     styleTag: '霞光',
     surface: 'glass',
     bubble: 'gradient',

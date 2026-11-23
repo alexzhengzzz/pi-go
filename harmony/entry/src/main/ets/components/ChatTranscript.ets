@@ -1,4 +1,5 @@
 import { unboundAction } from './ComponentAction';
+import { SymbolGlyphModifier } from '@kit.ArkUI';
 import { glassButtonSurface, themedCardSurface } from '../Immersive';
 import { ChatContent } from '../ChatContent';
 import { ChatImage } from '../ChatImage';
@@ -38,6 +39,9 @@ export struct ChatTranscript {
   @Prop busy: boolean;
   @Require closeMarkdownTableReader: () => void = unboundAction;
   @Require copyText: (value: string) => Promise<void> = unboundAction;
+  @Prop replyActionsEnabled: boolean;
+  @Require forkReply: (messageId: string) => void = unboundAction;
+  @Require regenerateReply: (messageId: string) => void = unboundAction;
   @Prop @Watch('onSessionChanged') currentId: string;
   @Prop darkMode: boolean;
   @Require dismissKeyboard: () => void = unboundAction;
@@ -84,6 +88,24 @@ export struct ChatTranscript {
 
   private onSessionChanged(): void {
     this.processOpenIds = [];
+  }
+
+  private latestReplyId(): string {
+    for (let index = this.messages.length - 1; index >= 0; index--) {
+      const message = this.messages[index];
+      if (message.role === 'user') return '';
+      if (message.text || message.imageCount) return message.id;
+    }
+    return '';
+  }
+
+  private replyMenu(messageId: string): MenuElement[] {
+    return [{
+      value: '创建新的分支对话',
+      symbolIcon: new SymbolGlyphModifier($r('sys.symbol.shuffle')).fontSize(19).fontColor([$r('app.color.pigo_text')]),
+      enabled: this.replyActionsEnabled,
+      action: () => { this.forkReply(messageId); }
+    }];
   }
 
   private isProcessOpen(processId: string): boolean {
@@ -321,8 +343,6 @@ export struct ChatTranscript {
             Button(this.loadingMessageText === turn.message.id ? '正在加载全文…' : '查看完整回复').chatAction()
               .enabled(this.reachable && !this.loadingMessageText)
               .onClick(() => { if (turn.message) void this.showFullReply(turn.message.id); })
-          } else {
-            this.copyButton('复制回复', turn.message.text)
           }
         }
         if (turn.message.imageCount) {
@@ -339,6 +359,9 @@ export struct ChatTranscript {
             }.id(`image-message-${imageMessage.id}`).alignItems(HorizontalAlign.Start)
           }
         }, (imageMessage: ChatMessage) => `${imageMessage.id}:${imageMessage.imageCount ?? 0}`)
+      }
+      if (turn.message && !turn.isLive) {
+        this.replyActions(turn.message)
       }
       if (turn.liveText) {
         Column({ space: 8 }) {
@@ -528,11 +551,30 @@ export struct ChatTranscript {
   }
 
   @Builder
-  copyButton(label: string, value: string) {
-    Button({ type: ButtonType.Normal }) {
-      SymbolGlyph($r('sys.symbol.rectangle_on_rectangle')).fontSize(17).fontColor([$r('app.color.pigo_muted')])
-    }.width(36).height(36).padding(0).borderRadius(10).backgroundColor(Color.Transparent)
-      .accessibilityText(label).onClick(() => { void this.copyText(value); })
+  replyActions(message: ChatMessage) {
+    Row({ space: 4 }) {
+      if (message.id === this.latestReplyId()) {
+        Button({ type: ButtonType.Normal }) {
+          headerSymbol($r('sys.symbol.arrow_clockwise'), $r('app.color.pigo_muted'), 20)
+        }.headerAction().id(`reply-regenerate-${message.id}`).enabled(this.replyActionsEnabled)
+          .accessibilityText('重新生成回复').onClick(() => { this.regenerateReply(message.id); })
+      }
+      if (message.text && !message.textTruncated) {
+        Button({ type: ButtonType.Normal }) {
+          headerSymbol($r('sys.symbol.rectangle_on_rectangle'), $r('app.color.pigo_muted'), 18)
+        }.headerAction().accessibilityText('复制回复').onClick(() => { void this.copyText(message.text); })
+      }
+      Button({ type: ButtonType.Normal }) {
+        Image($r('app.media.ic_more')).width(20).height(20).fillColor($r('app.color.pigo_muted'))
+          .accessibilityLevel('no')
+      }.headerAction().id(`reply-more-${message.id}`).accessibilityText('更多回复操作')
+        .bindMenu(this.replyMenu(message.id), {
+          placement: Placement.TopLeft,
+          offset: { x: (message.id === this.latestReplyId() ? -48 : 0) + (message.text && !message.textTruncated ? -48 : 0), y: 0 },
+          backgroundColor: $r('app.color.pigo_control'),
+          borderRadius: 10
+        })
+    }.width('100%').justifyContent(FlexAlign.Start)
   }
 
   @Builder

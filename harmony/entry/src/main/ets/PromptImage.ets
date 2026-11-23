@@ -16,7 +16,7 @@ const JPEG_LIMIT = 512 * 1024;
 
 // WeChat-style pipeline: pick or shoot, downsample to at most 1280px, pack a
 // JPEG within the bridge limit, and keep a small thumbnail for the draft row.
-async function loadPromptImage(uri: string): Promise<PromptImage> {
+export async function loadPromptImage(uri: string): Promise<PromptImage> {
   const file = await fileIo.open(uri, fileIo.OpenMode.READ_ONLY);
   let source: image.ImageSource | undefined;
   let pixels: image.PixelMap | undefined;

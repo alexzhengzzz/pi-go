@@ -23,7 +23,7 @@ export class PiGoClient {
     const pin = endpoint.pin;
     const remoteCatalog = path.startsWith('/sessions?') && ca !== undefined && pin !== undefined &&
       validSecureAddress(address, ca, pin, true);
-    const slowRequest = path === '/open' || path === '/new' || path === '/create-workspace' || path === '/close-workspace';
+    const slowRequest = path === '/open' || path === '/new' || path === '/fork' || path === '/create-workspace' || path === '/close-workspace';
     const headers: Record<string, string> = {};
     if (token) headers['Authorization'] = `Bearer ${token}`;
     if (input) headers['Content-Type'] = 'application/json';
@@ -36,7 +36,7 @@ export class PiGoClient {
         usingProxy: false,
         maxRedirects: 0,
         connectTimeout: remoteCatalog ? 6000 : 2500,
-        readTimeout: remoteCatalog ? 20000 : (slowRequest ? 16000 : 6500)
+        readTimeout: remoteCatalog || path === '/fork' ? 20000 : (slowRequest ? 16000 : 6500)
       };
       if (ca && pin) {
         opts.caData = ca;

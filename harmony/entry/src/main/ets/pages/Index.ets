@@ -11,7 +11,8 @@ import { WorkspaceFiles } from '../components/WorkspaceFiles';
 import { SessionSidebar } from '../components/SessionSidebar';
 import { ChatComposer } from '../components/ChatComposer';
 import { ChatTranscript } from '../components/ChatTranscript';
-import { SakuraPetals, SakuraScene } from '../components/SakuraPetals';
+import { SakuraScene } from '../components/SakuraPetals';
+import { ThemeLiveCanvas } from '../components/ThemeLiveCanvas';
 import { RunResultView } from '../components/RunResultView';
 import { DiffLine, InboxRun, pushDeviceId, RunEvent, RunFile, RunScreenshot } from '../RunResults';
 import { notificationManager } from '@kit.NotificationKit';
@@ -54,6 +55,8 @@ import { MAX_IMAGE_ATTACHMENTS, MAX_TOTAL_IMAGE_DRAFTS, MAX_TOTAL_FILE_DRAFTS, U
   RECEIVED_FILE_DIR, RECEIVED_FILE_TTL_S, MAX_DOWNLOAD_BYTES, MAX_INLINE_IMAGE_BYTES, SPLIT_WINDOW_WIDTH,
   SHORT_WINDOW_HEIGHT, MAX_TEXT_PREVIEW_BYTES, RUN_NOTICE_SETTING, LIVE_VIEW_SETTING } from '../model/PiGoConstants';
 import { SidebarRows } from '../model/SidebarRows';
+import { IncomingShare, MAX_SHARED_DRAFT_BYTES, releaseIncomingShare, sharedDraftSize } from '../IncomingShare';
+import { InboxWidget } from '../InboxWidget';
 
 @Extend(Button)
 function chatAction() {
@@ -81,6 +84,15 @@ struct Index {
   @StorageLink('pigoPushDevice') private pushLaunchDevice: string = '';
   @StorageLink('pigoPushSession') private pushLaunchSession: string = '';
   @StorageLink('pigoPushPending') private pushLaunchPending: string = '';
+  @StorageLink('pigoIncomingShare') @Watch('onIncomingShare') private incomingShare: IncomingShare =
+    { text: '', attachments: [], skipped: false };
+  @StorageLink('pigoInboxFormLaunch') @Watch('onInboxFormLaunch') private inboxFormLaunch: boolean = false;
+  @State private shareError: string = '';
+  @State private shareTargetPicker: string = '';
+  private readonly inboxWidget: InboxWidget = new InboxWidget();
+  private networkTimer: number = -1;
+  private switchingNetwork: boolean = false;
+  private lastNetworkFailover: number = 0;
   private openingPush: boolean = false;
   private restoreChain: Promise<void> = Promise.resolve();
   @StorageLink('pigoStatusBar') statusBarHeight: number = 38;
@@ -382,10 +394,12 @@ struct Index {
   }
   onPageShow(): void {
     this.visible = true;
+    this.connection.watchNetwork((): void => { this.onNetworkChange(); });
     void this.restoreChain.then(() => {
       this.queueScheduleSync(true);
       this.queueRunSync(0);
       void this.consumePushLaunch();
+      this.onInboxFormLaunch();
     });
     this.schedule(0);
     this.startStream();
@@ -395,6 +409,7 @@ struct Index {
   }
   onPageHide(): void {
     this.visible = false;
+    this.stopNetworkMonitor();
     this.stopRunSync();
     this.stopScheduleSync();
     this.clearRunNotices();
@@ -412,6 +427,7 @@ struct Index {
   aboutToDisappear(): void {
     if (this.markdownTableReader) this.closeMarkdownTableReader();
     this.visible = false;
+    this.stopNetworkMonitor();
     this.stopRunSync();
     this.stopScheduleSync();
     this.clearRunNotices();
@@ -516,6 +532,7 @@ struct Index {
     const usb = validUsb(record.address);
     this.resetScheduleJobs();
     this.epoch += 1;
+    this.lastNetworkFailover = 0;
     this.syncMode = 'probe';
     this.historyStream = '';
     this.historyLeaf = undefined;
@@ -650,12 +667,21 @@ struct Index {
     const key = this.draftKey(session);
     const endpoint = this.connection.endpoint();
     try {
-      const work = computers.map((computer: Companion): Promise<void> => this.syncRunInbox(computer));
-      if (session && this.isPaired && this.reachable) work.push(this.syncRunResults(endpoint, session, key));
-      await Promise.all(work);
+      const inbox = Promise.all(computers.map((computer: Companion): Promise<boolean> => this.syncRunInbox(computer)));
+      const results = session && this.isPaired && this.reachable ? this.syncRunResults(endpoint, session, key) : undefined;
+      const synced = await inbox;
+      await results;
       if (this.visible) {
         this.inboxRuns = this.inboxRuns.filter((row: InboxRun): boolean =>
           this.computers.some((computer: Companion): boolean => computer.address === row.address));
+        const context = this.getUIContext().getHostContext();
+        if (context && (synced.some((ready: boolean): boolean => ready) || !this.computers.length)) {
+          const pending = new Set<string>();
+          for (const row of this.inboxRuns) {
+            if (row.run.status === 'waiting') pending.add(row.run.id);
+          }
+          void this.inboxWidget.publish(context, pending.size, this.computers.length ? Date.now() : 0);
+        }
       }
     } finally {
       this.runSyncing = false;
@@ -663,19 +689,20 @@ struct Index {
     }
   }
 
-  private async syncRunInbox(computer: Companion): Promise<void> {
+  private async syncRunInbox(computer: Companion): Promise<boolean> {
     const endpoint = this.scheduleEndpoint(computer);
     try {
       const result = await this.request('/runs/inbox', undefined, endpoint);
       if (!this.visible || !this.computers.some((item: Companion): boolean =>
-        item.address === computer.address && item.token === computer.token)) return;
+        item.address === computer.address && item.token === computer.token)) return false;
       const rows = (result.runEvents ?? []).map((run: RunEvent): InboxRun => ({
         run: run, address: computer.address, computer: this.scheduleComputerName(computer),
         unread: run.status === 'waiting' || !this.runRead.includes(run.id)
       }));
       this.inboxRuns = this.inboxRuns.filter((row: InboxRun): boolean => row.address !== computer.address).concat(rows);
-      await this.syncPushRegistration(computer, result.pushAvailable === true);
-    } catch { /* The next foreground sync can recover when the host is available. */ }
+      await this.syncPushRegistration(computer, result.pushAvailable === true).catch((): void => {});
+      return true;
+    } catch { return false; }
   }
 
   private async syncRunResults(endpoint: BridgeEndpoint, session: string, key: string): Promise<void> {
@@ -1064,6 +1091,14 @@ struct Index {
     }
   }
 
+  private onInboxFormLaunch(): void {
+    if (!this.inboxFormLaunch || !this.visible || this.loading) return;
+    this.inboxFormLaunch = false;
+    this.reviewedRun = undefined;
+    if (this.markdownTableReader) this.closeMarkdownTableReader();
+    this.showScheduleInbox();
+  }
+
   private showScheduleInbox(): void {
     this.dismissKeyboard();
     this.scheduleBanner = undefined;
@@ -1221,6 +1256,82 @@ struct Index {
     } finally {
       if (generation === this.scheduleComputerGeneration) this.scheduleSaving = false;
     }
+  }
+
+  private stopNetworkMonitor(): void {
+    this.connection.stopWatchingNetwork();
+    if (this.networkTimer !== -1) clearTimeout(this.networkTimer);
+    this.networkTimer = -1;
+  }
+
+  private onNetworkChange(): void {
+    if (!this.visible) return;
+    if (this.networkTimer !== -1) clearTimeout(this.networkTimer);
+    this.networkTimer = setTimeout((): void => {
+      this.networkTimer = -1;
+      this.lastNetworkFailover = 0;
+      if (this.isPaired && !validUsb(this.base)) {
+        this.stopStream();
+        this.startStream();
+        this.schedule(0);
+      }
+      this.queueRunSync(0);
+      this.queueScheduleSync(true);
+    }, 400);
+  }
+
+  private canSwitchNetwork(): boolean {
+    return this.visible && this.isPaired && !this.reachable && !this.busy && !this.openingSession &&
+      !this.pendingSend && !this.editingPath && !this.removeTarget && !this.scheduleSaving &&
+      !this.showNewSpace && !this.showSettings && this.schedulePage !== 'editor' &&
+      !this.textFilePreview && !this.markdownTableReader && !this.reviewedRun &&
+      this.activeTab === 'tasks' && !this.recording && !this.voicePreparing && !this.voiceFinishing;
+  }
+
+  private async tryPublicConnection(): Promise<void> {
+    if (!this.canSwitchNetwork() || this.switchingNetwork || Date.now() - this.lastNetworkFailover < 15000) return;
+    const active = this.computers.find((item: Companion): boolean => item.address === this.base);
+    if (!active || connectionLabel(active) !== 'Wi-Fi') return;
+    const alternatives = this.computers.filter((item: Companion): boolean =>
+      computerGroupId(item) === computerGroupId(active) && connectionLabel(item) === '公网' && validCompanion(item));
+    if (!alternatives.length) return;
+    this.switchingNetwork = true;
+    this.lastNetworkFailover = Date.now();
+    const epoch = this.epoch;
+    const session = this.currentId;
+    const oldKey = this.draftKey(session);
+    try {
+      for (const target of alternatives) {
+        const newKey = `${target.address}|${session}`;
+        let remote: BridgeReply;
+        try {
+          remote = await this.request('/session', undefined, this.scheduleEndpoint(target));
+        } catch { continue; }
+        if (epoch !== this.epoch || !this.canSwitchNetwork() || session !== this.currentId) return;
+        if (!this.computers.some((item: Companion): boolean =>
+          item.address === target.address && item.token === target.token &&
+          computerGroupId(item) === computerGroupId(active))) continue;
+        const targetDraft = this.chatState.drafts.get(newKey);
+        const targetAttachments = this.chatState.draftAttachments.get(newKey);
+        // Leave independent drafts and an unconfirmed send accessible at their original endpoints.
+        if (this.chatState.unconfirmed.has(newKey) || (this.draft && targetDraft) ||
+            (this.attachments.length && targetAttachments?.length)) continue;
+        const text = this.draft;
+        const attachments = this.attachments;
+        this.leaveComputer(false, target);
+        if (session && text) {
+          this.chatState.drafts.set(newKey, text);
+          this.chatState.drafts.delete(oldKey);
+        }
+        if (session && attachments.length) {
+          this.chatState.draftAttachments.set(newKey, attachments);
+          this.chatState.draftAttachments.delete(oldKey);
+        }
+        if (session && remote.session?.id !== session) await this.requestAction('/open', { id: session });
+        else if (session) this.showSessions = false;
+        return;
+      }
+    } finally { this.switchingNetwork = false; }
   }
 
   private schedule(delay: number): void {
@@ -1560,6 +1671,7 @@ struct Index {
       this.computers = this.computers.filter((record: Companion): boolean => record.address !== address);
       this.forgetDrafts(address);
       this.sessionStore.removeSidebar(address);
+      this.queueRunSync(0);
     }
     this.status = revoked ? '该电脑的配对已撤销，请重新连接。' : '';
     this.flushSidebarSave();
@@ -1578,6 +1690,7 @@ struct Index {
       this.pushRegistrations.delete(address);
     }
     this.computers = this.computers.filter((record: Companion): boolean => record.address !== address);
+    this.queueRunSync(0);
     if (this.isPaired && this.base === address) {
       this.leaveComputer();
       this.forgetDrafts(address);
@@ -1771,6 +1884,7 @@ struct Index {
       }
       this.reachable = false;
       if (!this.currentId) this.noSession = '暂时无法加载会话，请检查电脑服务和网络，正在重试…';
+      void this.tryPublicConnection();
     } finally {
       this.polling = false;
       if (epoch === this.epoch) {
@@ -1982,10 +2096,10 @@ struct Index {
     }
     const previousTitle = this.observedRuns.get(id);
     if (!this.observedRuns.delete(id) || !this.visible) return;
-    if (!stopped && this.themeId === 'sakura') {
+    if (!stopped && this.themeId !== 'graphite') {
       this.sakuraBurstKind = 'celebrate';
       this.sakuraBurstSeq += 1;
-      this.sakuraCelebrateSeq += 1;
+      if (this.themeId === 'sakura') this.sakuraCelebrateSeq += 1;
     }
     if (!this.runNoticesEnabled) return;
     this.pendingRunNotices.push({ title: title || previousTitle || '任务', stopped: stopped });
@@ -3067,7 +3181,7 @@ struct Index {
 
   private async requestAction(path: string, input?: Payload): Promise<boolean> {
     if (this.busy || this.openingSession) return false;
-    const navigation = path === '/open' || path === '/new';
+    const navigation = path === '/open' || path === '/new' || path === '/fork';
     const previous = navigation ? this.chatState.chatCache.get(this.draftKey(this.currentId)) : undefined;
     if (previous?.session) this.cacheChat(previous.session);
     const cached = path === '/open' && input?.id ? this.chatState.chatCache.get(this.draftKey(input.id)) : undefined;
@@ -3092,7 +3206,7 @@ struct Index {
         ? { id: input?.id, history: true } : input;
       const result = await this.request(path, payload);
       if (epoch !== this.epoch) return false;
-      if (path === '/new' || path === '/rename' || path === '/session-meta' || path === '/close-workspace') {
+      if (path === '/new' || path === '/fork' || path === '/rename' || path === '/session-meta' || path === '/close-workspace') {
         this.sessionCatalogLoaded = false;
         this.sessionCatalogVersion += 1;
       }
@@ -3140,6 +3254,11 @@ struct Index {
           this.cacheChat(chat.session);
         }
       }
+      if (path === '/regenerate') {
+        this.transcriptFollow = true;
+        this.pendingBottom = true;
+        this.schedule(0);
+      }
       return true;
     } catch (error) {
       if (epoch !== this.epoch) return false;
@@ -3166,12 +3285,19 @@ struct Index {
       }
       else if (error instanceof BridgeFailure && error.message === 'metadata_conflict') this.status = '会话标记已变化，请重新搜索后再操作。';
       else if (error instanceof BridgeFailure && error.message === 'model_not_found') this.status = '模型已不可用，请重新打开设置。';
-      else if (error instanceof BridgeFailure && error.message === 'session_busy') this.status = '等待当前任务和队列结束后，再应用模型设置。';
+      else if (error instanceof BridgeFailure && error.message === 'session_busy') {
+        this.status = path === '/model' ? '等待当前任务和队列结束后，再应用模型设置。' : '请等待当前任务和队列结束。';
+      }
+      else if (error instanceof BridgeFailure && error.message === 'reply_not_latest') this.status = '只有最近一轮回复可以重新生成。';
+      else if (error instanceof BridgeFailure && error.message === 'image_not_supported') this.status = '当前模型不支持原消息中的图片。';
+      else if (error instanceof BridgeFailure && error.message === 'not_found' && (path === '/fork' || path === '/regenerate')) {
+        this.status = '请更新电脑端 Pi Go 后重试。';
+      }
       else if (error instanceof BridgeFailure && error.message === 'model_not_applied') this.status = 'Pi 未应用所选模型，请在电脑上检查模型的登录状态或 API 配置。';
       else if (error instanceof BridgeFailure && error.message === 'invalid_name') this.status = '名称须为 1–200 字且不含换行。';
       else if (error instanceof BridgeFailure && error.status === 409) this.status = 'Pi 正在处理任务或会话已变化，请刷新后再试。';
       else this.status = '电脑端尚未确认操作，请刷新查看结果。';
-      if (path === '/open' && this.showSessions && this.status) {
+      if (((path === '/open' && this.showSessions) || path === '/fork' || path === '/regenerate') && this.status) {
         this.getUIContext().getPromptAction().showToast({ message: this.status });
       }
       return false;
@@ -3428,7 +3554,7 @@ struct Index {
     this.pendingSend = pending;
     this.busy = true;
     this.status = '';
-    if (this.themeId === 'sakura') {
+    if (this.themeId !== 'graphite') {
       this.sakuraBurstKind = 'send';
       this.sakuraBurstSeq += 1;
     }
@@ -3508,6 +3634,134 @@ struct Index {
     const remaining = this.chatState.reconcileSteering(this.queuedSteering, this.messages, this.draftKey(this.currentId),
       settled, this.pendingSend);
     if (remaining !== this.queuedSteering) this.queuedSteering = remaining;
+  }
+
+  private onIncomingShare(): void {
+    this.shareError = '';
+    this.shareTargetPicker = '';
+    if (this.showIncomingShare() && this.drawerOpen()) this.setDrawer(false);
+  }
+
+  private showIncomingShare(): boolean {
+    if (!this.incomingShare.text && !this.incomingShare.attachments.length && !this.incomingShare.skipped) return false;
+    if (this.shareTargetPicker === 'session' && this.drawerOpen()) return false;
+    if (this.shareTargetPicker === 'computer' && this.activeTab === 'mine' && this.minePage === 'computers') return false;
+    return true;
+  }
+
+  private shareTargetLocked(): boolean {
+    return !!this.editingPath || this.savingPreview || this.schedulePage === 'editor' ||
+      this.scheduleSaving || this.showNewSpace || this.addingComputer;
+  }
+
+  private prepareShareTarget(): boolean {
+    if (this.shareTargetLocked()) return false;
+    this.schedulePage = '';
+    this.reviewedRun = undefined;
+    this.textFilePreview = undefined;
+    if (this.markdownTableReader) this.closeMarkdownTableReader();
+    return true;
+  }
+
+  private canAddShareToCurrent(): boolean {
+    return this.isPaired && !!this.currentId && this.activeTab === 'tasks' && !this.showFiles && !this.showSettings &&
+      !this.schedulePage && !this.reviewedRun && !this.markdownTableReader && !this.textFilePreview &&
+      !this.shareTargetLocked() && !this.drawerOpen();
+  }
+
+  private clearIncomingShare(): void {
+    releaseIncomingShare(this.incomingShare);
+    this.incomingShare = { text: '', attachments: [], skipped: false };
+  }
+
+  private chooseShareSession(): void {
+    if (!this.prepareShareTarget()) return;
+    this.shareTargetPicker = 'session';
+    this.activeTab = 'tasks';
+    this.showSettings = false;
+    this.showFiles = false;
+    if (!this.dockedSessions()) this.setDrawer(true);
+    else void this.loadSessions();
+  }
+
+  private addShareToDraft(): void {
+    const incoming = this.incomingShare;
+    if (!this.canAddShareToCurrent() || this.busy || this.openingSession || this.pendingSend) return;
+    const list = this.attachments.concat(incoming.attachments);
+    const images = list.filter((item: DraftAttachment): boolean => item.kind === 'image').length;
+    const addedImages = incoming.attachments.filter((item: DraftAttachment): boolean => item.kind === 'image').length;
+    const addedFiles = incoming.attachments.length - addedImages;
+    const stored = this.storedDraftAttachments();
+    if (addedImages && !this.acceptsImage) {
+      this.shareError = '当前模型不支持图片，请换会话或切换模型。';
+      return;
+    }
+    if (images > MAX_IMAGE_ATTACHMENTS || list.length - images > MAX_FILES ||
+        stored[0] + addedImages > MAX_TOTAL_IMAGE_DRAFTS || stored[1] + addedFiles > MAX_TOTAL_FILE_DRAFTS) {
+      this.shareError = '附件草稿已满，请移除部分附件或换个会话。';
+      return;
+    }
+    const sharedText = incoming.text.startsWith('/') && !this.draft.trim() ? '> ' + incoming.text : incoming.text;
+    const draft = [this.draft, sharedText].filter((part: string): boolean => !!part).join('\n\n');
+    if (sharedDraftSize(draft) > MAX_SHARED_DRAFT_BYTES) {
+      this.shareError = '合并后超过消息长度上限，请缩短现有草稿或换个会话。';
+      return;
+    }
+    const key = this.draftKey(this.currentId);
+    this.draft = draft;
+    this.rememberDraft(this.currentId);
+    this.commitDraftAttachments(key, list);
+    this.incomingShare = { text: '', attachments: [], skipped: false };
+    this.getUIContext().getPromptAction().showToast({ message: '已加入当前会话草稿' });
+  }
+
+  @Builder
+  private incomingShareBanner() {
+    Column({ space: 6 }) {
+      Row() {
+        Text(this.incomingShare.text || this.incomingShare.attachments.length ? '分享至 Pi Go' : '无法读取分享内容')
+          .fontSize(14).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text')).layoutWeight(1)
+        Button('关闭').chatAction().height(32).onClick((): void => { this.clearIncomingShare(); })
+      }.width('100%')
+      if (this.incomingShare.text) {
+        Text(this.incomingShare.text).fontSize(13).fontColor($r('app.color.pigo_text')).maxLines(2)
+          .textOverflow({ overflow: TextOverflow.Ellipsis }).width('100%')
+      }
+      if (this.incomingShare.attachments.length) {
+        Text(`${this.incomingShare.attachments.length} 个附件`).fontSize(12).fontColor($r('app.color.pigo_muted')).width('100%')
+      }
+      if (this.shareError || (this.incomingShare.skipped && (this.incomingShare.text || this.incomingShare.attachments.length))) {
+        Text(this.shareError || '部分内容无法读取或超出限制。')
+          .fontSize(12).fontColor($r('app.color.pigo_muted')).width('100%')
+      }
+      if (this.incomingShare.text || this.incomingShare.attachments.length) {
+        if (!this.isPaired) {
+          Text('配对电脑并打开会话后，可加入草稿。')
+            .fontSize(12).fontColor($r('app.color.pigo_muted')).width('100%')
+        } else if (this.canAddShareToCurrent()) {
+          Text(`当前会话 · ${this.sessionName || this.project || '未命名会话'}`)
+            .fontSize(12).fontColor($r('app.color.pigo_muted')).maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis }).width('100%')
+        }
+      }
+      if ((this.incomingShare.text || this.incomingShare.attachments.length) && this.isPaired) {
+        Row({ space: 8 }) {
+          Button('选电脑').chatAction().height(36).enabled(!this.shareTargetLocked()).onClick((): void => {
+            if (!this.prepareShareTarget()) return;
+            this.shareTargetPicker = 'computer';
+            this.openComputers();
+          })
+          Button('选会话').chatAction().height(36).enabled(!this.shareTargetLocked())
+            .onClick((): void => { this.chooseShareSession(); })
+          if (this.canAddShareToCurrent()) {
+            Button('加入当前草稿').chatAction().height(36).backgroundColor(this.accent()).fontColor(this.accentForeground())
+              .enabled(!this.busy && !this.openingSession && !this.pendingSend)
+              .onClick((): void => { this.addShareToDraft(); })
+          }
+        }.width('100%')
+      }
+    }.id('incoming-share').width('93%').constraintSize({ maxWidth: 420 }).padding(14).borderRadius(18)
+      .backgroundColor($r('app.color.pigo_panel')).border({ width: 1, color: $r('app.color.pigo_line') })
   }
 
   private storedDraftAttachments(): number[] {
@@ -4563,6 +4817,13 @@ struct Index {
       busy: this.busy,
       closeMarkdownTableReader: (): void => this.closeMarkdownTableReader(),
       copyText: (value: string): Promise<void> => this.copyText(value),
+      replyActionsEnabled: this.reachable && this.idle && !this.queued && !this.busy && !this.openingSession && !this.pendingSend,
+      forkReply: (messageId: string): void => {
+        void this.requestAction('/fork', { id: this.currentId, messageId: messageId, history: this.syncMode !== 'legacy' });
+      },
+      regenerateReply: (messageId: string): void => {
+        void this.requestAction('/regenerate', { id: this.currentId, messageId: messageId });
+      },
       currentId: this.currentId,
       darkMode: this.darkMode,
       dismissKeyboard: (): void => this.dismissKeyboard(),
@@ -4657,7 +4918,7 @@ struct Index {
           this.chatTranscript()
         }.width('100%').height('100%')
           .onClick((event: ClickEvent) => {
-            if (this.themeId === 'sakura' && !this.sakuraConversationFocus()) {
+            if (this.themeId !== 'graphite' && !this.sakuraConversationFocus()) {
               this.triggerSakuraBloom(event.windowX, event.windowY);
             }
           })
@@ -5118,7 +5379,7 @@ struct Index {
       bottom: inTranscript && this.windowHeight >= SHORT_WINDOW_HEIGHT ? 24 : 8, left: 16, right: 16 })
       .layoutWeight(inTranscript ? 0 : 1).justifyContent(FlexAlign.Center)
       .onClick((event: ClickEvent) => {
-        if (this.themeId === 'sakura') this.triggerSakuraBloom(event.windowX, event.windowY);
+        if (this.themeId !== 'graphite') this.triggerSakuraBloom(event.windowX, event.windowY);
       })
   }
 
@@ -5694,8 +5955,14 @@ struct Index {
       if (this.themeId === 'sakura') {
         SakuraScene({
           darkMode: this.darkMode,
+          dimmed: this.sakuraConversationFocus(),
           girlTapSeq: this.sakuraGirlTapSeq,
           celebrateSeq: this.sakuraCelebrateSeq,
+          burstSeq: this.sakuraBurstSeq,
+          burstKind: this.sakuraBurstKind,
+          bloomSeq: this.sakuraBloomSeq,
+          bloomX: this.sakuraBloomX,
+          bloomY: this.sakuraBloomY,
           sceneOpacity: this.sakuraConversationFocus()
             ? (this.darkMode ? 0.56 : 0.60)
             : (this.darkMode ? 0.88 : 0.92)
@@ -5710,14 +5977,16 @@ struct Index {
                 : [['#C4FFF6F9', 0], ['#96FFF6F9', 0.62], ['#28FFF6F9', 1]]
             })
         }
-        SakuraPetals({
+      } else if (this.themeId !== 'graphite') {
+        ThemeLiveCanvas({
+          themeId: this.themeId,
           darkMode: this.darkMode,
           dimmed: this.sakuraConversationFocus(),
           burstSeq: this.sakuraBurstSeq,
           burstKind: this.sakuraBurstKind,
-          bloomSeq: this.sakuraBloomSeq,
-          bloomX: this.sakuraBloomX,
-          bloomY: this.sakuraBloomY
+          tapSeq: this.sakuraBloomSeq,
+          tapX: this.sakuraBloomX,
+          tapY: this.sakuraBloomY
         })
       }
     }.width('100%').height('100%').hitTestBehavior(HitTestMode.None)
@@ -5819,6 +6088,12 @@ struct Index {
           },
           citeLine: (line: DiffLine): void => this.citeRunLine(line)
         })
+      }
+      if (this.showIncomingShare()) {
+        Row() {
+          this.incomingShareBanner()
+        }.width('100%').justifyContent(FlexAlign.Center)
+          .margin({ top: this.statusBarHeight + this.headerHeight() + 8 }).hitTestBehavior(HitTestMode.Transparent)
       }
     }.width('100%').height('100%').padding({ left: this.leftInset, right: this.rightInset })
       .backgroundColor(this.drawerOpen() ? $r('app.color.pigo_sidebar') : this.themeCanvas())

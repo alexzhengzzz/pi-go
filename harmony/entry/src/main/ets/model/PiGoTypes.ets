@@ -287,6 +287,7 @@ export interface Payload {
   ticket?: string;
   cwd?: string;
   id?: string;
+  messageId?: string;
   requestId?: string;
   text?: string;
 }

@@ -1,0 +1,16 @@
+{
+  "forms": [{
+    "name": "pigo_inbox",
+    "displayName": "$string:inbox_form_name",
+    "description": "$string:inbox_form_description",
+    "src": "./ets/widget/InboxCard.ets",
+    "uiSyntax": "arkts",
+    "isDynamic": true,
+    "isDefault": true,
+    "colorMode": "auto",
+    "updateEnabled": true,
+    "updateDuration": 1,
+    "defaultDimension": "2*2",
+    "supportDimensions": ["2*2"]
+  }]
+}

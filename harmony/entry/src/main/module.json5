@@ -16,6 +16,7 @@
     ],
     "requestPermissions": [
       { "name": "ohos.permission.INTERNET" },
+      { "name": "ohos.permission.GET_NETWORK_INFO" },
       {
         "name": "ohos.permission.MICROPHONE",
         "reason": "$string:microphone_permission",
@@ -31,7 +32,26 @@
       "startWindowIcon": "$media:pigo",
       "startWindowBackground": "$color:launch_background",
       "exported": true,
-      "skills": [{ "entities": ["entity.system.home"], "actions": ["ohos.want.action.home"] }]
+      "skills": [
+        { "entities": ["entity.system.home"], "actions": ["ohos.want.action.home"] },
+        {
+          "actions": ["ohos.want.action.sendData"],
+          "uris": [
+            { "scheme": "file", "utd": "general.image", "maxFileSupported": 4 },
+            { "scheme": "file", "utd": "general.text", "maxFileSupported": 1 },
+            { "scheme": "file", "utd": "general.hyperlink", "maxFileSupported": 1 }
+          ]
+        }
+      ]
+    }],
+    "extensionAbilities": [{
+      "name": "InboxFormAbility",
+      "srcEntry": "./ets/InboxFormAbility.ets",
+      "type": "form",
+      "label": "$string:inbox_form_name",
+      "description": "$string:inbox_form_description",
+      "exported": true,
+      "metadata": [{ "name": "ohos.extension.form", "resource": "$profile:inbox_form" }]
     }]
   }
 }

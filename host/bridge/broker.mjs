@@ -412,7 +412,7 @@ async function replyOpen(request, response, worker, includeHistory) {
   return reply(response, 200, chat);
 }
 
-async function nativeHandoff(request, response, route, cwd, id, context, hasLiveProject, includeHistory = false) {
+async function nativeHandoff(request, response, route, cwd, id, context, hasLiveProject, includeHistory = false, fork) {
   if (handoffPending) return error(response, 409, 'desktop_busy');
   handoffPending = true;
   try {
@@ -421,6 +421,18 @@ async function nativeHandoff(request, response, route, cwd, id, context, hasLive
     if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
     if (!computerAccess && !hasLiveProject && !context.granted.includes(cwd)) {
       return error(response, 403, 'desktop_workspace_unshared');
+    }
+    if (fork) {
+      if (fork.version !== selectionVersion) return error(response, 409, 'session_changed');
+      const { worker, messageId } = fork;
+      const branch = await localRequest(worker.socket, 'POST', workerPath('/fork', worker.session, true),
+        { id: worker.session.id, messageId }).catch(() => undefined);
+      if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
+      if (fork.version !== selectionVersion) return error(response, 409, 'session_changed');
+      if (!branch) return error(response, 409, 'session_unavailable');
+      if (branch.status !== 200) return reply(response, branch.status, branch.data);
+      id = branch.data.id;
+      if (typeof id !== 'string' || id === worker.session.id) return error(response, 409, 'session_changed');
     }
     const result = await localRequest(context.socket, 'POST', route, { cwd, id }, 12000).catch(() => undefined);
     if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
@@ -506,7 +518,7 @@ const publicHandler = async (request, response) => {
     if (route === 'POST /schedules/sync' || route === 'POST /schedules/update') {
       return await scheduleRequest(request, response, path);
     }
-    if (!['GET /session', 'GET /session/snapshot', 'GET /chat', 'GET /history', 'GET /tool-detail', 'GET /message-image', 'GET /message-text', 'GET /sessions', 'GET /sessions/status', 'GET /models', 'GET /commands', 'GET /events', 'GET /files/download', 'POST /open', 'POST /new', 'POST /prompt', 'POST /upload', 'POST /abort', 'POST /answer', 'POST /receipt', 'POST /model', 'POST /rename', 'POST /session-meta', 'POST /create-workspace', 'POST /close-workspace', 'POST /files/list', 'POST /files/read', 'POST /files/save'].includes(route)) return error(response, 404, 'not_found');
+    if (!['GET /session', 'GET /session/snapshot', 'GET /chat', 'GET /history', 'GET /tool-detail', 'GET /message-image', 'GET /message-text', 'GET /sessions', 'GET /sessions/status', 'GET /models', 'GET /commands', 'GET /events', 'GET /files/download', 'POST /open', 'POST /new', 'POST /fork', 'POST /regenerate', 'POST /prompt', 'POST /upload', 'POST /abort', 'POST /answer', 'POST /receipt', 'POST /model', 'POST /rename', 'POST /session-meta', 'POST /create-workspace', 'POST /close-workspace', 'POST /files/list', 'POST /files/read', 'POST /files/save'].includes(route)) return error(response, 404, 'not_found');
     if (route === 'GET /events') {
       if (streams.size >= 4) return error(response, 429, 'too_many_streams');
       request.socket.setTimeout(0);
@@ -747,6 +759,12 @@ const publicHandler = async (request, response) => {
     }
     if (route === 'GET /session') return reply(response, 200, { session: current.session });
     if (input && (input.id !== current.session.id || live.filter(({ session }) => session.id === input.id).length !== 1)) return error(response, 409, 'session_changed');
+    if (route === 'POST /fork') {
+      const version = selectionVersion;
+      const context = await hostContext();
+      return await nativeHandoff(request, response, '/open', current.session.cwd, undefined, context, true,
+        input.history === true, { worker: current, messageId: input.messageId, version });
+    }
     if (route === 'POST /answer') {
       const hosts = registry.hosts();
       if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');

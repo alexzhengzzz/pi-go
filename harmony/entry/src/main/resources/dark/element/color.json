@@ -14,6 +14,12 @@
     {"name": "pigo_warning", "value": "#FFB024"},
     {"name": "pigo_warning_panel", "value": "#342A15"},
     {"name": "pigo_error", "value": "#FF9D9D"},
-    {"name": "pigo_error_panel", "value": "#4A2525"}
+    {"name": "pigo_error_panel", "value": "#4A2525"},
+    {"name": "pigo_widget_surface", "value": "#202B34"},
+    {"name": "pigo_widget_tint", "value": "#142F31"},
+    {"name": "pigo_widget_ink", "value": "#EDF6F3"},
+    {"name": "pigo_widget_accent", "value": "#A1DBCC"},
+    {"name": "pigo_widget_muted", "value": "#AFCCC9"},
+    {"name": "pigo_widget_line", "value": "#3A5558"}
   ]
 }

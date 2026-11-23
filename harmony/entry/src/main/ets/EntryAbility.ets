@@ -1,10 +1,13 @@
 import { UIAbility, Want, Configuration, ConfigurationConstant } from '@kit.AbilityKit';
 import { window } from '@kit.ArkUI';
+import { formInfo } from '@kit.FormKit';
 import { appearanceMode, openSettings } from './Appearance';
 import { liveActivity } from './LiveActivity';
+import { IncomingShare, readIncomingShare, releaseIncomingShare } from './IncomingShare';
 
 export default class EntryAbility extends UIAbility {
   private mainWindow?: window.Window;
+  private shareGeneration: number = 0;
 
   onCreate(want: Want): void {
     try {
@@ -39,7 +42,12 @@ export default class EntryAbility extends UIAbility {
     });
   }
   onWindowStageDestroy(): void { this.mainWindow = undefined; }
-  async onDestroy(): Promise<void> { await liveActivity.dispose(); }
+  async onDestroy(): Promise<void> {
+    this.shareGeneration += 1;
+    releaseIncomingShare(AppStorage.get<IncomingShare>('pigoIncomingShare'));
+    AppStorage.setOrCreate<IncomingShare>('pigoIncomingShare', { text: '', attachments: [], skipped: false });
+    await liveActivity.dispose();
+  }
 
   private trackAvoidAreas(mainWindow: window.Window): void {
     const update = (): void => {
@@ -65,7 +73,36 @@ export default class EntryAbility extends UIAbility {
     });
   }
 
+  private async receiveShare(want: Want): Promise<void> {
+    const generation = ++this.shareGeneration;
+    let share: IncomingShare;
+    try {
+      share = await readIncomingShare(want, this.context.abilityInfo.bundleName);
+    } catch {
+      share = { text: '', attachments: [], skipped: true };
+    }
+    if (generation !== this.shareGeneration) {
+      releaseIncomingShare(share);
+      return;
+    }
+    releaseIncomingShare(AppStorage.get<IncomingShare>('pigoIncomingShare'));
+    AppStorage.setOrCreate<IncomingShare>('pigoIncomingShare', share);
+  }
+
   private applyLaunch(want: Want): void {
+    if (want.action === 'ohos.want.action.sendData') {
+      void this.receiveShare(want);
+      return;
+    }
+    if (want.parameters?.[formInfo.FormParam.IDENTITY_KEY] !== undefined) {
+      const params = want.parameters?.['params'];
+      if (typeof params === 'string') {
+        try {
+          const payload = JSON.parse(params) as Record<string, string>;
+          if (payload.destination === 'inbox') AppStorage.setOrCreate<boolean>('pigoInboxFormLaunch', true);
+        } catch { /* Ignore malformed card parameters. */ }
+      }
+    }
     const pushDevice = want.parameters?.['pigoPushDevice'];
     const pushEvent = want.parameters?.['pigoPushEvent'];
     const pushSession = want.parameters?.['pigoPushSession'];
