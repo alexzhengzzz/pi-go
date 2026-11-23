@@ -6586,7 +6586,7 @@ struct Index {
             })
         }
       }
-    }.width('100%').height('100%').hitTestBehavior(HitTestMode.None)
+    }.width('100%').height(this.windowHeight).position({ x: 0, y: 0 }).hitTestBehavior(HitTestMode.None)
   }
 
   build() {
@@ -6595,6 +6595,7 @@ struct Index {
         // Reserve the sidebar's space without rebuilding the conversation or moving the session list.
         Blank().width(this.dockedSessions() ? this.sessionPaneWidth() : 0)
         Stack({ alignContent: Alignment.Bottom }) {
+          // Keep the wallpaper at window height while the keyboard resizes the conversation.
           this.themeBackdrop()
           this.mainNavigation()
           if (this.sakuraGirlInteractive()) {
