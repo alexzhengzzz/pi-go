@@ -11,15 +11,17 @@ import { WorkspaceFiles } from '../components/WorkspaceFiles';
 import { SessionSidebar } from '../components/SessionSidebar';
 import { ChatComposer } from '../components/ChatComposer';
 import { ChatTranscript } from '../components/ChatTranscript';
+import { toolActionTitle } from '../TranscriptTurns';
 import { SakuraScene } from '../components/SakuraPetals';
 import { ThemeLiveCanvas } from '../components/ThemeLiveCanvas';
+import { InkScene } from '../components/InkScene';
 import { RunResultView } from '../components/RunResultView';
 import { DiffLine, InboxRun, pushDeviceId, RunEvent, RunFile, RunScreenshot } from '../RunResults';
 import { notificationManager } from '@kit.NotificationKit';
 import { pushService } from '@kit.PushKit';
 import { KeyboardAvoidMode, window } from '@kit.ArkUI';
 import { inputMethod } from '@kit.IMEKit';
-import { ChatContent } from '../ChatContent';
+import { ChatContent, replySpeechText } from '../ChatContent';
 import { ChatImage } from '../ChatImage';
 import { http } from '@kit.NetworkKit';
 import { util } from '@kit.ArkTS';
@@ -34,6 +36,7 @@ import { Companion, CredentialVault } from '../CredentialVault';
 import { choosePromptImage, capturePromptImage, PromptImage } from '../PromptImage';
 import { choosePromptFiles, MAX_FILES } from '../PromptFile';
 import { ensureMicrophone, VoiceInputSession, voiceInputSupported } from '../VoiceInput';
+import { ReplySpeech, replySpeechSupported } from '../ReplySpeech';
 import { AppearanceMode, ThemePalette, ThemeStyle, appearanceMode, canvasFadeStops, openSettings, themePalette, themeStyle } from '../Appearance';
 import { HuaweiProfile, authorizeHuaweiProfile, isHuaweiProfileCurrent } from '../HuaweiProfile';
 import { AccountSync, CloudComputer, SyncRow, SyncSnapshot, SYNC_MODE, SYNC_THEME, computerSyncRow } from '../AccountSync';
@@ -119,6 +122,7 @@ struct Index {
   @State private schedulePage: string = '';
   @State private scheduleMessages: RunMessage[] = [];
   @State private inboxRuns: InboxRun[] = [];
+  @State private inboxCleaning: boolean = false;
   @State private pushEnabled: boolean = false;
   @State private pushSaving: boolean = false;
   @State private pushStatus: string = '';
@@ -126,6 +130,7 @@ struct Index {
   private pushTokenRequest?: Promise<string>;
   private nextPushTokenAttempt: number = 0;
   private runRead: string[] = [];
+  private dismissedInboxRuns: Set<string> = new Set<string>();
   private runSyncTimer: number = -1;
   private runSyncing: boolean = false;
   private pushRegistrations: Map<string, string> = new Map<string, string>();
@@ -278,6 +283,8 @@ struct Index {
   @State private runNoticesEnabled: boolean = true;
   @State private liveViewsEnabled: boolean = true;
   @State private liveViewStatus: string = '';
+  private liveViewSessionKey: string = '';
+  private liveViewRunId: string = '';
   @State private appearanceNotice: string = '';
   @State private huaweiProfile?: HuaweiProfile = undefined;
   @State private avatarUnavailable: boolean = false;
@@ -323,6 +330,9 @@ struct Index {
   private holdStart: number = 0;
   private recordTimer: number = -1;
   private voiceSession?: VoiceInputSession = undefined;
+  private readonly replySpeech: ReplySpeech = new ReplySpeech();
+  private replySpeechAttempt: number = 0;
+  @State private speakingReply: string = '';
   @State @Watch('updateSidebarRows') private projects: string[] = [];
   @State @Watch('updateSidebarRows') private workspaces: WorkspaceRow[] = [];
   @State @Watch('updateSidebarRows') private hasWorkspaceDetails: boolean = false;
@@ -409,6 +419,7 @@ struct Index {
   }
   onPageHide(): void {
     this.visible = false;
+    this.stopReplySpeech();
     this.stopNetworkMonitor();
     this.stopRunSync();
     this.stopScheduleSync();
@@ -425,6 +436,8 @@ struct Index {
     this.flushSidebarSave();
   }
   aboutToDisappear(): void {
+    this.stopReplySpeech();
+    this.replySpeech.dispose();
     if (this.markdownTableReader) this.closeMarkdownTableReader();
     this.visible = false;
     this.stopNetworkMonitor();
@@ -642,6 +655,7 @@ struct Index {
   }
 
   private onRunSessionChanged(): void {
+    this.stopReplySpeech();
     this.reviewedRun = undefined;
     this.reviewedFile = undefined;
     this.reviewRequest += 1;
@@ -695,7 +709,8 @@ struct Index {
       const result = await this.request('/runs/inbox', undefined, endpoint);
       if (!this.visible || !this.computers.some((item: Companion): boolean =>
         item.address === computer.address && item.token === computer.token)) return false;
-      const rows = (result.runEvents ?? []).map((run: RunEvent): InboxRun => ({
+      const rows = (result.runEvents ?? []).filter((run: RunEvent): boolean =>
+        run.status === 'waiting' || !this.dismissedInboxRuns.has(run.id)).map((run: RunEvent): InboxRun => ({
         run: run, address: computer.address, computer: this.scheduleComputerName(computer),
         unread: run.status === 'waiting' || !this.runRead.includes(run.id)
       }));
@@ -724,7 +739,29 @@ struct Index {
       if (!records.has(row.run.id) || row.address === this.base) records.set(row.run.id, row);
     }
     return Array.from(records.values()).sort((a: InboxRun, b: InboxRun): number =>
-      Number(b.run.status === 'waiting') - Number(a.run.status === 'waiting') || b.run.finishedAt - a.run.finishedAt).slice(0, 100);
+      Number(b.run.status === 'waiting') - Number(a.run.status === 'waiting') || b.run.finishedAt - a.run.finishedAt);
+  }
+
+  private async dismissInboxRuns(ids: string[]): Promise<boolean> {
+    if (this.inboxCleaning) return false;
+    const selected = new Set<string>(ids);
+    const dismissed = new Set<string>(this.dismissedInboxRuns);
+    for (const row of this.inboxRuns) {
+      if (row.run.status !== 'waiting' && selected.has(row.run.id)) dismissed.add(row.run.id);
+    }
+    this.inboxCleaning = true;
+    try {
+      await this.saveSetting('run_inbox_dismissed', JSON.stringify(Array.from(dismissed)));
+      this.dismissedInboxRuns = dismissed;
+      this.inboxRuns = this.inboxRuns.filter((row: InboxRun): boolean =>
+        row.run.status === 'waiting' || !dismissed.has(row.run.id));
+      return true;
+    } catch {
+      this.getUIContext().getPromptAction().showToast({ message: '暂时无法保存删除记录，请重试。' });
+      return false;
+    } finally {
+      this.inboxCleaning = false;
+    }
   }
 
   private async syncPushRegistration(computer: Companion, available: boolean): Promise<void> {
@@ -1062,31 +1099,44 @@ struct Index {
     }
   }
 
-  private async deleteScheduleRun(message: RunMessage): Promise<void> {
-    if (this.scheduleSaving) return;
-    const computer = this.computers.find((item: Companion): boolean => item.address === this.base)
-      ?? this.computers.find((item: Companion): boolean => item.address === message.address);
+  private async deleteScheduleRuns(messages: RunMessage[]): Promise<boolean> {
+    if (this.scheduleSaving || !messages.length) return false;
+    const computer = this.computers.find((item: Companion): boolean => item.address === this.base);
     if (!computer) {
       this.getUIContext().getPromptAction().showToast({ message: '请先连接电脑。' });
-      return;
+      return false;
     }
     const generation = this.scheduleComputerGeneration;
     this.scheduleSaving = true;
     this.scheduleError = '';
+    let deleted = 0;
+    let failureText = '';
     try {
-      const payload: Payload = { operation: 'delete-run', cwd: message.run.cwd, id: message.run.id };
-      await this.request('/schedules/update', payload, this.scheduleEndpoint(computer));
-      this.scheduleMutation += 1;
-      if (generation !== this.scheduleComputerGeneration) return;
-      this.removeScheduleMessage(message);
-      this.queueScheduleSync(true);
-    } catch (error) {
-      if (generation === this.scheduleComputerGeneration) {
-        const failure = error as Error;
-        const text = failure.message === 'schedule_missing' ? '请先更新电脑端 Pi Go。' : this.scheduleFailure(failure);
-        this.getUIContext().getPromptAction().showToast({ message: text });
+      for (const message of messages) {
+        if (generation !== this.scheduleComputerGeneration) return false;
+        try {
+          const payload: Payload = { operation: 'delete-run', cwd: message.run.cwd, id: message.run.id };
+          await this.request('/schedules/update', payload, this.scheduleEndpoint(computer));
+          this.scheduleMutation += 1;
+          this.removeScheduleMessage(message);
+          deleted += 1;
+        } catch (error) {
+          const failure = error as Error;
+          if (!failureText) failureText = failure.message === 'schedule_missing' ?
+            '请先更新电脑端 Pi Go。' : this.scheduleFailure(failure);
+          if (!(error instanceof BridgeFailure) || error.status === 401 || error.status === 404 ||
+            error.status >= 500 || failure.message === 'desktop_handoff_required' ||
+            failure.message === 'desktop_handoff_unconfirmed') break;
+        }
       }
+      if (generation !== this.scheduleComputerGeneration) return false;
+      if (failureText) {
+        const message = deleted ? `已删除 ${deleted} 条。${failureText}` : failureText;
+        this.getUIContext().getPromptAction().showToast({ message: message });
+      }
+      return deleted === messages.length;
     } finally {
+      this.queueScheduleSync(true);
       if (generation === this.scheduleComputerGeneration) this.scheduleSaving = false;
     }
   }
@@ -1123,7 +1173,7 @@ struct Index {
   }
 
   private backFromSchedule(): void {
-    if (this.scheduleSaving) return;
+    if (this.scheduleSaving || this.inboxCleaning) return;
     if (this.schedulePage === 'detail') this.schedulePage = this.schedulePrevious;
     else this.schedulePage = '';
     this.scheduleError = '';
@@ -2096,7 +2146,7 @@ struct Index {
     }
     const previousTitle = this.observedRuns.get(id);
     if (!this.observedRuns.delete(id) || !this.visible) return;
-    if (!stopped && this.themeId !== 'graphite') {
+    if (!stopped) {
       this.sakuraBurstKind = 'celebrate';
       this.sakuraBurstSeq += 1;
       if (this.themeId === 'sakura') this.sakuraCelebrateSeq += 1;
@@ -2119,23 +2169,28 @@ struct Index {
   }
 
   private backgroundLiveActivity(): boolean {
-    return this.liveViewsEnabled && this.isPaired && !!this.currentId && (!this.idle || this.queued);
+    return this.liveViewsEnabled && this.isPaired && !!this.currentId &&
+      this.liveViewSessionKey === this.draftKey(this.currentId) && (!this.idle || this.queued);
   }
 
   private syncLiveActivity(): void {
-    if (this.backgroundLiveActivity()) {
-      const listed = this.sessions.find((session: SessionRow): boolean => session.id === this.currentId);
+    if (this.liveViewSessionKey && (!this.isPaired || this.liveViewSessionKey !== this.draftKey(this.currentId) ||
+      (this.idle && !this.queued) || (this.liveViewRunId && this.runId && this.liveViewRunId !== this.runId))) {
+      this.liveViewSessionKey = '';
+      this.liveViewRunId = '';
+    }
+    const active = this.backgroundLiveActivity();
+    if (active) {
+      if (this.runId) this.liveViewRunId = this.runId;
       const state = !this.reachable ? '重新连接中' : this.interaction ? '等待处理' : this.queued ? '排队中' : '运行中';
       liveActivity.sync({
         sessionId: this.currentId,
         address: this.base,
-        title: this.sessionName || listed?.name || this.project || 'Agent 任务',
-        project: this.project,
         state: state,
         foreground: this.visible
       });
     } else liveActivity.sync(undefined);
-    if (!this.visible && !this.backgroundLiveActivity()) {
+    if (!this.visible && !active) {
       this.cancelSchedule();
       this.stopStream();
     }
@@ -2820,21 +2875,8 @@ struct Index {
     return normalizeWorkspacePath(this.workspaceCwd, this.selectedToolDetails?.path ?? tool.detail);
   }
 
-  private toolTitle(tool: LiveTool): string {
-    switch (tool.name) {
-      case 'bash': return '执行命令';
-      case 'read': return '读取文件';
-      case 'write': return '写入文件';
-      case 'edit': return '编辑文件';
-      case 'grep':
-      case 'find': return '搜索工作区';
-      case 'ls': return '列出目录';
-      case 'web_search': return '网页搜索';
-      default: return tool.name;
-    }
-  }
-
   private toolIcon(tool: LiveTool): Resource {
+    if (tool.name === 'computer_screenshot') return $r('sys.symbol.camera');
     if (tool.name === 'bash') return $r('sys.symbol.code_square');
     if (tool.name === 'grep' || tool.name === 'find' || tool.name === 'web_search') return $r('sys.symbol.magnifyingglass');
     if (tool.name === 'write' || tool.name === 'edit') return $r('sys.symbol.square_and_pencil');
@@ -2896,13 +2938,51 @@ struct Index {
     this.getUIContext().getPromptAction().showToast({ message });
   }
 
-  private async fetchFullMessageText(sessionId: string, messageId: string, epoch: number): Promise<string | undefined> {
+  private stopReplySpeech(): void {
+    if (!this.speakingReply) return;
+    this.replySpeechAttempt += 1;
+    this.speakingReply = '';
+    this.replySpeech.stop();
+  }
+
+  private async toggleReplySpeech(message: ChatMessage): Promise<void> {
+    const wasSpeaking = this.speakingReply === message.id;
+    this.stopReplySpeech();
+    if (wasSpeaking || !this.currentId) return;
+    const prompt = this.getUIContext().getPromptAction();
+    if (!replySpeechSupported()) {
+      prompt.showToast({ message: '此设备不支持本地朗读' });
+      return;
+    }
+    const attempt = ++this.replySpeechAttempt;
+    this.speakingReply = message.id;
+    const current = (): boolean => attempt === this.replySpeechAttempt;
+    const finish = (notice: string): void => {
+      if (!current()) return;
+      this.speakingReply = '';
+      if (notice) prompt.showToast({ message: notice });
+    };
+    try {
+      const source = message.textTruncated
+        ? await this.fetchFullMessageText(this.currentId, message.id, this.epoch, current) : message.text;
+      if (!current()) return;
+      if (source === undefined) { finish('暂时无法加载完整回复，请重试'); return; }
+      const text = replySpeechText(source);
+      if (!text) { finish('这条回复没有可朗读的文字'); return; }
+      await this.replySpeech.play(text, (failed: boolean): void => { finish(failed ? '暂时无法朗读，请重试' : ''); });
+    } catch {
+      finish('暂时无法朗读，请重试');
+    }
+  }
+
+  private async fetchFullMessageText(sessionId: string, messageId: string, epoch: number,
+    current?: () => boolean): Promise<string | undefined> {
     const path = `/message-text?id=${encodeURIComponent(sessionId)}&message=${encodeURIComponent(messageId)}`;
     const pages: string[] = [];
     let offset = 0;
     for (let page = 0; page < 40; page++) {
       const reply = await this.request(`${path}&offset=${offset}`);
-      if (epoch !== this.epoch || sessionId !== this.currentId) return undefined;
+      if (epoch !== this.epoch || sessionId !== this.currentId || (current && !current())) return undefined;
       if (reply.text === undefined) return undefined;
       pages.push(reply.text);
       if (reply.nextTextOffset === undefined) break;
@@ -3187,6 +3267,7 @@ struct Index {
     const cached = path === '/open' && input?.id ? this.chatState.chatCache.get(this.draftKey(input.id)) : undefined;
     let navigationConfirmed = false;
     const epoch = navigation ? ++this.epoch : this.epoch;
+    const liveRevision = this.liveRevision;
     if (navigation) {
       this.resetVoice();
       this.openingSession = true;
@@ -3255,6 +3336,7 @@ struct Index {
         }
       }
       if (path === '/regenerate') {
+        if (result.dispatched === true && input?.id === this.currentId) this.trackDispatchedLiveRun(liveRevision);
         this.transcriptFollow = true;
         this.pendingBottom = true;
         this.schedule(0);
@@ -3384,7 +3466,7 @@ struct Index {
         if (this.selectedTool) {
           Row({ space: 10 }) {
             SymbolGlyph(this.toolIcon(this.selectedTool)).fontSize(20).fontColor([this.accent()])
-            Text(this.toolTitle(this.selectedTool)).fontSize(21).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
+            Text(toolActionTitle(this.selectedTool.name)).fontSize(21).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
           }.width('100%').padding({ right: 40 })
           if (this.toolFile(this.selectedTool)) this.fileChip(this.toolFile(this.selectedTool), false)
           if (this.selectedToolDetails) {
@@ -3554,10 +3636,8 @@ struct Index {
     this.pendingSend = pending;
     this.busy = true;
     this.status = '';
-    if (this.themeId !== 'graphite') {
-      this.sakuraBurstKind = 'send';
-      this.sakuraBurstSeq += 1;
-    }
+    this.sakuraBurstKind = 'send';
+    this.sakuraBurstSeq += 1;
     try {
       const refs: AttachmentRef[] = [];
       for (let index = 0; index < pending.attachments.length; index += 1) {
@@ -3571,13 +3651,15 @@ struct Index {
         refs.push({ token: uploaded.token, kind: item.kind });
       }
       if (refs.length) this.status = '附件已上传，正在发送…';
+      const liveRevision = this.liveRevision;
       const result = await this.request('/prompt', { id: id, text: text, requestId: pending.requestId, mode: mode,
         runId: runId, attachments: refs.length ? refs : undefined });
       if (epoch !== this.epoch) return;
       if (result.dispatched !== true) throw new Error('dispatch_unconfirmed');
       this.finishSend(key, pending);
-      if (mode === 'send') this.idle = false;
-      else this.status = '引导请求已交给 Pi。';
+      if (mode === 'send') {
+        if (result.handled !== true) this.trackDispatchedLiveRun(liveRevision);
+      } else this.status = '引导请求已交给 Pi。';
     } catch (error) {
       if (epoch !== this.epoch) return;
       if (error instanceof BridgeFailure && error.status === 401) this.leaveComputer(true);
@@ -3599,6 +3681,14 @@ struct Index {
       this.busy = false;
       this.schedule(0);
     }
+  }
+
+  private trackDispatchedLiveRun(revision: number): void {
+    if (this.liveRevision === revision && this.idle) this.idle = false;
+    if (!this.visible || !this.liveViewsEnabled || (this.idle && !this.queued)) return;
+    this.liveViewSessionKey = this.draftKey(this.currentId);
+    this.liveViewRunId = this.runId;
+    this.syncLiveActivity();
   }
 
   private async uploadAttachment(kind: string, name: string, bytes: Uint8Array): Promise<UploadedAttachment> {
@@ -3925,6 +4015,7 @@ struct Index {
     if (!voiceInputSupported()) { this.showVoiceHint('此设备不支持本地语音识别'); return; }
     const context = this.getUIContext().getHostContext();
     if (!context) return;
+    this.stopReplySpeech();
     const attempt = ++this.voiceAttempt;
     const epoch = this.epoch;
     const id = this.currentId;
@@ -4136,6 +4227,12 @@ struct Index {
       this.pushEnabled = settings.getSync('run_push_enabled', false) === true;
       const runRead = JSON.parse(settings.getSync('run_inbox_read', '[]') as string) as string[];
       if (Array.isArray(runRead)) this.runRead = runRead.slice(0, 240);
+      try {
+        const dismissed = JSON.parse(settings.getSync('run_inbox_dismissed', '[]') as string) as string[];
+        if (Array.isArray(dismissed)) {
+          this.dismissedInboxRuns = new Set<string>(dismissed.filter((id: string): boolean => typeof id === 'string'));
+        }
+      } catch { /* Ignore an invalid dismissal list. */ }
       this.themeId = themeStyle(settings.getSync('theme_style', 'mint') as string).id;
       this.modeId = appearanceMode(settings.getSync('appearance_mode', 'system') as string).id;
       this.runNoticesEnabled = settings.getSync(RUN_NOTICE_SETTING, true) !== false;
@@ -4177,6 +4274,11 @@ struct Index {
 
   private async setLiveViewsEnabled(enabled: boolean): Promise<void> {
     this.liveViewsEnabled = enabled;
+    if (!enabled) {
+      this.liveViewSessionKey = '';
+      this.liveViewRunId = '';
+      this.liveViewStatus = '';
+    }
     this.syncLiveActivity();
     if (this.visible && this.backgroundLiveActivity()) {
       this.schedule(0);
@@ -4822,8 +4924,11 @@ struct Index {
         void this.requestAction('/fork', { id: this.currentId, messageId: messageId, history: this.syncMode !== 'legacy' });
       },
       regenerateReply: (messageId: string): void => {
+        if (this.speakingReply === messageId) this.stopReplySpeech();
         void this.requestAction('/regenerate', { id: this.currentId, messageId: messageId });
       },
+      speakingReply: this.speakingReply,
+      toggleReplySpeech: (message: ChatMessage): void => { void this.toggleReplySpeech(message); },
       currentId: this.currentId,
       darkMode: this.darkMode,
       dismissKeyboard: (): void => this.dismissKeyboard(),
@@ -4918,7 +5023,7 @@ struct Index {
           this.chatTranscript()
         }.width('100%').height('100%')
           .onClick((event: ClickEvent) => {
-            if (this.themeId !== 'graphite' && !this.sakuraConversationFocus()) {
+            if (!this.sakuraConversationFocus()) {
               this.triggerSakuraBloom(event.windowX, event.windowY);
             }
           })
@@ -4966,7 +5071,7 @@ struct Index {
           left: 16,
           right: 16,
           bottom: this.composerBottomMargin()
-        }).hitTestBehavior(HitTestMode.Transparent)
+        })
       }.width('100%').layoutWeight(1)
     }
   }
@@ -5379,7 +5484,7 @@ struct Index {
       bottom: inTranscript && this.windowHeight >= SHORT_WINDOW_HEIGHT ? 24 : 8, left: 16, right: 16 })
       .layoutWeight(inTranscript ? 0 : 1).justifyContent(FlexAlign.Center)
       .onClick((event: ClickEvent) => {
-        if (this.themeId !== 'graphite') this.triggerSakuraBloom(event.windowX, event.windowY);
+        this.triggerSakuraBloom(event.windowX, event.windowY);
       })
   }
 
@@ -5844,7 +5949,8 @@ struct Index {
       base: this.base,
       busy: this.busy,
       computers: this.$computers,
-      deleteScheduleRun: (message: RunMessage): Promise<void> => this.deleteScheduleRun(message),
+      deleteScheduleRuns: (messages: RunMessage[]): Promise<boolean> => this.deleteScheduleRuns(messages),
+      dismissInboxRuns: (ids: string[]): Promise<boolean> => this.dismissInboxRuns(ids),
       dismissScheduleMessage: (message: RunMessage): void => this.dismissScheduleMessage(message),
       isPaired: this.isPaired,
       openScheduleTimePicker: (): void => this.openScheduleTimePicker(),
@@ -5868,7 +5974,7 @@ struct Index {
       scheduleOffline: this.$scheduleOffline,
       schedulePage: this.schedulePage,
       schedulePrompt: this.$schedulePrompt,
-      scheduleSaving: this.scheduleSaving,
+      scheduleSaving: this.scheduleSaving || this.inboxCleaning,
       scheduleWhen: this.$scheduleWhen,
       scheduleZone: this.scheduleZone,
       showScheduleDetail: (message: RunMessage): void => this.showScheduleDetail(message),
@@ -5977,7 +6083,17 @@ struct Index {
                 : [['#C4FFF6F9', 0], ['#96FFF6F9', 0.62], ['#28FFF6F9', 1]]
             })
         }
-      } else if (this.themeId !== 'graphite') {
+      } else if (this.themeId === 'graphite') {
+        InkScene({
+          darkMode: this.darkMode,
+          dimmed: this.sakuraConversationFocus(),
+          burstSeq: this.sakuraBurstSeq,
+          burstKind: this.sakuraBurstKind,
+          tapSeq: this.sakuraBloomSeq,
+          tapX: this.sakuraBloomX,
+          tapY: this.sakuraBloomY
+        })
+      } else {
         ThemeLiveCanvas({
           themeId: this.themeId,
           darkMode: this.darkMode,

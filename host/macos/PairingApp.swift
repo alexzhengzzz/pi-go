@@ -501,7 +501,20 @@ private extension ISO8601DateFormatter {
     }()
 }
 
-@main struct PiGoApp: App {
+@main enum PiGoMain {
+    @MainActor static func main() async {
+        let args = CommandLine.arguments
+        if args.count == 3 && args[1] == "--pigo-screen-capture" {
+            // Bound the lifetime of the hidden instance even if WindowServer stops responding.
+            DispatchQueue.global().asyncAfter(deadline: .now() + 15) { exit(1) }
+            await ScreenCapture.writeResult(to: URL(fileURLWithPath: args[2], isDirectory: true))
+            return
+        }
+        PiGoApp.main()
+    }
+}
+
+struct PiGoApp: App {
     var body: some Scene {
         Window("Pi Go", id: "pairing") {
             TabView {
@@ -510,5 +523,17 @@ private extension ISO8601DateFormatter {
             }.frame(minWidth: 760, minHeight: 620)
         }
         .defaultSize(width: 800, height: 700)
+        .commands {
+            CommandGroup(after: .appInfo) {
+                Button("授权电脑截图") {
+                    if !CGPreflightScreenCaptureAccess() {
+                        _ = CGRequestScreenCaptureAccess()
+                    }
+                    if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
+                        NSWorkspace.shared.open(url)
+                    }
+                }
+            }
+        }
     }
 }

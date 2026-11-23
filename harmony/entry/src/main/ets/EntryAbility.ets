@@ -120,8 +120,8 @@ export default class EntryAbility extends UIAbility {
     const liveAddress = want.parameters?.['pigoLiveAddress'];
     if (typeof liveSession === 'string' && /^[a-zA-Z0-9._-]{1,200}$/.test(liveSession) &&
       typeof liveAddress === 'string' && liveAddress.length <= 2048) {
-      AppStorage.setOrCreate<string>('pigoLiveSession', liveSession);
       AppStorage.setOrCreate<string>('pigoLiveAddress', liveAddress);
+      AppStorage.setOrCreate<string>('pigoLiveSession', liveSession);
     }
     const address = want.parameters?.['address'];
     if (typeof address === 'string' && /^http:\/\/127\.0\.0\.1:\d{1,5}$/.test(address)) {

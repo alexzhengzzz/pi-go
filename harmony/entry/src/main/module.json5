@@ -29,7 +29,7 @@
       "launchType": "singleton",
       "label": "$string:app_name",
       "icon": "$media:pigo",
-      "startWindowIcon": "$media:pigo",
+      "startWindowIcon": "$media:pigo_launch",
       "startWindowBackground": "$color:launch_background",
       "exported": true,
       "skills": [

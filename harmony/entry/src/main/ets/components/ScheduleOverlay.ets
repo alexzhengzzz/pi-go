@@ -27,10 +27,11 @@ function headerAction() {
 export struct ScheduleOverlay {
   @StorageProp('pigoDark') private darkMode: boolean = false;
   @Require backFromSchedule: () => void = unboundAction;
-  @Prop base: string;
+  @Prop @Watch('onHistoryComputerChanged') base: string;
   @Prop busy: boolean;
   @Link computers: Companion[];
-  @Require deleteScheduleRun: (message: RunMessage) => Promise<void> = unboundAction;
+  @Require deleteScheduleRuns: (messages: RunMessage[]) => Promise<boolean> = unboundAction;
+  @Require dismissInboxRuns: (ids: string[]) => Promise<boolean> = unboundAction;
   @Require dismissScheduleMessage: (message: RunMessage) => void = unboundAction;
   @Prop isPaired: boolean;
   @Require openScheduleTimePicker: () => void = unboundAction;
@@ -52,7 +53,7 @@ export struct ScheduleOverlay {
   @Link scheduleMessages: RunMessage[];
   @Link scheduleName: string;
   @Link scheduleOffline: string[];
-  @Prop schedulePage: string;
+  @Prop @Watch('resetRunSelection') schedulePage: string;
   @Link schedulePrompt: string;
   @Prop scheduleSaving: boolean;
   @Link scheduleWhen: string;
@@ -69,6 +70,66 @@ export struct ScheduleOverlay {
   @Prop headerHeight: number;
   @Prop bottomPad: number;
   @Prop computerTitle: string;
+  @State private selectingRuns: boolean = false;
+  @State private selectedRunKeys: string[] = [];
+
+  private recentRuns(): InboxRun[] {
+    return this.inboxRuns.filter((row: InboxRun): boolean => row.run.status !== 'waiting');
+  }
+
+  private historyRuns(): RunMessage[] {
+    return this.scheduleMessages.filter((message: RunMessage): boolean =>
+      isCurrentScheduleComputer(this.computers, this.base, message));
+  }
+
+  private selectableRunKeys(): string[] {
+    return this.schedulePage === 'inbox' ? this.recentRuns().map((row: InboxRun): string => row.run.id) :
+      this.historyRuns().map((message: RunMessage): string => message.key);
+  }
+
+  private selectedKeys(): string[] {
+    return this.selectableRunKeys().filter((key: string): boolean => this.selectedRunKeys.includes(key));
+  }
+
+  private allRunsSelected(): boolean {
+    const keys = this.selectableRunKeys();
+    return keys.length > 0 && keys.every((key: string): boolean => this.selectedRunKeys.includes(key));
+  }
+
+  private resetRunSelection(): void {
+    this.selectingRuns = false;
+    this.selectedRunKeys = [];
+  }
+
+  private onHistoryComputerChanged(): void {
+    if (this.schedulePage === 'history') this.resetRunSelection();
+  }
+
+  private toggleRunSelection(key: string): void {
+    const current = this.selectedKeys();
+    this.selectedRunKeys = current.includes(key) ?
+      current.filter((id: string): boolean => id !== key) : current.concat([key]);
+  }
+
+  private async deleteSelectedRuns(): Promise<void> {
+    const keys = this.selectedKeys();
+    if (!keys.length || this.scheduleSaving) return;
+    if (this.schedulePage === 'inbox') {
+      if (await this.dismissInboxRuns(keys)) this.resetRunSelection();
+      return;
+    }
+    const messages = this.historyRuns().filter((message: RunMessage): boolean => keys.includes(message.key));
+    const computer = this.base;
+    try {
+      const result = await this.getUIContext().getPromptAction().showDialog({
+        title: '删除运行记录',
+        message: `从当前电脑删除选中的 ${messages.length} 条运行记录？`,
+        buttons: [{ text: '取消', color: $r('app.color.pigo_text') }, { text: '删除', color: $r('app.color.pigo_error') }]
+      });
+      if (result.index === 1 && this.schedulePage === 'history' && this.base === computer &&
+        await this.deleteScheduleRuns(messages)) this.resetRunSelection();
+    } catch { /* Closing the dialog cancels deletion. */ }
+  }
 
   @Builder
   overlayHeader() {
@@ -107,7 +168,9 @@ export struct ScheduleOverlay {
               .padding({ left: 16, right: 16, top: this.statusBarHeight + this.headerHeight + 14, bottom: 16 })
           }.layoutWeight(1).width('100%').align(Alignment.TopStart).scrollBar(BarState.Off)
         }
-        if (this.schedulePage === 'detail' && this.scheduleDetail?.run.sessionId) {
+        if (this.selectingRuns && (this.schedulePage === 'inbox' || this.schedulePage === 'history')) {
+          this.runSelectionActions()
+        } else if (this.schedulePage === 'detail' && this.scheduleDetail?.run.sessionId) {
           Column({ space: 8 }) {
             if (this.isPaired && !isCurrentScheduleComputer(this.computers, this.base, this.scheduleDetail)) {
               Text(`当前聊天在 ${this.computerTitle}`).fontSize(13).fontColor($r('app.color.pigo_muted'))
@@ -165,9 +228,9 @@ export struct ScheduleOverlay {
           ListItem() { this.inboxRunRow(row) }
         }, (row: InboxRun) => `${row.run.id}:${row.address}`)
       }
-      if (this.inboxRuns.some((row: InboxRun): boolean => row.run.status !== 'waiting')) {
-        ListItem() { this.inboxSection('最近会话') }
-        ForEach(this.inboxRuns.filter((row: InboxRun): boolean => row.run.status !== 'waiting'), (row: InboxRun) => {
+      if (this.recentRuns().length) {
+        ListItem() { this.selectableRunSection('最近会话') }
+        ForEach(this.recentRuns(), (row: InboxRun) => {
           ListItem() { this.inboxRunRow(row) }
         }, (row: InboxRun) => `${row.run.id}:${row.address}:${row.unread}`)
       }
@@ -202,9 +265,47 @@ export struct ScheduleOverlay {
   }
 
   @Builder
+  selectableRunSection(title: string) {
+    Row({ space: 6 }) {
+      Text(title).fontSize(13).fontWeight(FontWeight.Bold).fontColor($r('app.color.pigo_muted'))
+        .layoutWeight(1).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+      if (!this.selectingRuns && this.selectableRunKeys().length) {
+        Button('选择').chatAction().height(44).padding({ left: 12, right: 12 })
+          .enabled(!this.scheduleSaving).onClick(() => { this.selectingRuns = true; })
+      }
+    }.width('100%').padding({ left: 4, top: 4 })
+  }
+
+  @Builder
+  runSelectionActions() {
+    Row({ space: 8 }) {
+      Button('取消').chatAction().height(44).enabled(!this.scheduleSaving)
+        .onClick(() => { this.resetRunSelection(); })
+      Button(this.allRunsSelected() ? '取消全选' : '全选').chatAction().height(44)
+        .enabled(!this.scheduleSaving && this.selectableRunKeys().length > 0)
+        .onClick(() => { this.selectedRunKeys = this.allRunsSelected() ? [] : this.selectableRunKeys(); })
+      Blank()
+      Button(this.scheduleSaving ? '删除中…' : `删除（${this.selectedKeys().length}）`).chatAction()
+        .height(44).fontColor($r('app.color.pigo_error'))
+        .enabled(!this.scheduleSaving && this.selectedKeys().length > 0)
+        .onClick(() => { void this.deleteSelectedRuns(); })
+    }.width('100%').padding({ left: 16, right: 16, bottom: this.bottomPad + 8 })
+  }
+
+  @Builder
+  runSelectionMark(key: string) {
+    SymbolGlyph(this.selectedRunKeys.includes(key) ? $r('sys.symbol.checkmark_circle_fill') : $r('sys.symbol.circle'))
+      .fontSize(21).fontColor([this.selectedRunKeys.includes(key) ? this.accent : $r('app.color.pigo_muted')])
+      .accessibilityLevel('no')
+  }
+
+  @Builder
   inboxRunRow(row: InboxRun) {
     Button({ type: ButtonType.Normal }) {
       Row({ space: 11 }) {
+        if (this.selectingRuns && row.run.status !== 'waiting') {
+          this.runSelectionMark(row.run.id)
+        }
         runStatusMark(row.run.status, this.accent, this.accentTint, 36)
         Column({ space: 5 }) {
           Row({ space: 6 }) {
@@ -222,7 +323,12 @@ export struct ScheduleOverlay {
       }.width('100%').padding(12)
     }.id(`inbox-run-${row.run.id}`).width('100%').padding(0).borderRadius(16)
       .backgroundColor($r('app.color.pigo_panel')).border({ width: 1, color: $r('app.color.pigo_line') })
-      .enabled(!this.busy && !this.openingSession).onClick(() => { void this.openInboxRun(row); })
+      .accessibilitySelected(this.selectingRuns && row.run.status !== 'waiting' && this.selectedRunKeys.includes(row.run.id))
+      .enabled(this.selectingRuns && row.run.status !== 'waiting' ? !this.scheduleSaving : !this.busy && !this.openingSession)
+      .onClick(() => {
+        if (this.selectingRuns && row.run.status !== 'waiting') this.toggleRunSelection(row.run.id);
+        else void this.openInboxRun(row);
+      })
   }
 
   @Builder
@@ -241,18 +347,19 @@ export struct ScheduleOverlay {
         }
       }
       ListItem() {
-        Text(this.computerTitle).fontSize(13).fontColor($r('app.color.pigo_muted'))
+        this.selectableRunSection(this.computerTitle)
       }
-      if (!this.scheduleMessages.some((item: RunMessage): boolean => isCurrentScheduleComputer(this.computers, this.base, item))) {
+      if (!this.historyRuns().length) {
         ListItem() {
           Text('暂无运行记录').fontSize(14).fontColor($r('app.color.pigo_muted'))
         }
       }
-      ForEach(this.scheduleMessages.filter((item: RunMessage): boolean => isCurrentScheduleComputer(this.computers, this.base, item)),
+      ForEach(this.historyRuns(),
         (message: RunMessage) => {
           ListItem() {
             this.scheduledMessageRow(message)
-          }.swipeAction({ end: this.scheduleHistoryDelete.bind(this, message), edgeEffect: SwipeEdgeEffect.None })
+          }.swipeAction({ end: this.selectingRuns ? undefined : this.scheduleHistoryDelete.bind(this, message),
+            edgeEffect: SwipeEdgeEffect.None })
         }, (message: RunMessage) => `${message.key}:${message.unread}`)
     }.layoutWeight(1).width('100%').scrollBar(BarState.Off).edgeEffect(EdgeEffect.Spring)
       .contentStartOffset(this.statusBarHeight + this.headerHeight + 14)
@@ -265,7 +372,7 @@ export struct ScheduleOverlay {
       .fontColor(Color.White).backgroundColor($r('app.color.pigo_error')).borderRadius(14)
       .accessibilityText(`删除运行记录 ${message.run.name}`)
       .enabled(!this.scheduleSaving)
-      .onClick(() => { void this.deleteScheduleRun(message); })
+      .onClick(() => { void this.deleteScheduleRuns([message]); })
   }
   @Builder
   scheduleEditor() {
@@ -345,6 +452,9 @@ export struct ScheduleOverlay {
   scheduledMessageRow(message: RunMessage) {
     Button({ type: ButtonType.Normal }) {
       Row({ space: 12 }) {
+        if (this.schedulePage === 'history' && this.selectingRuns) {
+          this.runSelectionMark(message.key)
+        }
         Stack() {
           SymbolGlyph(this.scheduleStatusSymbol(message.run.status)).fontSize(19)
             .fontColor([this.scheduleStatusColor(message.run.status)])
@@ -357,11 +467,18 @@ export struct ScheduleOverlay {
           Text(scheduleTime(message.run.finishedAt ?? message.run.scheduledAt)).fontSize(12).fontColor($r('app.color.pigo_muted'))
         }.layoutWeight(1).alignItems(HorizontalAlign.Start)
         if (message.unread) Blank().width(7).height(7).borderRadius(4).backgroundColor(this.accent)
-        SymbolGlyph($r('sys.symbol.chevron_right')).fontSize(14).fontColor([$r('app.color.pigo_muted')])
+        if (this.schedulePage !== 'history' || !this.selectingRuns) {
+          SymbolGlyph($r('sys.symbol.chevron_right')).fontSize(14).fontColor([$r('app.color.pigo_muted')])
+        }
       }.width('100%').padding(12)
     }.id(`schedule-message-${message.run.id}`).width('100%').padding(0)
       .attributeModifier(themedCardSurface(this.darkMode, this.themeId))
-      .onClick(() => { this.showScheduleDetail(message); })
+      .accessibilitySelected(this.schedulePage === 'history' && this.selectingRuns && this.selectedRunKeys.includes(message.key))
+      .enabled(this.schedulePage !== 'history' || !this.selectingRuns || !this.scheduleSaving)
+      .onClick(() => {
+        if (this.schedulePage === 'history' && this.selectingRuns) this.toggleRunSelection(message.key);
+        else this.showScheduleDetail(message);
+      })
   }
   @Builder
   scheduledRunDetail(message: RunMessage) {

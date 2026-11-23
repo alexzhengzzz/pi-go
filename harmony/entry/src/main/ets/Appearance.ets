@@ -320,27 +320,27 @@ export const THEME_STYLES: ThemeStyle[] = [
   },
   {
     id: 'graphite',
-    label: '极简石墨',
-    subtitle: '冷静中性 · 纯粹克制',
-    styleTag: '极简',
-    surface: 'glass',
-    bubble: 'tinted',
+    label: '水墨石墨',
+    subtitle: '宣纸山水 · 墨竹飞鹤',
+    styleTag: '国风',
+    surface: 'paper',
+    bubble: 'gradient',
     bubbleRadius: 16,
-    cardRadius: 16,
-    codeRadius: 12,
+    cardRadius: 14,
+    codeRadius: 10,
     light: {
-      accent: '#465361', accentForeground: '#FFFFFF', accentTint: '#E7ECF1',
-      canvas: '#F8F9FB', auraTop: '#24C4D0DE', auraBottom: '#1CD2DCE6',
-      bubbleStart: '#E7ECF1', bubbleEnd: '#E7ECF1', bubbleBorder: '#D2DAE3',
-      codeBg: '#FFFFFF', codeBorder: '#DDE2E9', codeHeaderBg: '#F0F3F7',
-      cardBg: '#EBFFFFFF', cardBorder: '#D6DDE5ED', cardShadow: '#0E637587'
+      accent: '#34424E', accentForeground: '#FFFFFF', accentTint: '#E5E9EC',
+      canvas: '#F6F5F0', auraTop: '#2AC2C6C2', auraBottom: '#26B6BFC7',
+      bubbleStart: '#E8ECEE', bubbleEnd: '#F2F1EA', bubbleBorder: '#CDD4D9',
+      codeBg: '#FAF9F4', codeBorder: '#DCDCD4', codeHeaderBg: '#EFEFE8',
+      cardBg: '#F2FAF9F5', cardBorder: '#D8D9D2', cardShadow: '#122B353E'
     },
     dark: {
-      accent: '#C6D0DB', accentForeground: '#15191C', accentTint: '#2D353F',
-      canvas: '#121519', auraTop: '#223B4859', auraBottom: '#1A2B3645',
-      bubbleStart: '#2D353F', bubbleEnd: '#2D353F', bubbleBorder: '#434E5C',
-      codeBg: '#1A1F26', codeBorder: '#303843', codeHeaderBg: '#222831',
-      cardBg: '#CC1A1F26', cardBorder: '#28D8E8FA', cardShadow: '#30000000'
+      accent: '#CFD8E2', accentForeground: '#121519', accentTint: '#262E37',
+      canvas: '#111317', auraTop: '#283F4C5B', auraBottom: '#222F3A47',
+      bubbleStart: '#262E38', bubbleEnd: '#1E252D', bubbleBorder: '#424E5C',
+      codeBg: '#171B21', codeBorder: '#2C343F', codeHeaderBg: '#1E242C',
+      cardBg: '#E6181C22', cardBorder: '#343E4A', cardShadow: '#3A000000'
     }
   }
 ];

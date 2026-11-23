@@ -32,7 +32,8 @@ methods.push('workspaceName', 'openNewSpace', 'closeNewSpace', 'createWorkspaceT
 methods.push('dockedSessions', 'sessionPaneWidth', 'compactSessionPane', 'onWindowWidthChange');
 methods.push('chatTitle', 'updateCachedSessionTitle', 'observeSessionRun', 'observeRun', 'advanceRunNotice', 'clearRunNotices');
 methods.push('restoreSettings', 'saveSetting', 'setRunNoticesEnabled', 'setLiveViewsEnabled');
-methods.push('backgroundLiveActivity', 'syncLiveActivity', 'canSwitchNetwork', 'tryPublicConnection');
+methods.push('dismissInboxRuns', 'syncRunInbox', 'deleteScheduleRuns', 'removeScheduleMessage', 'scheduleFailure');
+methods.push('trackDispatchedLiveRun', 'backgroundLiveActivity', 'syncLiveActivity', 'canSwitchNetwork', 'tryPublicConnection');
 const liveViewCalls = [];
 const liveActivity = { sync: snapshot => liveViewCalls.push(snapshot) };
 const Page = new Function('Curve', 'BridgeFailure', 'validUsb', 'Edge', '$r', 'DialogAlignment',
@@ -63,7 +64,7 @@ function fixture() {
     syncMode: 'legacy', busy: false, sessionLoading: false, epoch: 1, reachable: true,
     runningSessionIds: [], runningSessions: [], sessionStatusAt: 0, runningCatalogAt: 0, currentId: '', idle: true, queued: false,
     observedRuns: new Map(), pendingRunNotices: [], runNoticeTimer: -1, runNoticesEnabled: true, messages: [],
-    settingsWrite: Promise.resolve(), liveViewsEnabled: true, syncLiveActivity: () => {},
+    settingsWrite: Promise.resolve(), liveViewsEnabled: true, liveViewSessionKey: '', liveViewRunId: '', syncLiveActivity: () => {},
     liveText: '', liveThinking: '', liveThinkSeq: 0, liveThinkingOpen: false, thinkingOpenIds: [],
     liveTools: [], liveSeq: 0, liveRevision: 0, streamAlive: false, queuedSteering: [],
     sessionCatalogLoaded: true, sessionCatalogUpdatedAt: Date.now(), sessionCatalogVersion: 0,
@@ -76,6 +77,77 @@ function fixture() {
   });
   return state;
 }
+
+test('inbox cleanup survives restart and polling while keeping pending and new runs', async () => {
+  const computer = { address: 'https://desktop', token: 'token' };
+  const events = [
+    { id: 'removed', status: 'completed' },
+    { id: 'pending', status: 'waiting' },
+    { id: 'kept', status: 'failed' },
+  ];
+  const values = new Map();
+  const settings = {
+    getSync: (key, fallback) => values.get(key) ?? fallback,
+    putSync: (key, value) => values.set(key, value),
+    flush: async () => {},
+  };
+  function restoredPage() {
+    const state = fixture();
+    Object.assign(state, {
+      computers: [computer], inboxRuns: [], visible: true, runRead: [], inboxCleaning: false,
+      scheduleEndpoint: item => item,
+      scheduleComputerName: () => 'Desktop',
+      syncPushRegistration: async () => {},
+      request: async () => ({ runEvents: events }),
+      getUIContext: () => ({ getHostContext: () => ({ settings }) }),
+    });
+    state.restoreSettings();
+    return state;
+  }
+  const state = restoredPage();
+  await state.syncRunInbox(computer);
+  assert.equal(await state.dismissInboxRuns(['removed', 'pending']), true);
+  assert.deepEqual(state.inboxRuns.map(({ run }) => run.id), ['pending', 'kept']);
+  events.push({ id: 'new', status: 'completed' });
+  const restarted = restoredPage();
+  await restarted.syncRunInbox(computer);
+  assert.deepEqual(restarted.inboxRuns.map(({ run }) => run.id), ['pending', 'kept', 'new']);
+  assert.equal(restarted.inboxRuns[0].unread, true);
+});
+
+test('bulk history deletion removes successes and retains records the computer refused to delete', async () => {
+  const state = fixture();
+  const computer = { address: 'https://desktop' };
+  const messages = ['first', 'blocked', 'last'].map(id => ({
+    key: `source:${id}`, source: 'source', run: { id, cwd: '/project' },
+  }));
+  const calls = [];
+  const toasts = [];
+  let syncs = 0;
+  Object.assign(state, {
+    base: computer.address, computers: [computer], scheduleMessages: messages,
+    scheduleMutation: 0, scheduleComputerGeneration: 1, scheduleSaving: false,
+    readScheduleRuns: () => [],
+    scheduleEndpoint: item => item,
+    queueScheduleSync: () => { syncs += 1; },
+    getUIContext: () => ({ getPromptAction: () => ({ showToast: ({ message }) => toasts.push(message) }) }),
+    request: async (path, payload, endpoint) => {
+      assert.equal(path, '/schedules/update');
+      assert.equal(endpoint, computer);
+      assert.equal(payload.operation, 'delete-run');
+      assert.equal(payload.cwd, '/project');
+      calls.push(payload.id);
+      if (payload.id === 'blocked') throw new BridgeFailure(403, 'desktop_workspace_unshared');
+    },
+  });
+  assert.equal(await state.deleteScheduleRuns(messages), false);
+  assert.deepEqual(calls, ['first', 'blocked', 'last']);
+  assert.deepEqual(state.scheduleMessages, [messages[1]]);
+  assert.match(toasts[0], /已删除 2 条/);
+  assert.equal(state.scheduleMutation, 2);
+  assert.equal(state.scheduleSaving, false);
+  assert.equal(syncs, 1);
+});
 
 test('the network watcher tracks available and lost events and releases a late registration', () => {
   const manager = new ConnectionManager();
@@ -852,20 +924,21 @@ test('disabling run notices clears existing banners and persists across app rest
   assert.equal(openPage().runNoticesEnabled, true);
 });
 
-test('live activity follows the selected run and clears when it becomes idle', () => {
+test('live activity follows a phone-dispatched run and clears when it becomes idle', () => {
   const state = fixture();
   Object.assign(state, {
     syncLiveActivity: Page.prototype.syncLiveActivity,
     visible: true, isPaired: true, currentId: 'one', idle: false, queued: false,
-    reachable: true, base: 'http://127.0.0.1:18977', project: 'pi-go', sessionName: 'Fix live view',
+    reachable: true, base: 'http://127.0.0.1:18977', runId: 'run-one',
     cancelSchedule: () => assert.fail('foreground sync must not cancel polling'),
     stopStream: () => assert.fail('foreground sync must not stop the event stream')
   });
   liveViewCalls.length = 0;
   state.syncLiveActivity();
+  assert.equal(liveViewCalls.at(-1), undefined);
+  state.trackDispatchedLiveRun(state.liveRevision);
   assert.deepEqual(liveViewCalls.at(-1), {
-    sessionId: 'one', address: 'http://127.0.0.1:18977', title: 'Fix live view',
-    project: 'pi-go', state: '运行中', foreground: true
+    sessionId: 'one', address: 'http://127.0.0.1:18977', state: '运行中', foreground: true
   });
   state.interaction = { id: 'approval' };
   state.syncLiveActivity();
@@ -881,6 +954,10 @@ test('live activity follows the selected run and clears when it becomes idle', (
   state.queued = false;
   state.syncLiveActivity();
   assert.equal(liveViewCalls.at(-1), undefined);
+  state.idle = false;
+  state.runId = 'desktop-run';
+  state.syncLiveActivity();
+  assert.equal(liveViewCalls.at(-1), undefined);
 });
 
 test('background live activity keeps syncing only while the selected run is active', () => {
@@ -889,6 +966,7 @@ test('background live activity keeps syncing only while the selected run is acti
   Object.assign(state, {
     syncLiveActivity: Page.prototype.syncLiveActivity,
     visible: false, isPaired: true, currentId: 'one', idle: false, queued: false,
+    liveViewSessionKey: 'one',
     reachable: true, base: 'http://127.0.0.1:18977', project: 'pi-go',
     cancelSchedule: () => { cancelled++; }, stopStream: () => { stopped++; }
   });

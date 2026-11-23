@@ -1,6 +1,7 @@
 import { glassCardSurface, themedCardSurface } from '../Immersive';
 import { SakuraPetals } from './SakuraPetals';
 import { ThemeLiveCanvas } from './ThemeLiveCanvas';
+import { InkScene } from './InkScene';
 import { unboundAction } from './ComponentAction';
 import { Companion } from '../CredentialVault';
 import { APPEARANCE_MODES, AppearanceMode, THEME_STYLES, ThemePalette, ThemeStyle, appearanceMode, themePalette, themeStyle } from '../Appearance';
@@ -429,7 +430,9 @@ export struct SettingsView {
             .objectFit(ImageFit.Cover)
             .opacity(this.darkMode ? 0.72 : 0.78)
           SakuraPetals({ darkMode: this.darkMode, compact: true })
-        } else if (this.themeId !== 'graphite') {
+        } else if (this.themeId === 'graphite') {
+          InkScene({ darkMode: this.darkMode, compact: true })
+        } else {
           ThemeLiveCanvas({ themeId: this.themeId, darkMode: this.darkMode, compact: true })
         }
         Column({ space: 8 }) {
@@ -625,7 +628,6 @@ export struct SettingsView {
       }.layoutWeight(1).alignItems(HorizontalAlign.Start)
       Toggle({ type: ToggleType.Switch, isOn: this.liveViewsEnabled })
         .id('live-view-setting').selectedColor(this.accent).accessibilityText('任务实况窗')
-        .enabled(this.liveViewStatus !== 'rights')
         .onChange((enabled: boolean) => { void this.setLiveViewsEnabled(enabled); })
     }.width('100%').padding(14).attributeModifier(themedCardSurface(this.darkMode, this.themeId))
   }
@@ -656,9 +658,9 @@ export struct SettingsView {
     return record?.computerName || (validUsb(this.base) ? 'USB 电脑' : (this.base.split('://')[1] || '我的电脑'));
   }
   private liveViewSummary(): string {
-    if (this.liveViewStatus === 'rights') return '当前版本暂不支持系统实况窗';
+    if (this.liveViewStatus === 'rights') return '当前设备或应用版本暂无实况窗权益';
     if (this.liveViewStatus === 'disabled') return '系统实况窗开关未开启，请在系统应用设置中开启';
     if (this.liveViewStatus === 'error') return '实况窗暂时不可用，将在运行期间自动重试';
-    return '在状态栏、锁屏和通知中心显示当前任务状态';
+    return '在状态栏、锁屏和通知中心显示从手机发起的任务状态';
   }
 }

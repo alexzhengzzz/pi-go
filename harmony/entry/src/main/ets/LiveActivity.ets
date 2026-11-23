@@ -1,12 +1,10 @@
 import { common, Want, WantAgent, wantAgent } from '@kit.AbilityKit';
-import { BusinessError } from '@kit.BasicServicesKit';
+import { BusinessError, deviceInfo } from '@kit.BasicServicesKit';
 import { liveViewManager } from '@kit.LiveViewKit';
 
 export interface LiveActivitySnapshot {
   sessionId: string;
   address: string;
-  title: string;
-  project: string;
   state: string;
   foreground: boolean;
 }
@@ -14,12 +12,6 @@ export interface LiveActivitySnapshot {
 const LIVE_VIEW_ID: number = 18977;
 const WANT_REQUEST_CODE: number = 18978;
 const RETRY_INTERVAL_MS: number = 30000;
-
-function clipped(value: string, fallback: string, max: number): string {
-  const normalized = value.replace(/[\r\n\t]+/g, ' ').trim();
-  if (!normalized) return fallback;
-  return normalized.length > max ? normalized.substring(0, max - 1) + '…' : normalized;
-}
 
 /**
  * Owns the single local live view used by the selected Agent run.
@@ -31,6 +23,7 @@ export class LiveActivityController {
   private revision: number = 0;
   private started: boolean = false;
   private activeKey: string = '';
+  private dismissedKey: string = '';
   private activeSnapshot?: LiveActivitySnapshot = undefined;
   private lastSignature: string = '';
   private sequence: number = 0;
@@ -47,8 +40,8 @@ export class LiveActivityController {
   sync(snapshot?: LiveActivitySnapshot): void {
     const revision = ++this.revision;
     this.work = this.work.then(async (): Promise<void> => {
-      if (revision !== this.revision) return;
-      await this.apply(snapshot);
+      if (snapshot && revision !== this.revision) return;
+      await this.apply(revision, snapshot);
     }).catch((error: Error): void => {
       const code = (error as BusinessError).code;
       console.warn(`[PiGoLiveView] sync failed, code=${code ?? 'unknown'}`);
@@ -62,6 +55,7 @@ export class LiveActivityController {
     this.context = undefined;
     this.clickAction = undefined;
     this.clickKey = '';
+    this.dismissedKey = '';
     this.lastSignature = '';
     this.retryAfter = 0;
     this.statusCallback = undefined;
@@ -72,24 +66,27 @@ export class LiveActivityController {
     if (this.statusCallback) this.statusCallback(status);
   }
 
-  private async apply(snapshot?: LiveActivitySnapshot): Promise<void> {
+  private async apply(revision: number, snapshot?: LiveActivitySnapshot): Promise<void> {
     if (!snapshot) {
+      this.dismissedKey = '';
       await this.stopCurrent();
-      this.lastSignature = '';
       return;
     }
     if (!this.context || Date.now() < this.retryAfter) return;
     const key = `${snapshot.address}|${snapshot.sessionId}`;
-    const signature = `${key}|${snapshot.title}|${snapshot.project}|${snapshot.state}`;
+    if (this.dismissedKey === key) return;
+    const signature = snapshot.state;
     if (this.started && this.activeKey === key && this.lastSignature === signature) return;
     if (this.started && this.activeKey !== key) await this.stopCurrent();
+    if (this.started && this.activeKey !== key) return;
     // Live View Kit only permits creation while the app is in the foreground.
     if (!this.started && !snapshot.foreground) return;
     if (this.started) await this.updateCurrent(snapshot, signature);
-    else await this.startCurrent(snapshot, key, signature);
+    else await this.startCurrent(snapshot, key, signature, revision);
   }
 
-  private async startCurrent(snapshot: LiveActivitySnapshot, key: string, signature: string): Promise<void> {
+  private async startCurrent(snapshot: LiveActivitySnapshot, key: string, signature: string,
+    revision: number): Promise<void> {
     try {
       if (!await liveViewManager.isLiveViewEnabled()) {
         this.reportError(1003500004);
@@ -97,8 +94,10 @@ export class LiveActivityController {
         return;
       }
       const view = await this.buildView(snapshot, 1, false);
+      if (revision !== this.revision) return;
       const result = await liveViewManager.startLiveView(view);
       if (result.resultCode !== 0) {
+        console.warn(`[PiGoLiveView] start result=${result.resultCode}`);
         this.reportError();
         this.deferRetry();
         return;
@@ -128,6 +127,7 @@ export class LiveActivityController {
       const active = await liveViewManager.getActiveLiveView(LIVE_VIEW_ID);
       this.started = true;
       this.activeKey = key;
+      this.activeSnapshot = snapshot;
       this.sequence = active.sequence !== undefined && active.sequence >= 0 && active.sequence < 2147483647 ?
         active.sequence : 0;
       await this.updateCurrent(snapshot, signature);
@@ -146,6 +146,7 @@ export class LiveActivityController {
       const view = await this.buildView(snapshot, ++this.sequence, false);
       const result = await liveViewManager.updateLiveView(view);
       if (result.resultCode !== 0) {
+        console.warn(`[PiGoLiveView] update result=${result.resultCode}`);
         this.reportError();
         this.deferRetry();
         return;
@@ -157,13 +158,12 @@ export class LiveActivityController {
     } catch (error) {
       const code = (error as BusinessError).code;
       console.warn(`[PiGoLiveView] update failed, code=${code ?? 'unknown'}`);
-      this.reportError(code);
       if (code === 1003500009 || code === 1003500010) {
-        this.started = false;
-        this.activeKey = '';
-        this.activeSnapshot = undefined;
-        this.lastSignature = '';
+        this.dismissedKey = this.activeKey;
+        this.clearCurrent();
+        return;
       }
+      this.reportError(code);
       this.deferRetry();
     }
   }
@@ -171,17 +171,27 @@ export class LiveActivityController {
   private async stopCurrent(): Promise<void> {
     if (!this.started) return;
     const snapshot = this.activeSnapshot;
+    if (!snapshot) return;
+    try {
+      const view = await this.buildView(snapshot, ++this.sequence, true);
+      const result = await liveViewManager.stopLiveView(view);
+      if (result.resultCode !== 0) {
+        console.warn(`[PiGoLiveView] stop result=${result.resultCode}`);
+        return;
+      }
+      this.clearCurrent();
+    } catch (error) {
+      const code = (error as BusinessError).code;
+      if (code === 1003500009 || code === 1003500010) this.clearCurrent();
+      else console.warn(`[PiGoLiveView] stop failed, code=${code ?? 'unknown'}`);
+    }
+  }
+
+  private clearCurrent(): void {
     this.started = false;
     this.activeKey = '';
     this.activeSnapshot = undefined;
     this.lastSignature = '';
-    if (!snapshot) return;
-    try {
-      const view = await this.buildView(snapshot, ++this.sequence, true);
-      await liveViewManager.stopLiveView(view);
-    } catch (error) {
-      console.warn(`[PiGoLiveView] stop failed, code=${(error as BusinessError).code ?? 'unknown'}`);
-    }
   }
 
   private deferRetry(): void {
@@ -190,19 +200,17 @@ export class LiveActivityController {
 
   private async buildView(snapshot: LiveActivitySnapshot, sequence: number,
     stopping: boolean): Promise<liveViewManager.LiveView> {
-    const title = clipped(snapshot.title, 'Agent 任务', 80);
-    const project = clipped(snapshot.project, '', 60);
-    const state = stopping ? '已结束' : clipped(snapshot.state, '运行中', 20);
+    const state = stopping ? '已结束' : snapshot.state;
     const clickAction = await this.getClickAction(snapshot);
     const primary: liveViewManager.PrimaryData = {
-      title: title,
-      content: [{ text: project ? `${project} · ${state}` : state }],
+      title: 'Agent 任务',
+      content: [{ text: state === '等待处理' ? '点按返回会话处理' : '点按查看任务' }],
       keepTime: 0,
       aliveTime: 28800,
       clickAction: clickAction,
       extensionData: {
         type: liveViewManager.ExtensionType.EXTENSION_TYPE_COMMON_TEXT,
-        text: stopping ? '已完成' : 'Pi Go'
+        text: state
       },
       layoutData: { layoutType: liveViewManager.LayoutType.LAYOUT_TYPE_DEFAULT }
     };
@@ -216,13 +224,17 @@ export class LiveActivityController {
       isContentDisplayed: true,
       isTailIconDisplayed: false
     };
-    return {
+    const view: liveViewManager.LiveView = {
       id: LIVE_VIEW_ID,
       event: 'PROGRESS',
       sequence: sequence,
       isMute: true,
       liveViewData: { primary: primary, capsule: capsule }
     };
+    if (deviceInfo.apiAvailable('26.0.0')) {
+      view.lifeCycleMode = liveViewManager.LifeCycleMode.AUTO_STOP_WHEN_APP_TERMINATE;
+    }
+    return view;
   }
 
   private async getClickAction(snapshot: LiveActivitySnapshot): Promise<WantAgent | undefined> {

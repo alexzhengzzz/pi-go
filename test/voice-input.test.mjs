@@ -32,6 +32,7 @@ function fixture(permission = Promise.resolve(true), startup = Promise.resolve()
     currentId: 'one', epoch: 1, voiceAttempt: 0, visible: true, reachable: true, idle: true,
     draft: '', holdActive: true, recordTimer: -1, voiceHintTimer: -1,
     getUIContext: () => ({ getHostContext: () => ({}) }),
+    stopReplySpeech() {},
     showVoiceHint(text) { this.voiceHint = text; },
     syncCommandPalette() {},
     async send() { this.sent = this.draft; }

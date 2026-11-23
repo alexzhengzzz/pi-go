@@ -51,6 +51,7 @@ export function toolCategoryLabel(name: string): string {
     case 'find':
     case 'web_search': return '搜索';
     case 'ls': return '目录';
+    case 'computer_screenshot': return '截图';
     default: return '操作';
   }
 }
@@ -65,6 +66,7 @@ export function toolActionTitle(name: string): string {
     case 'find': return '搜索工作区';
     case 'ls': return '列出目录';
     case 'web_search': return '网页搜索';
+    case 'computer_screenshot': return '截取电脑屏幕';
     default: return name;
   }
 }

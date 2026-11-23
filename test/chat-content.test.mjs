@@ -5,8 +5,14 @@ import { test } from 'node:test';
 import { pageSource } from './harmony-source.mjs';
 
 const chat = readFileSync(new URL('../harmony/entry/src/main/ets/ChatContent.ets', import.meta.url), 'utf8');
-const { contentBlocks, inlineParts } = new Function(stripTypeScriptTypes(chat.slice(chat.indexOf('interface'), chat.indexOf('@Component'))) +
-  '; return { contentBlocks, inlineParts };')();
+const { contentBlocks, inlineParts, replySpeechText } = new Function(stripTypeScriptTypes(
+  chat.slice(chat.indexOf('interface'), chat.indexOf('@Component')).replace('export function replySpeechText', 'function replySpeechText')) +
+  '; return { contentBlocks, inlineParts, replySpeechText };')();
+
+test('reply narration reads rendered content and omits Markdown syntax and link destinations', () => {
+  const markdown = '# 标题\n\n- [x] **完成**\n- [文档](https://example.com)\n\n| 名称 | 数值 |\n| --- | --- |\n| A | `42` |';
+  assert.equal(replySpeechText(markdown), '标题\n完成\n文档\n名称，数值\nA，42');
+});
 
 test('chat Markdown keeps code and escaped images literal and resolves image destinations', () => {
   const blocks = contentBlocks([

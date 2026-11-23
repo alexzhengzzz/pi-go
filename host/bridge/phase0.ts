@@ -6,6 +6,7 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { SessionManager, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
 import { ipcDirectory, localRequest, workerSocket } from "./local-ipc.mjs";
 import { registerSocket } from "./socket-registry.mjs";
 import { pairingRuntime } from "./pairing-runtime.mjs";
@@ -15,6 +16,7 @@ import { generatedSessionTitle, imageParts, messageText, messageTextSlice, reply
   sessionPromptText, sessionTitlePreview, toolDetail, toolDetails, toolResultText } from "./message-view.mjs";
 
 import { captureWorkspace, describeChanges, referencedArtifacts, saveRunResult } from "./run-results.mjs";
+import { captureMainDisplay } from "./screen-capture.mjs";
 
 const profile = resolve(process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent"));
 const host = "127.0.0.1";
@@ -937,6 +939,21 @@ const key = Symbol.for("pi-go.phase0.probe");
 const processState = globalThis as typeof globalThis & Record<symbol, ReturnType<typeof createProbe> | undefined>;
 
 export default function (pi: ExtensionAPI) {
+  if (process.platform === "darwin") {
+    pi.registerTool({
+      name: "computer_screenshot",
+      label: "Computer Screenshot",
+      description: "Capture one JPEG of the connected Mac's main display using Pi Go.app. Use only when the user explicitly asks to capture or inspect the current desktop.",
+      promptSnippet: "Take a screenshot of the Mac's main display on explicit request",
+      parameters: Type.Object({}, { additionalProperties: false }),
+      async execute(_toolCallId, _params, signal, _onUpdate, ctx) {
+        const image = await captureMainDisplay(pi, signal);
+        const text = ctx.model?.input.includes("image") ? "已截取 Mac 主显示器。" :
+          "已截取 Mac 主显示器。当前模型无法分析图片，可以在 Pi Go 的工具详情中查看。";
+        return { content: [{ type: "text", text }, image], details: {} };
+      },
+    });
+  }
   const stop = () => {
     processState[key]?.stop();
     delete processState[key];

@@ -48,6 +48,22 @@ function tableCells(line: string): string[] {
     .map((cell: string): string => cell.trim());
 }
 
+export function replySpeechText(source: string): string {
+  return contentBlocks(source).map((block: ContentBlock): string => {
+    if (block.kind === 'code') return block.text;
+    if (block.rows) {
+      return block.rows.map((row: string[]): string =>
+        row.map((cell: string): string => speechInline(cell)).join('，')).join('\n');
+    }
+    return speechInline(block.text);
+  }).filter((line: string): boolean => !!line.trim()).join('\n').trim();
+}
+
+function speechInline(text: string): string {
+  return inlineParts(text).map((part: InlinePart): string => part.text).join('')
+    .replace(/^[ \t]*(?:[•☑☐]|\d+[.)])[ \t]+/gm, '');
+}
+
 function appendParagraph(blocks: ContentBlock[], text: string): void {
   if (!text) return;
   // Keep inline code and escaped image syntax literal.

@@ -220,6 +220,7 @@ export interface BridgeReply {
   models?: ModelOption[];
   current?: ModelOption;
   dispatched?: boolean;
+  handled?: boolean;
   interaction?: PendingInteraction;
   state?: string;
   deletedSessionId?: string;

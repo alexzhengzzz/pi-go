@@ -16,6 +16,7 @@
     "host/bridge/socket-registry.mjs",
     "host/bridge/broker.mjs",
     "host/bridge/attachments.mjs",
+    "host/bridge/screen-capture.mjs",
     "host/bridge/message-view.mjs",
     "host/bridge/run-results.mjs",
     "host/bridge/run-push.mjs",
@@ -30,6 +31,7 @@
     "host/bridge/usb-watch.mjs",
     "host/scripts/run-remote-tunnel.py",
     "host/macos/PairingApp.swift",
+    "host/macos/ScreenCapture.swift",
     "host/scripts/build-pairing-app.sh",
     "host/bridge/computer-sessions.mjs",
     "host/scripts/install-daemon-launchd.sh"

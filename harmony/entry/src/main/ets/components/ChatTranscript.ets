@@ -40,6 +40,8 @@ export struct ChatTranscript {
   @Require closeMarkdownTableReader: () => void = unboundAction;
   @Require copyText: (value: string) => Promise<void> = unboundAction;
   @Prop replyActionsEnabled: boolean;
+  @Prop speakingReply: string = '';
+  @Require toggleReplySpeech: (message: ChatMessage) => void = unboundAction;
   @Require forkReply: (messageId: string) => void = unboundAction;
   @Require regenerateReply: (messageId: string) => void = unboundAction;
   @Prop @Watch('onSessionChanged') currentId: string;
@@ -574,6 +576,19 @@ export struct ChatTranscript {
           backgroundColor: $r('app.color.pigo_control'),
           borderRadius: 10
         })
+      if (message.text) {
+        Blank()
+        Button({ type: ButtonType.Normal }) {
+          if (this.speakingReply === message.id) {
+            headerSymbol($r('sys.symbol.stop_circle'), this.accent, 21)
+          } else {
+            headerSymbol($r('sys.symbol.speaker_wave_2'), $r('app.color.pigo_muted'), 21)
+          }
+        }.headerAction().id(`reply-speech-${message.id}`)
+          .enabled(!message.textTruncated || this.reachable || this.speakingReply === message.id)
+          .accessibilityText(this.speakingReply === message.id ? '停止朗读' : '朗读回复')
+          .onClick(() => { this.toggleReplySpeech(message); })
+      }
     }.width('100%').justifyContent(FlexAlign.Start)
   }
 
@@ -625,6 +640,7 @@ export struct ChatTranscript {
   }
 
   private toolIcon(tool: LiveTool): Resource {
+    if (tool.name === 'computer_screenshot') return $r('sys.symbol.camera');
     if (tool.name === 'bash') return $r('sys.symbol.code_square');
     if (tool.name === 'grep' || tool.name === 'find' || tool.name === 'web_search') return $r('sys.symbol.magnifyingglass');
     if (tool.name === 'write' || tool.name === 'edit') return $r('sys.symbol.square_and_pencil');

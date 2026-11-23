@@ -12,3 +12,11 @@
 Pi Go 退出后，启用的后台服务由 macOS 继续运行，用户重新登录时会启动。「停用连接」关闭所选入口并保留配对；「撤销手机配对」使所选入口的凭证失效。手机可通过后台宿主打开历史会话，也可直接接入 Mac 上已加载 Pi Go 扩展的活跃 Pi CLI 会话。
 
 后台服务从已安装的 App 内读取代码，请将 `Pi Go.app` 保持在安装位置。切换时保留 `~/.pi-go` 及 Pi 会话目录。日志位于 `~/Library/Logs`，文件名以 `dev.pi.go` 或 `com.alex.pigo.remote` 开头。
+
+## 截取 Mac 屏幕
+
+1. 构建新版 `Pi Go.app` 并放到「应用程序」。已打开的 Pi 会话需要重新加载扩展或重开。
+2. 打开新版 Pi Go.app，在菜单栏选择「Pi Go → 授权电脑截图」，在「系统设置 → 隐私与安全性 → 屏幕与系统音频录制」允许 Pi Go。若系统提示退出并重新打开应用，按提示操作。
+3. 保持 Mac 已登录，在手机 Pi Go 或终端 Pi 中发送「截一张电脑屏幕」。Pi 会调用 `computer_screenshot` 截取所连接 Mac 的主显示器。手机端可点开「截取电脑屏幕」的工具详情查看图片，支持图片输入的模型也能分析截图。截图随工具结果保存在对应的 Pi 会话中。
+
+截图由 Pi Go.app 调用 macOS 的 ScreenCaptureKit 完成。授权对象是 Pi Go.app，Pi 的 Node 进程只负责启动 App 和读取结果。开发调试时，可以用 `PIGO_SCREEN_CAPTURE_APP` 为 Pi 进程指定新版 App 的绝对路径。
