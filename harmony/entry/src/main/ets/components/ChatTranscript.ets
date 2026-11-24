@@ -33,61 +33,64 @@ function headerAction() {
   .width(44).height(44).padding(0).borderRadius(22).backgroundColor(Color.Transparent)
 }
 
-@Component
+@ComponentV2
 export struct ChatTranscript {
-  @Prop base: string;
-  @Prop busy: boolean;
-  @Require closeMarkdownTableReader: () => void = unboundAction;
-  @Require copyText: (value: string) => Promise<void> = unboundAction;
-  @Prop replyActionsEnabled: boolean;
-  @Prop speakingReply: string = '';
-  @Require toggleReplySpeech: (message: ChatMessage) => void = unboundAction;
-  @Require forkReply: (messageId: string) => void = unboundAction;
-  @Require regenerateReply: (messageId: string) => void = unboundAction;
-  @Prop @Watch('onSessionChanged') currentId: string;
-  @Prop darkMode: boolean;
-  @Require dismissKeyboard: () => void = unboundAction;
-  @Prop historyCursor?: string;
-  @Prop idle: boolean;
-  @Prop keyboardHeight: number;
-  @Prop liveText: string;
-  @Prop liveThinking: string;
-  @Link liveThinkingOpen: boolean;
-  @Link liveTools: LiveTool[];
-  @Require loadHistory: () => Promise<void> = unboundAction;
-  @Require loadHistoryImage: (sessionId: string, messageId: string, index: number, toolId: string) => Promise<string> = unboundAction;
-  @Require loadMarkdownImage: (target: string, cwd: string, documentPath: string) => Promise<string> = unboundAction;
-  @Prop loadingMessageText: string;
-  @Link messages: ChatMessage[];
-  @Prop runResults: RunEvent[] = [];
-  @Require openRunResult: (run: RunEvent) => void = unboundAction;
-  @Require openMarkdownLink: (target: string, cwd: string, documentPath: string) => Promise<void> = unboundAction;
-  @Require openMarkdownTableReader: (source: string, cwd: string, documentPath: string) => void = unboundAction;
-  @Require openReferencedFile: (cwd: string, path: string, lookupName: boolean) => Promise<void> = unboundAction;
-  @Require openToolDetails: (tool: LiveTool, messageId: string) => void = unboundAction;
-  @Prop openingFile: boolean;
-  @Require positionTranscript: (id: string, contentHeight: number) => void = unboundAction;
-  @Link queuedSteering: QueuedSteering[];
-  @Prop reachable: boolean;
-  @Require showChatImage: (source: string, label: string) => void = unboundAction;
-  @Require showFullReply: (messageId: string) => Promise<void> = unboundAction;
-  @Link thinkingOpenIds: string[];
-  @Require toggleThinking: (id: string, open: boolean) => void = unboundAction;
-  @Require transcript: Scroller = new Scroller();
-  @Link transcriptFollow: boolean;
-  @Prop workspaceCwd: string;
+  @Param @Require base: string;
+  @Param @Require busy: boolean;
+  @Event closeMarkdownTableReader: () => void = unboundAction;
+  @Event copyText: (value: string) => Promise<void> = unboundAction;
+  @Param @Require replyActionsEnabled: boolean;
+  @Param speakingReply: string = '';
+  @Event toggleReplySpeech: (message: ChatMessage) => void = unboundAction;
+  @Event forkReply: (messageId: string) => void = unboundAction;
+  @Event regenerateReply: (messageId: string) => void = unboundAction;
+  @Param @Require currentId: string;
+  @Param @Require darkMode: boolean;
+  @Event dismissKeyboard: () => void = unboundAction;
+  @Param @Require historyCursor?: string;
+  @Param @Require idle: boolean;
+  @Param @Require keyboardHeight: number;
+  @Param @Require liveText: string;
+  @Param @Require liveThinking: string;
+  @Param @Require liveThinkingOpen: boolean;
+  @Event $liveThinkingOpen: (value: boolean) => void = unboundAction;
+  @Param @Require liveTools: LiveTool[];
+  @Event loadHistory: () => Promise<void> = unboundAction;
+  @Event loadHistoryImage: (sessionId: string, messageId: string, index: number, toolId: string) => Promise<string> = unboundAction;
+  @Event loadMarkdownImage: (target: string, cwd: string, documentPath: string) => Promise<string> = unboundAction;
+  @Param @Require loadingMessageText: string;
+  @Param @Require messages: ChatMessage[];
+  @Param runResults: RunEvent[] = [];
+  @Event openRunResult: (run: RunEvent) => void = unboundAction;
+  @Event openMarkdownLink: (target: string, cwd: string, documentPath: string) => Promise<void> = unboundAction;
+  @Event openMarkdownTableReader: (source: string, cwd: string, documentPath: string) => void = unboundAction;
+  @Event openReferencedFile: (cwd: string, path: string, lookupName: boolean) => Promise<void> = unboundAction;
+  @Event openToolDetails: (tool: LiveTool, messageId: string) => void = unboundAction;
+  @Param @Require openingFile: boolean;
+  @Event positionTranscript: (id: string, contentHeight: number) => void = unboundAction;
+  @Param @Require queuedSteering: QueuedSteering[];
+  @Param @Require reachable: boolean;
+  @Event showChatImage: (source: string, label: string) => void = unboundAction;
+  @Event showFullReply: (messageId: string) => Promise<void> = unboundAction;
+  @Param @Require thinkingOpenIds: string[];
+  @Event toggleThinking: (id: string, open: boolean) => void = unboundAction;
+  @Param @Require transcript: Scroller = new Scroller();
+  @Param @Require transcriptFollow: boolean;
+  @Event $transcriptFollow: (value: boolean) => void = unboundAction;
+  @Param @Require workspaceCwd: string;
   @BuilderParam emptyTranscript: () => void = this.defaultEmptyTranscript;
-  @Prop accent: string;
-  @Prop accentTint: string;
-  @Prop themeId: string = 'mint';
-  @Prop topPadding: number = 10;
-  @Prop bottomPadding: number = 8;
-  @Prop scrollBottomOffset: number = 14;
-  @Require readTranscriptHeight: () => number = unboundAction;
-  @Require setTranscriptViewport: (height: number) => void = unboundAction;
+  @Param @Require accent: string;
+  @Param @Require accentTint: string;
+  @Param themeId: string = 'mint';
+  @Param topPadding: number = 10;
+  @Param bottomPadding: number = 8;
+  @Param scrollBottomOffset: number = 14;
+  @Event readTranscriptHeight: () => number = unboundAction;
+  @Event setTranscriptViewport: (height: number) => void = unboundAction;
 
-  @State private processOpenIds: string[] = [];
+  @Local private processOpenIds: string[] = [];
 
+  @Monitor('currentId')
   private onSessionChanged(): void {
     this.processOpenIds = [];
   }
@@ -119,7 +122,7 @@ export struct ChatTranscript {
   private toggleProcess(processId: string): void {
     if (!processId) return;
     if (processId === 'live') {
-      this.liveThinkingOpen = !this.liveThinkingOpen;
+      this.$liveThinkingOpen(!this.liveThinkingOpen);
       return;
     }
     if (this.processOpenIds.includes(processId)) {
@@ -223,11 +226,11 @@ export struct ChatTranscript {
           })
           .onWillScroll((_xOffset: number, yOffset: number, _state: ScrollState, source: ScrollSource) => {
             if (yOffset < -2 && source !== ScrollSource.SCROLLER && source !== ScrollSource.SCROLLER_ANIMATION) {
-              this.transcriptFollow = false;
+              this.$transcriptFollow(false);
             }
           })
           .onScrollEdge((side: Edge) => {
-            if (side === Edge.Bottom) this.transcriptFollow = true;
+            if (side === Edge.Bottom) this.$transcriptFollow(true);
           })
           .onAreaChange((oldArea: Area, newArea: Area) => {
             this.setTranscriptViewport(Number(newArea.height));
@@ -246,7 +249,7 @@ export struct ChatTranscript {
           headerSymbol($r('sys.symbol.chevron_down'), $r('app.color.pigo_text'), 19)
         }.id('scroll-bottom').headerAction().attributeModifier(glassButtonSurface(this.darkMode)).margin({ right: 16, bottom: this.scrollBottomOffset })
           .accessibilityText('滚动到最新消息')
-          .onClick(() => { this.transcriptFollow = true; this.transcript.scrollEdge(Edge.Bottom); })
+          .onClick(() => { this.$transcriptFollow(true); this.transcript.scrollEdge(Edge.Bottom); })
       }
     }.layoutWeight(1).width('100%')
   }

@@ -3,16 +3,16 @@ import { fileIo, fileUri } from '@kit.CoreFileKit';
 const PREVIEW_MAX_WIDTH = 240;
 const PREVIEW_MAX_HEIGHT = 180;
 
-@Component
+@ComponentV2
 export struct ChatImage {
-  @Prop label: string = '图片';
-  @Prop remoteUrl: string = '';
-  load: () => Promise<string> = async (): Promise<string> => '';
-  open: (source: string, label: string) => void = () => {};
-  @State private source: string = '';
-  @State private loading: boolean = false;
-  @State private error: string = '';
-  @State private imageRatio: number = PREVIEW_MAX_WIDTH / PREVIEW_MAX_HEIGHT;
+  @Param label: string = '图片';
+  @Param remoteUrl: string = '';
+  @Event load: () => Promise<string> = async (): Promise<string> => '';
+  @Event open: (source: string, label: string) => void = () => {};
+  @Local private source: string = '';
+  @Local private loading: boolean = false;
+  @Local private error: string = '';
+  @Local private imageRatio: number = PREVIEW_MAX_WIDTH / PREVIEW_MAX_HEIGHT;
   private started: boolean = false;
   private disposed: boolean = false;
 

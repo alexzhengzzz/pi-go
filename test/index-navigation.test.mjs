@@ -1,18 +1,24 @@
 import assert from 'node:assert/strict';
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { stripTypeScriptTypes } from 'node:module';
 import { test } from 'node:test';
 import './harmony-modules.mjs';
 import { pageSource } from './harmony-source.mjs';
 const { computerGroupId, computerGroups, computerGroupTitle, moveComputerConnection, renameComputerGroup } = await import('../harmony/entry/src/main/ets/ComputerGroups.ets');
 const { connectionLabel, validCompanion } = await import('../harmony/entry/src/main/ets/CompanionCheck.ets');
+const { SessionActions } = await import('../harmony/entry/src/main/ets/model/SessionActions.ets');
+const { SessionViewState, StreamSyncController } = await import('../harmony/entry/src/main/ets/model/StreamSyncController.ets');
+const { PiGoClient } = await import('../harmony/entry/src/main/ets/model/PiGoClient.ets');
+const { buildWidgetSnapshot } = await import('../harmony/entry/src/main/ets/InboxWidget.ets');
+const { RunCenterController } = await import('../harmony/entry/src/main/ets/model/RunCenterController.ets');
+const { ScheduleController } = await import('../harmony/entry/src/main/ets/model/ScheduleController.ets');
+const { WorkspaceFileController } = await import('../harmony/entry/src/main/ets/model/WorkspaceFileController.ets');
 const { SidebarRows } = await import('../harmony/entry/src/main/ets/model/SidebarRows.ets');
 const { BridgeFailure } = await import('../harmony/entry/src/main/ets/model/PiGoTypes.ets');
 const { ChatState } = await import('../harmony/entry/src/main/ets/model/ChatState.ets');
 const { ConnectionManager } = await import('../harmony/entry/src/main/ets/model/ConnectionManager.ets');
 const { SessionStore, workspaceName } = await import('../harmony/entry/src/main/ets/model/SessionStore.ets');
-const { SPLIT_WINDOW_WIDTH, RUN_NOTICE_SETTING, WATCH_REMINDERS_SETTING, LIVE_VIEW_SETTING } = await import('../harmony/entry/src/main/ets/model/PiGoConstants.ets');
-const { watchReminderText } = await import('../harmony/entry/src/main/ets/WatchReminders.ets');
+const { SPLIT_WINDOW_WIDTH, LIVE_VIEW_SETTING } = await import('../harmony/entry/src/main/ets/model/PiGoConstants.ets');
 
 // These cases cover page orchestration across the imported stores and ArkUI callbacks.
 const page = pageSource();
@@ -22,35 +28,23 @@ function method(name) {
   const end = page.indexOf('\n  }', start) + 4;
   return page.slice(start, end);
 }
-const { runNotificationText, runStatus } = await import('../harmony/entry/src/main/ets/RunResults.ets');
-const methods = ['setDrawer', 'loadSessions', 'applyCatalog', 'requestAction', 'positionTranscript', 'poll', 'loadSessionStatus', 'applyRunningStatus', 'backgroundRunning', 'backgroundActive', 'sessionState', 'sessionRunning'];
-methods.push('toggleSpace', 'updateSidebarRows', 'revealLibraryAnchor',
-  'appendSessionPage', 'setWorkspacePage', 'loadWorkspacePage', 'resetCatalog');
-methods.push('cacheChat', 'presentChat', 'revealChat', 'send', 'promptForkAndContinue', 'forkAndContinue', 'mergeTranscript', 'applyLiveSnapshot',
-  'handleFrame', 'applyStreamFrame', 'requestSessionSnapshot', 'applySessionSnapshot', 'refreshSessionHistory',
-  'applySessionHistory', 'stopStream', 'streamDown', 'queueStreamPaint', 'flushStreamDeltas', 'finishSend', 'reconcileSteering');
-methods.push('chooseComputer', 'leaveComputer', 'persistComputers', 'pair', 'resetFileTree', 'closeFileEditor');
-methods.push('appendFileTreeRows', 'updateFileTree', 'toggleFileDirectory', 'loadFileDirectory');
-methods.push('workspaceName', 'openNewSpace', 'closeNewSpace', 'createWorkspaceTask', 'openNewSession', 'closeNewSession', 'defaultNewSessionAgent', 'canCreateSession', 'createSession', 'onInboxFormLaunch', 'confirmCloseSpace', 'closeWorkspace', 'armTranscriptFollow', 'onKeyboardChange');
-methods.push('dockedSessions', 'sessionPaneWidth', 'compactSessionPane', 'onWindowWidthChange');
-methods.push('chatTitle', 'updateCachedSessionTitle', 'observeSessionRun', 'observeRun', 'advanceRunNotice', 'clearRunNotices');
-methods.push('restoreSettings', 'saveSetting', 'setRunNoticesEnabled', 'setLiveViewsEnabled');
-methods.push('inboxSessionKey', 'displayedInboxRuns', 'dismissInboxRuns', 'syncRunInbox', 'publishBackgroundRunNotice', 'queueWatchReminder', 'rememberWatchReminder',
-  'deleteScheduleRuns', 'removeScheduleMessage', 'scheduleFailure');
-methods.push('trackDispatchedLiveRun', 'backgroundLiveActivity', 'syncLiveActivity', 'canSwitchNetwork', 'tryPublicConnection');
+const { runNotificationText } = await import('../harmony/entry/src/main/ets/RunResults.ets');
+const methods = ['setDrawer', 'loadSessions', 'applyCatalog', 'positionTranscript', 'loadSessionStatus', 'applyRunningStatus',
+  'backgroundRunning', 'backgroundActive', 'sessionState', 'sessionRunning', 'toggleSpace', 'updateSidebarRows', 'revealLibraryAnchor',
+  'appendSessionPage', 'setWorkspacePage', 'loadWorkspacePage', 'resetCatalog',
+  'chooseComputer', 'leaveComputer', 'persistComputers', 'pair', 'workspaceName', 'openNewSpace', 'closeNewSpace',
+  'openNewSession', 'closeNewSession', 'defaultNewSessionAgent', 'canCreateSession', 'onInboxFormLaunch', 'confirmCloseSpace',
+  'closeWorkspace', 'armTranscriptFollow', 'onKeyboardChange', 'dockedSessions', 'sessionPaneWidth', 'compactSessionPane',
+  'onWindowWidthChange', 'chatTitle', 'updateCachedSessionTitle', 'observeSessionRun', 'restoreSettings', 'saveSetting',
+  'setLiveViewsEnabled', 'canSwitchNetwork', 'tryPublicConnection', 'refreshVisibleCatalog', 'sessionDeleted',
+  'streamSyncHost', 'sessionActionsHost'];
 const liveViewCalls = [];
 const liveActivity = { sync: snapshot => liveViewCalls.push(snapshot) };
 const phoneNotifications = [];
-const notificationManager = {
-  SlotType: { SERVICE_INFORMATION: 2 },
-  ContentType: { NOTIFICATION_CONTENT_BASIC_TEXT: 0 },
-  isNotificationEnabled: async () => true,
-  publish: async request => { phoneNotifications.push(request); },
-};
+globalThis.pigoTestNotifications = phoneNotifications;
 const Page = new Function('Curve', 'BridgeFailure', 'validUsb', 'Edge', '$r', 'DialogAlignment',
   'openSettings', 'themeStyle', 'appearanceMode', 'liveActivity', 'util', 'SPLIT_WINDOW_WIDTH',
-  'RUN_NOTICE_SETTING', 'WATCH_REMINDERS_SETTING', 'LIVE_VIEW_SETTING', 'THEME_MOTION_SETTING', 'workspaceName', 'computerGroupId', 'connectionLabel', 'validCompanion',
-  'watchReminderText', 'runStatus', 'runNotificationId', 'runNotificationText', 'notificationManager',
+  'LIVE_VIEW_SETTING', 'THEME_MOTION_SETTING', 'workspaceName', 'computerGroupId', 'connectionLabel', 'validCompanion',
   stripTypeScriptTypes(`class Harness {\n${methods.map(method).join('\n')}\n}`) + '; return Harness;')(
   { EaseOut: 0 },
   BridgeFailure,
@@ -63,21 +57,47 @@ const Page = new Function('Curve', 'BridgeFailure', 'validUsb', 'Edge', '$r', 'D
   (id) => ({ id }),
   liveActivity,
   { generateRandomUUID: randomUUID },
-  SPLIT_WINDOW_WIDTH, RUN_NOTICE_SETTING, WATCH_REMINDERS_SETTING, LIVE_VIEW_SETTING, 'theme_motion_enabled', workspaceName, computerGroupId, connectionLabel, validCompanion,
-  watchReminderText, runStatus, id => createHash('sha256').update(id).digest('hex').slice(0, 32), runNotificationText, notificationManager
+  SPLIT_WINDOW_WIDTH, LIVE_VIEW_SETTING, 'theme_motion_enabled', workspaceName, computerGroupId, connectionLabel, validCompanion
 );
+// Existing scenarios describe page and transport state together. Wire the real
+// controllers through the page's ports and allow scenarios to override their methods.
+function expose(target, owner, keys = Object.keys(owner)) {
+  for (const key of keys) {
+    Object.defineProperty(target, key, {
+      get() {
+        const value = owner[key];
+        return typeof value === 'function' ? value.bind(owner) : value;
+      },
+      set(value) { owner[key] = value; }
+    });
+  }
+}
+
 function fixture() {
   const state = new Page();
+  state.session = new SessionViewState();
+  state.appState = {};
+  state.streamSync = new StreamSyncController(state.streamSyncHost());
+  state.sessionActions = new SessionActions(state.sessionActionsHost());
+  expose(state, state.session);
+  expose(state, state.sessionActions.creation);
+  expose(state, state.streamSync, ['streamAlive', 'streamGen', 'historyRequest', 'poll', 'startStream', 'stopStream',
+    'schedule', 'cancelSchedule', 'scheduleStream', 'handleFrame', 'streamDown', 'applyStreamFrame', 'flushStreamDeltas',
+    'queueStreamPaint', 'requestSessionSnapshot', 'applySessionSnapshot', 'refreshSessionHistory', 'applySessionHistory',
+    'applyLiveSnapshot', 'mergeTranscript', 'syncLiveActivity', 'backgroundLiveActivity', 'trackDispatchedLiveRun',
+    'draftKey', 'rememberDraft', 'applySession', 'cacheChat', 'presentChat', 'revealChat']);
+  expose(state, state.sessionActions, ['requestAction', 'send', 'finishSend', 'reconcileSteering', 'forkAndContinue',
+    'promptForkAndContinue', 'uploadAttachment', 'createSession', 'createWorkspaceTask']);
   Object.assign(state, {
     sidebarRows: new SidebarRows(), chatState: new ChatState(), connection: new ConnectionManager(),
-    sessionStore: new SessionStore(),
-    resetVoice: () => {}, resetCommands: () => {}, syncCommandPalette: () => {},
-    queueRunSync: () => {}, queueWatchReminder: () => {}, requestRunNotificationPermission: async () => {},
-    watchReminders: { restore: () => {}, setEnabled: () => {} }, tryPublicConnection: async () => {},
-    fileDirectories: new Map(),
+    sessionStore: new SessionStore(), client: new PiGoClient(),
+    voiceComposer: { state: {}, resetVoice() {}, stopReplySpeech() {} }, resetCommands: () => {}, syncCommandPalette: () => {},
+    tryPublicConnection: async () => {},
+    scheduleEndpoint: (item) => item, scheduleComputerName: () => 'Desktop',
+    accountSync: { state: {} },
     syncMode: 'legacy', busy: false, sessionLoading: false, epoch: 1, reachable: true,
     runningSessionIds: [], runningSessions: [], sessionStatusAt: 0, currentId: '', idle: true, queued: false,
-    observedRuns: new Map(), pendingRunNotices: [], runNoticeTimer: -1, runNoticesEnabled: true, messages: [],
+    messages: [],
     settingsWrite: Promise.resolve(), liveViewsEnabled: true, liveViewSessionKey: '', liveViewRunId: '', syncLiveActivity: () => {},
     liveText: '', liveThinking: '', liveThinkSeq: 0, liveThinkingOpen: false, thinkingOpenIds: [],
     liveTools: [], liveSeq: 0, liveRevision: 0, streamAlive: false, queuedSteering: [],
@@ -90,6 +110,54 @@ function fixture() {
     getUIContext: () => ({ animateTo: (_options, change) => change(),
       getPromptAction: () => ({ showToast: () => {} }) })
   });
+  state.fileController = new WorkspaceFileController({
+    busy: () => state.busy,
+    setBusy: (value) => { state.busy = value; },
+    openingSession: () => state.openingSession,
+    epoch: () => state.epoch,
+    request: (...args) => state.request(...args),
+    setStatus: (status) => { state.status = status; }
+  });
+  state.runCenter = new RunCenterController({
+    visible: () => state.visible,
+    currentId: () => state.currentId,
+    base: () => state.base,
+    computers: () => state.computers,
+    isPaired: () => state.isPaired,
+    reachable: () => state.reachable,
+    workspaceCwd: () => state.workspaceCwd,
+    draftKey: (id) => state.draftKey(id),
+    endpoint: () => state.connection.endpoint(),
+    scheduleEndpoint: (item) => state.scheduleEndpoint(item),
+    scheduleComputerName: (item) => state.scheduleComputerName(item),
+    request: (...args) => state.request(...args),
+    saveSetting: (...args) => state.saveSetting(...args),
+    getUIContext: () => state.getUIContext(),
+    publishWidgets() {},
+    celebrate: () => {
+      state.sakuraBurstKind = 'celebrate';
+      state.sakuraBurstSeq += 1;
+      if (state.themeId === 'sakura') state.sakuraCelebrateSeq += 1;
+    },
+  });
+  state.runCenter.queueRunSync = () => {};
+  state.scheduleController = new ScheduleController({
+    loading: () => state.loading,
+    isPaired: () => state.isPaired,
+    closeReviewOverlays() {},
+    selectRootTab: (tab) => state.selectRootTab(tab),
+    openNewSession: () => state.openNewSession(),
+    visible: () => state.visible,
+    base: () => state.base,
+    computers: () => state.computers,
+    settings: () => state.settings,
+    scheduleEndpoint: (item) => state.scheduleEndpoint(item),
+    request: (...args) => state.request(...args),
+    saveSetting: (...args) => state.saveSetting(...args),
+    getUIContext: () => state.getUIContext(),
+    publishWidgets() {},
+  });
+  state.scheduleController.queueScheduleSync = () => {};
   return state;
 }
 
@@ -109,10 +177,7 @@ test('inbox cleanup survives restart and polling while keeping pending and new r
   function restoredPage() {
     const state = fixture();
     Object.assign(state, {
-      computers: [computer], inboxRuns: [], visible: true, runRead: [], inboxCleaning: false,
-      scheduleEndpoint: item => item,
-      scheduleComputerName: () => 'Desktop',
-      syncPushRegistration: async () => {},
+      computers: [computer], visible: true,
       request: async () => ({ runEvents: events }),
       getUIContext: () => ({ getHostContext: () => ({ settings }) }),
     });
@@ -120,14 +185,14 @@ test('inbox cleanup survives restart and polling while keeping pending and new r
     return state;
   }
   const state = restoredPage();
-  await state.syncRunInbox(computer);
-  assert.equal(await state.dismissInboxRuns(['removed', 'pending']), true);
-  assert.deepEqual(state.inboxRuns.map(({ run }) => run.id), ['pending', 'kept']);
+  await state.runCenter.syncRunInbox(computer);
+  assert.equal(await state.runCenter.dismissInboxRuns(['removed', 'pending']), true);
+  assert.deepEqual(state.runCenter.state.inboxRuns.map(({ run }) => run.id), ['pending', 'kept']);
   events.push({ id: 'new', status: 'completed' });
   const restarted = restoredPage();
-  await restarted.syncRunInbox(computer);
-  assert.deepEqual(restarted.inboxRuns.map(({ run }) => run.id), ['pending', 'kept', 'new']);
-  assert.equal(restarted.inboxRuns[0].unread, true);
+  await restarted.runCenter.syncRunInbox(computer);
+  assert.deepEqual(restarted.runCenter.state.inboxRuns.map(({ run }) => run.id), ['pending', 'kept', 'new']);
+  assert.equal(restarted.runCenter.state.inboxRuns[0].unread, true);
 });
 
 test('inbox aggregates recent runs by sessionId per computer and dismisses earlier runs of the same session', async () => {
@@ -144,20 +209,18 @@ test('inbox aggregates recent runs by sessionId per computer and dismisses earli
   Object.assign(state, {
     base: lan.address,
     computers: [lan, remote, other],
-    inboxCleaning: false,
-    dismissedInboxRuns: new Set(),
     settings,
-    inboxRuns: [
+  });
+  state.runCenter.state.inboxRuns = [
       { run: { id: 's1-old', sessionId: 'sess-1', status: 'completed', finishedAt: 100 }, address: lan.address, computer: 'Mac A', unread: true },
       { run: { id: 's1-new', sessionId: 'sess-1', status: 'failed', finishedAt: 300 }, address: remote.address, computer: 'Mac A', unread: true },
       { run: { id: 's1-new', sessionId: 'sess-1', status: 'failed', finishedAt: 300 }, address: lan.address, computer: 'Mac A', unread: true },
       { run: { id: 's1-wait', sessionId: 'sess-1', status: 'waiting', finishedAt: 200 }, address: lan.address, computer: 'Mac A', unread: true },
       { run: { id: 's2-only', sessionId: 'sess-2', status: 'completed', finishedAt: 250 }, address: lan.address, computer: 'Mac A', unread: false },
       { run: { id: 'other-s1', sessionId: 'sess-1', status: 'completed', finishedAt: 150 }, address: other.address, computer: 'Mac B', unread: true },
-    ],
-  });
+  ];
 
-  const displayed = state.displayedInboxRuns();
+  const displayed = state.runCenter.displayedInboxRuns();
   assert.deepEqual(
     displayed.map(({ run, address }) => ({ id: run.id, address })),
     [
@@ -170,18 +233,48 @@ test('inbox aggregates recent runs by sessionId per computer and dismisses earli
 
   // Dismissing the aggregated latest run of sess-1 on Mac A also dismisses older runs of sess-1 on Mac A,
   // while keeping its waiting item and sess-1 on Mac B intact.
-  assert.equal(await state.dismissInboxRuns(['s1-new']), true);
+  assert.equal(await state.runCenter.dismissInboxRuns(['s1-new']), true);
   assert.deepEqual(
-    state.displayedInboxRuns().map(({ run, address }) => ({ id: run.id, address })),
+    state.runCenter.displayedInboxRuns().map(({ run, address }) => ({ id: run.id, address })),
     [
       { id: 's1-wait', address: lan.address },
       { id: 's2-only', address: lan.address },
       { id: 'other-s1', address: other.address },
     ],
   );
-  assert.equal(state.dismissedInboxRuns.has('s1-old'), true);
-  assert.equal(state.dismissedInboxRuns.has('s1-new'), true);
-  assert.equal(state.dismissedInboxRuns.has('other-s1'), false);
+  assert.equal(state.runCenter.dismissedInboxRuns.has('s1-old'), true);
+  assert.equal(state.runCenter.dismissedInboxRuns.has('s1-new'), true);
+  assert.equal(state.runCenter.dismissedInboxRuns.has('other-s1'), false);
+});
+
+test('widgets prioritize approvals and exclude dismissed runs without duplicating a running session', () => {
+  const address = 'https://desktop';
+  const run = (id, sessionId, status) => ({
+    address, computer: 'Mac', unread: true, run: { id, sessionId, status, finishedAt: 100 }
+  });
+  const schedule = (id, dismissed) => ({
+    key: `desktop:${id}`, address, computer: 'Mac', unread: true, dismissed,
+    run: { id, name: id, status: 'completed', finishedAt: 100 }
+  });
+  const snapshot = buildWidgetSnapshot({
+    inbox: [run('pending', 'one', 'waiting'), run('completed', 'three', 'completed')],
+    scheduleMessages: [schedule('visible', false), schedule('dismissed', true)],
+    jobs: [{ name: 'nightly', enabled: true, nextAt: 100 }, { name: 'paused', enabled: false, nextAt: 100 }],
+    runningRows: [{ id: 'one', name: 'Pending task' }, { id: 'two', name: 'Running task' }],
+    activeSchedules: [],
+    running: 2,
+    address,
+    computer: 'Mac',
+    pairedComputer: 'Mac',
+    sessionState: () => 'streaming',
+    stateLabel: () => '运行中'
+  });
+  assert.equal(snapshot.pending, 1);
+  assert.equal(snapshot.unread, 3);
+  assert.equal(snapshot.scheduleCount, 1);
+  assert.equal(snapshot.nextScheduleName, 'nightly');
+  assert.deepEqual(snapshot.items.map(({ id }) => id), ['pending', 'two', 'completed', 'visible']);
+  assert.deepEqual(snapshot.scheduleItems.map(({ id }) => id), ['visible']);
 });
 
 test('background inbox polls publish one system notification per new terminal event', async () => {
@@ -195,13 +288,12 @@ test('background inbox polls publish one system notification per new terminal ev
   ];
   const state = fixture();
   Object.assign(state, {
-    computers: [computer], inboxRuns: [], visible: false, backgroundRunNoticesSince: since,
-    notifiedBackgroundRuns: new Set(), backgroundRunSessions: new Set(), runRead: [], dismissedInboxRuns: new Set(),
-    scheduleEndpoint: item => item, scheduleComputerName: () => 'Desktop', syncPushRegistration: async () => {},
+    computers: [computer], visible: false,
     request: async () => ({ runEvents: events }),
   });
+  state.runCenter.backgroundRunNoticesSince = since;
   phoneNotifications.length = 0;
-  await Promise.all([state.syncRunInbox(computer), state.syncRunInbox(computer)]);
+  await Promise.all([state.runCenter.syncRunInbox(computer), state.runCenter.syncRunInbox(computer)]);
   assert.deepEqual(phoneNotifications.map(request => request.content.normal), [
     { title: 'OK', text: '修复 通知同步' },
     { title: '运行失败', text: '生成报表' },
@@ -209,7 +301,7 @@ test('background inbox polls publish one system notification per new terminal ev
   assert.equal(new Set(phoneNotifications.map(request => request.appMessageId)).size, 2);
   state.visible = true;
   events.push({ id: 'foreground', status: 'completed', finishedAt: since + 2 });
-  await state.syncRunInbox(computer);
+  await state.runCenter.syncRunInbox(computer);
   assert.equal(phoneNotifications.length, 2);
 });
 
@@ -222,21 +314,16 @@ test('watch reminders accept only recent events and persist delivery ids', async
   const state = fixture();
   const reminders = [];
   const writes = [];
-  Object.assign(state, {
-    queueWatchReminder: Page.prototype.queueWatchReminder,
-    watchRemindersEnabled: true,
-    watchReminderDelivered: [],
-    watchReminders: { notify: reminder => reminders.push(reminder) },
-    saveSetting: async (key, value) => writes.push([key, value]),
-  });
-  state.queueWatchReminder('inbox:new', '已完成', 'Mac', 'Build Pi Go', Date.now());
-  state.queueWatchReminder('inbox:old', '已完成', 'Mac', 'Old run', Date.now() - 6 * 60 * 1000);
+  state.runCenter.watchReminders = { notify: reminder => reminders.push(reminder) };
+  state.saveSetting = async (key, value) => writes.push([key, value]);
+  state.runCenter.queueWatchReminder('inbox:new', '已完成', 'Mac', 'Build Pi Go', Date.now());
+  state.runCenter.queueWatchReminder('inbox:old', '已完成', 'Mac', 'Old run', Date.now() - 6 * 60 * 1000);
   assert.equal(reminders.length, 1);
   assert.deepEqual(reminders[0], {
     id: 'inbox:new', title: 'Pi Go · 已完成', text: '已完成 · Mac\nBuild Pi Go'
   });
-  await state.rememberWatchReminder('inbox:new');
-  assert.deepEqual(state.watchReminderDelivered, ['inbox:new']);
+  await state.runCenter.rememberWatchReminder('inbox:new');
+  assert.deepEqual(state.runCenter.watchReminderDelivered, ['inbox:new']);
   assert.deepEqual(writes, [['watch_reminder_delivered', '["inbox:new"]']]);
 });
 
@@ -250,11 +337,7 @@ test('bulk history deletion removes successes and retains records the computer r
   const toasts = [];
   let syncs = 0;
   Object.assign(state, {
-    base: computer.address, computers: [computer], scheduleMessages: messages,
-    scheduleMutation: 0, scheduleComputerGeneration: 1, scheduleSaving: false,
-    readScheduleRuns: () => [],
-    scheduleEndpoint: item => item,
-    queueScheduleSync: () => { syncs += 1; },
+    base: computer.address, computers: [computer],
     getUIContext: () => ({ getPromptAction: () => ({ showToast: ({ message }) => toasts.push(message) }) }),
     request: async (path, payload, endpoint) => {
       assert.equal(path, '/schedules/update');
@@ -265,12 +348,14 @@ test('bulk history deletion removes successes and retains records the computer r
       if (payload.id === 'blocked') throw new BridgeFailure(403, 'desktop_workspace_unshared');
     },
   });
-  assert.equal(await state.deleteScheduleRuns(messages), false);
+  state.scheduleController.state.scheduleMessages = messages;
+  state.scheduleController.queueScheduleSync = () => { syncs += 1; };
+  assert.equal(await state.scheduleController.deleteScheduleRuns(messages), false);
   assert.deepEqual(calls, ['first', 'blocked', 'last']);
-  assert.deepEqual(state.scheduleMessages, [messages[1]]);
+  assert.deepEqual(state.scheduleController.state.scheduleMessages, [messages[1]]);
   assert.match(toasts[0], /已删除 2 条/);
-  assert.equal(state.scheduleMutation, 2);
-  assert.equal(state.scheduleSaving, false);
+  assert.equal(state.scheduleController.scheduleMutation, 2);
+  assert.equal(state.scheduleController.state.scheduleSaving, false);
   assert.equal(syncs, 1);
 });
 
@@ -325,7 +410,7 @@ test('public fallback reopens the same session with its draft using a paired con
     computers: [lan, unrelated, remote], base: lan.address, visible: true, isPaired: true,
     reachable: false, activeTab: 'tasks', currentId: 'one', draft: 'keep this', attachments: [attachment],
     lastNetworkFailover: 0, tryPublicConnection: Page.prototype.tryPublicConnection,
-    draftKey(id) { return `${this.base}|${id}`; },
+    draftKey: (id) => `${state.base}|${id}`,
     scheduleEndpoint: computer => computer,
     request: async (path, _input, endpoint) => {
       calls.push([path, endpoint.address]);
@@ -352,9 +437,10 @@ test('public fallback reopens the same session with its draft using a paired con
 test('editor keyboard events leave the hidden chat transcript alone', () => {
   const state = fixture();
   Object.assign(state, {
-    editingPath: 'aa.md', keyboardHeight: 300, transcriptFollow: false,
+    keyboardHeight: 300, transcriptFollow: false,
     transcript: { currentOffset() { assert.fail('editor keyboard queried the chat scroller'); } }
   });
+  state.fileController.state.editingPath = 'aa.md';
   for (const activeTab of ['files', 'tasks']) {
     state.activeTab = activeTab;
     state.showFiles = activeTab === 'files';
@@ -532,7 +618,8 @@ test('the user-chosen sidebar width fits the window and is restored when there i
 
 test('the workspace tree fetches folders on demand and paginates within a branch', async () => {
   const state = fixture();
-  state.fileRoot = '/project';
+  const files = state.fileController;
+  files.state.fileRoot = '/project';
   const requests = [];
   const entry = (path, kind = 'file') => ({ path, name: path.split('/').at(-1), kind });
   state.request = async (_endpoint, { path, cursor }) => {
@@ -542,26 +629,26 @@ test('the workspace tree fetches folders on demand and paginates within a branch
     if (cursor === 100) return { entries: [entry('src/index.ts'), entry('src/utils.ts')] };
     return { entries: [entry('src/empty', 'directory'), entry('src/index.ts')], nextCursor: 100 };
   };
-  const rows = () => state.fileTreeRows.map(({ path, kind, depth }) => [path, kind, depth]);
+  const rows = () => files.state.fileTreeRows.map(({ path, kind, depth }) => [path, kind, depth]);
   const rootRows = [['src', 'directory', 0], ['README.md', 'file', 0]];
-  await state.loadFileDirectory('');
+  await files.loadFileDirectory('');
   assert.deepEqual(rows(), rootRows);
-  await state.toggleFileDirectory('src');
+  await files.toggleFileDirectory('src');
   assert.deepEqual(rows(), [rootRows[0], ['src/empty', 'directory', 1], ['src/index.ts', 'file', 1],
     ['src', 'more', 1], rootRows[1]]);
-  await state.loadFileDirectory('src', true);
-  await state.toggleFileDirectory('src/empty');
+  await files.loadFileDirectory('src', true);
+  await files.toggleFileDirectory('src/empty');
   const expandedRows = [rootRows[0], ['src/empty', 'directory', 1], ['src/empty', 'empty', 2],
     ['src/index.ts', 'file', 1], ['src/utils.ts', 'file', 1], rootRows[1]];
   assert.deepEqual(rows(), expandedRows);
-  await state.toggleFileDirectory('src');
+  await files.toggleFileDirectory('src');
   assert.deepEqual(rows(), rootRows);
-  await state.toggleFileDirectory('src');
+  await files.toggleFileDirectory('src');
   assert.deepEqual(rows(), expandedRows);
   assert.deepEqual(requests, [['', 0], ['src', 0], ['src', 100], ['src/empty', 0]]);
-  await state.loadFileDirectory('');
+  await files.loadFileDirectory('');
   assert.deepEqual(rows(), rootRows);
-  await state.toggleFileDirectory('src');
+  await files.toggleFileDirectory('src');
   assert.deepEqual(requests.slice(-2), [['', 0], ['src', 0]]);
 });
 
@@ -670,10 +757,10 @@ test('the picker uses the current computer catalog and supports legacy Pi hosts'
   const state = fixture();
   Object.assign(state, {
     visible: true, isPaired: true, reachable: false,
-    inboxFormLaunch: true, formDestination: 'new_task',
     selectRootTab: (tab) => { state.activeTab = tab; },
     request: async () => { assert.fail('the offline widget launch must not submit a request'); },
   });
+  Object.assign(state.appState, { inboxFormLaunch: true, formDestination: 'new_task' });
   state.onInboxFormLaunch();
   assert.equal(state.activeTab, 'tasks');
   assert.equal(state.showNewSession, true);
@@ -925,7 +1012,7 @@ function navigationFixture() {
       if (state.currentId !== session.id) { state.messages = []; state.pendingBottom = true; }
       state.currentId = session.id; state.idle = session.idle ?? true;
     },
-    schedule: () => {}, cancelSchedule: () => {}, setInteraction: () => {}, resetVoice: () => {}
+    schedule: () => {}, cancelSchedule: () => {}, setInteraction: () => {}
   });
   return state;
 }
@@ -1069,26 +1156,26 @@ test('running status refresh updates all tasks without replacing cached pages', 
 test('current task shows one banner after the queue drains across events and snapshots', (context) => {
   const state = navigationFixture();
   Object.assign(state, { visible: true });
-  context.after(() => state.clearRunNotices());
+  context.after(() => state.runCenter.clearRunNotices());
   const session = { id: 'one', idle: true };
   const snapshot = (idle, seq) => state.applySessionSnapshot({
     session: { ...session, idle }, cursor: { sessionId: 'one', streamId: 'worker', runId: null, seq }
   });
   snapshot(false, 1);
   snapshot(true, 2);
-  assert.equal(state.runNotice, undefined);
+  assert.equal(state.runCenter.state.runNotice, undefined);
   state.applyStreamFrame({ type: 'session/status', idle: false });
   state.applyStreamFrame({ type: 'session/status', idle: true, queued: true });
-  assert.equal(state.runNotice, undefined);
+  assert.equal(state.runCenter.state.runNotice, undefined);
   snapshot(true, 3);
-  assert.deepEqual(state.runNotice, { title: 'Cached task', stopped: false });
+  assert.deepEqual(state.runCenter.state.runNotice, { title: 'Cached task', stopped: false });
   state.applyStreamFrame({ type: 'session/status', idle: true });
-  state.advanceRunNotice();
-  assert.equal(state.runNotice, undefined);
+  state.runCenter.advanceRunNotice();
+  assert.equal(state.runCenter.state.runNotice, undefined);
 
   state.applyStreamFrame({ type: 'session/status', idle: false });
   state.applyStreamFrame({ type: 'session/status', idle: true, aborted: true });
-  assert.equal(state.runNotice.stopped, true);
+  assert.equal(state.runCenter.state.runNotice.stopped, true);
 });
 
 test('background banners require a previously running task to be confirmed idle', (context) => {
@@ -1097,19 +1184,19 @@ test('background banners require a previously running task to be confirmed idle'
     visible: true, currentId: 'one', sessionLoading: true,
     sessions: [{ id: 'two', name: 'Build' }, { id: 'three', name: 'Closed' }, { id: 'four', name: 'Dispatching' }]
   });
-  context.after(() => state.clearRunNotices());
+  context.after(() => state.runCenter.clearRunNotices());
   state.applyRunningStatus({
     runningSessionIds: ['one', 'two', 'three', 'four'],
     runningSessions: [{ id: 'four', started: false }],
     idleSessionIds: []
   });
   state.applyRunningStatus(undefined);
-  assert.equal(state.runNotice, undefined);
+  assert.equal(state.runCenter.state.runNotice, undefined);
   state.applyRunningStatus({ runningSessionIds: [], idleSessionIds: ['one', 'two', 'four'] });
-  assert.deepEqual(state.runNotice, { title: 'Build', stopped: false });
+  assert.deepEqual(state.runCenter.state.runNotice, { title: 'Build', stopped: false });
   state.applyRunningStatus({ runningSessionIds: [], idleSessionIds: ['one', 'two', 'three'] });
-  state.advanceRunNotice();
-  assert.equal(state.runNotice, undefined);
+  state.runCenter.advanceRunNotice();
+  assert.equal(state.runCenter.state.runNotice, undefined);
 });
 
 test('disabling run notices clears existing banners and persists across app restarts', async (context) => {
@@ -1124,39 +1211,39 @@ test('disabling run notices clears existing banners and persists across app rest
     const state = fixture();
     Object.assign(state, { visible: true, getUIContext: () => ({ getHostContext: () => ({ settings }) }) });
     state.restoreSettings();
-    context.after(() => state.clearRunNotices());
+    context.after(() => state.runCenter.clearRunNotices());
     return state;
   };
   const state = openPage();
-  assert.equal(state.runNoticesEnabled, true);
+  assert.equal(state.runCenter.state.runNoticesEnabled, true);
   for (const id of ['one', 'two']) {
-    state.observeRun(id, id, true);
-    state.observeRun(id, id, false);
+    state.runCenter.observeRun(id, id, true);
+    state.runCenter.observeRun(id, id, false);
   }
-  assert.equal(state.runNotice.title, 'one');
-  assert.equal(state.pendingRunNotices.length, 1);
-  const disabled = state.setRunNoticesEnabled(false);
-  assert.equal(state.runNotice, undefined);
-  assert.equal(state.runNoticeTimer, -1);
-  assert.equal(state.pendingRunNotices.length, 0);
+  assert.equal(state.runCenter.state.runNotice.title, 'one');
+  assert.equal(state.runCenter.pendingRunNotices.length, 1);
+  const disabled = state.runCenter.setRunNoticesEnabled(false);
+  assert.equal(state.runCenter.state.runNotice, undefined);
+  assert.equal(state.runCenter.runNoticeTimer, -1);
+  assert.equal(state.runCenter.pendingRunNotices.length, 0);
   await disabled;
 
   const reopened = openPage();
-  assert.equal(reopened.runNoticesEnabled, false);
-  reopened.observeRun('one', 'Finished while muted', true);
-  reopened.observeRun('one', '', false);
-  reopened.observeRun('two', 'Still running', true);
-  await reopened.setRunNoticesEnabled(true);
-  assert.equal(reopened.runNotice, undefined);
-  reopened.observeRun('two', '', false);
-  assert.equal(reopened.runNotice.title, 'Still running');
-  assert.equal(openPage().runNoticesEnabled, true);
+  assert.equal(reopened.runCenter.state.runNoticesEnabled, false);
+  reopened.runCenter.observeRun('one', 'Finished while muted', true);
+  reopened.runCenter.observeRun('one', '', false);
+  reopened.runCenter.observeRun('two', 'Still running', true);
+  await reopened.runCenter.setRunNoticesEnabled(true);
+  assert.equal(reopened.runCenter.state.runNotice, undefined);
+  reopened.runCenter.observeRun('two', '', false);
+  assert.equal(reopened.runCenter.state.runNotice.title, 'Still running');
+  assert.equal(openPage().runCenter.state.runNoticesEnabled, true);
 });
 
 test('live activity follows a phone-dispatched run and clears when it becomes idle', () => {
   const state = fixture();
   Object.assign(state, {
-    syncLiveActivity: Page.prototype.syncLiveActivity,
+    syncLiveActivity: StreamSyncController.prototype.syncLiveActivity,
     visible: true, isPaired: true, currentId: 'one', idle: false, queued: false,
     reachable: true, base: 'http://127.0.0.1:18977', runId: 'run-one',
     cancelSchedule: () => assert.fail('foreground sync must not cancel polling'),
@@ -1193,7 +1280,7 @@ test('background live activity keeps syncing only while the selected run is acti
   const state = fixture();
   let cancelled = 0, stopped = 0;
   Object.assign(state, {
-    syncLiveActivity: Page.prototype.syncLiveActivity,
+    syncLiveActivity: StreamSyncController.prototype.syncLiveActivity,
     visible: false, isPaired: true, currentId: 'one', idle: false, queued: false,
     liveViewSessionKey: 'one',
     reachable: true, base: 'http://127.0.0.1:18977', project: 'pi-go',

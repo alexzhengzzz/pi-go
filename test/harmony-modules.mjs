@@ -13,6 +13,7 @@ const systemMocks = new Map([
   }
   export const util = {
     TextEncoder: ArkTextEncoder, Base64Helper: class {},
+    generateRandomUUID: () => globalThis.crypto.randomUUID(),
     TextDecoder: class {
       constructor(encoding) { this.decoder = new TextDecoder(encoding); }
       decodeWithStream(bytes, options) { return this.decoder.decode(bytes, options); }
@@ -35,6 +36,10 @@ const systemMocks = new Map([
       return typeof member === 'function' ? member.bind(api) : member;
     }
   });
+  export const picker = {
+    DocumentSaveOptions: class {},
+    DocumentViewPicker: class { save(options) { return globalThis.pigoTestSavePicker(options); } }
+  };
   export const fileUri = {
     getUriFromPath: (path) => globalThis.pigoTestFileUri ? globalThis.pigoTestFileUri(path) : 'file://com.example.pigo' + path
   };`],
@@ -45,6 +50,14 @@ const systemMocks = new Map([
       MARKDOWN: 'general.markdown'
     }
   };`],
+  ['@kit.ArkUI', `export const window = {
+    Orientation: { LANDSCAPE: 2 },
+    getLastWindow: (context) => globalThis.pigoTestLastWindow(context)
+  };`],
+  ['@kit.PreviewKit', `export const filePreview = {
+    canPreview: (...args) => globalThis.pigoTestPreview.canPreview(...args),
+    openPreview: (...args) => globalThis.pigoTestPreview.openPreview(...args)
+  };`],
   ['@kit.AbilityKit', 'export const common = {};'],
   ['@kit.BasicServicesKit', 'export class BusinessError extends Error {} export const pasteboard = {};'],
   ['@kit.WearEngine', `export const wearEngine = new Proxy({}, {
@@ -54,6 +67,10 @@ const systemMocks = new Map([
       return typeof member === 'function' ? member.bind(api) : member;
     }
   });`],
+  ['@kit.FormKit', 'export const formBindingData = {}; export const formProvider = {};'],
+  ['@kit.ImageKit', 'export const image = {};'],
+  ['@kit.MediaLibraryKit', 'export const photoAccessHelper = {};'],
+  ['@kit.CameraKit', 'export const camera = {}; export const cameraPicker = {};'],
   ['@kit.ShareKit', `export const systemShare = {
     SelectionMode: { SINGLE: 0, BATCH: 1 },
     SharePreviewMode: { DEFAULT: 0, DETAIL: 1 },
@@ -71,7 +88,24 @@ const systemMocks = new Map([
       }
     }
   };`],
-  ['@kit.CryptoArchitectureKit', 'export const cryptoFramework = {};'],
+  ['@kit.CryptoArchitectureKit', `import { createHash } from 'node:crypto';
+  export const cryptoFramework = {
+    createMd() {
+      const hash = createHash('sha256');
+      return {
+        updateSync: ({ data }) => hash.update(data),
+        digestSync: () => ({ data: hash.digest() })
+      };
+    }
+  };`],
+  ['@kit.NotificationKit', `export const notificationManager = {
+    SlotType: { SERVICE_INFORMATION: 2 },
+    ContentType: { NOTIFICATION_CONTENT_BASIC_TEXT: 0 },
+    isNotificationEnabled: async () => true,
+    publish: async (request) => globalThis.pigoTestNotifications?.push(request)
+  };`],
+  ['@kit.BackgroundTasksKit', 'export const backgroundTaskManager = {};'],
+  ['@kit.PushKit', 'export const pushService = {};'],
   ['@kit.UniversalKeystoreKit', 'export const huks = {};'],
 ]);
 
@@ -90,7 +124,9 @@ registerHooks({
   },
   load(url, context, nextLoad) {
     if (url.startsWith(root) && url.endsWith('.ets')) {
-      const source = readFileSync(new URL(url), 'utf8');
+      const source = readFileSync(new URL(url), 'utf8')
+      .replace(/^@ObservedV2\r?\n/gm, '')
+      .replace(/^(\s*)@Trace /gm, '$1');
       return { format: 'module', source: stripTypeScriptTypes(source), shortCircuit: true };
     }
     return nextLoad(url, context);

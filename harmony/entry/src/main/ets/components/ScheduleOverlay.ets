@@ -23,55 +23,61 @@ function headerAction() {
   .width(44).height(44).padding(0).borderRadius(22).backgroundColor(Color.Transparent)
 }
 
-@Component
+@ComponentV2
 export struct ScheduleOverlay {
-  @StorageProp('pigoDark') private darkMode: boolean = false;
-  @Require backFromSchedule: () => void = unboundAction;
-  @Prop @Watch('onHistoryComputerChanged') base: string;
-  @Prop busy: boolean;
-  @Link computers: Companion[];
-  @Require deleteScheduleRuns: (messages: RunMessage[]) => Promise<boolean> = unboundAction;
-  @Require dismissInboxRuns: (ids: string[]) => Promise<boolean> = unboundAction;
-  @Require dismissScheduleMessage: (message: RunMessage) => void = unboundAction;
-  @Prop isPaired: boolean;
-  @Require openScheduleTimePicker: () => void = unboundAction;
-  @Require openScheduledSession: (message: RunMessage) => Promise<void> = unboundAction;
-  @Prop openingSession: boolean;
-  @Prop inboxRuns: InboxRun[] = [];
-  @Prop pushEnabled: boolean = false;
-  @Prop pushSaving: boolean = false;
-  @Prop pushStatus: string = '';
-  @Require openInboxRun: (row: InboxRun) => Promise<void> = unboundAction;
-  @Require setPushEnabled: (enabled: boolean) => Promise<void> = unboundAction;
-  @Link projects: string[];
-  @Link scheduleCatchUp: string;
-  @Link scheduleCwd: string;
-  @Prop scheduleDetail?: RunMessage;
-  @Prop scheduleEditing?: ScheduleJob;
-  @Prop scheduleError: string;
-  @Link scheduleKind: string;
-  @Link scheduleMessages: RunMessage[];
-  @Link scheduleName: string;
-  @Link scheduleOffline: string[];
-  @Prop @Watch('resetRunSelection') schedulePage: string;
-  @Link schedulePrompt: string;
-  @Prop scheduleSaving: boolean;
-  @Link scheduleWhen: string;
-  @Prop scheduleZone: string;
-  @Require showScheduleDetail: (message: RunMessage) => void = unboundAction;
-  @Prop statusBarHeight: number;
-  @Require updateSchedule: (operation: string, job?: ScheduleJob) => Promise<void> = unboundAction;
-  @Link workspaces: WorkspaceRow[];
-  @Prop accent: string;
-  @Prop accentForeground: string;
-  @Prop accentTint: string;
-  @Prop canvasBg: string;
-  @Prop themeId: string = 'mint';
-  @Prop headerHeight: number;
-  @Prop bottomPad: number;
-  @Prop computerTitle: string;
-  @State private selectingRuns: boolean = false;
-  @State private selectedRunKeys: string[] = [];
+  @Param @Require darkMode: boolean;
+  @Event backFromSchedule: () => void = unboundAction;
+  @Param @Require base: string;
+  @Param @Require busy: boolean;
+  @Param @Require computers: Companion[];
+  @Event deleteScheduleRuns: (messages: RunMessage[]) => Promise<boolean> = unboundAction;
+  @Event dismissInboxRuns: (ids: string[]) => Promise<boolean> = unboundAction;
+  @Event dismissScheduleMessage: (message: RunMessage) => void = unboundAction;
+  @Param @Require isPaired: boolean;
+  @Event openScheduleTimePicker: () => void = unboundAction;
+  @Event openScheduledSession: (message: RunMessage) => Promise<void> = unboundAction;
+  @Param @Require openingSession: boolean;
+  @Param inboxRuns: InboxRun[] = [];
+  @Param pushEnabled: boolean = false;
+  @Param pushSaving: boolean = false;
+  @Param pushStatus: string = '';
+  @Event openInboxRun: (row: InboxRun) => Promise<void> = unboundAction;
+  @Event setPushEnabled: (enabled: boolean) => Promise<void> = unboundAction;
+  @Param @Require projects: string[];
+  @Param @Require scheduleCatchUp: string;
+  @Event $scheduleCatchUp: (value: string) => void = unboundAction;
+  @Param @Require scheduleCwd: string;
+  @Event $scheduleCwd: (value: string) => void = unboundAction;
+  @Param @Require scheduleDetail?: RunMessage;
+  @Param @Require scheduleEditing?: ScheduleJob;
+  @Param @Require scheduleError: string;
+  @Param @Require scheduleKind: string;
+  @Event $scheduleKind: (value: string) => void = unboundAction;
+  @Param @Require scheduleMessages: RunMessage[];
+  @Param @Require scheduleName: string;
+  @Event $scheduleName: (value: string) => void = unboundAction;
+  @Param @Require scheduleOffline: string[];
+  @Param @Require schedulePage: string;
+  @Param @Require schedulePrompt: string;
+  @Event $schedulePrompt: (value: string) => void = unboundAction;
+  @Param @Require scheduleSaving: boolean;
+  @Param @Require scheduleWhen: string;
+  @Event $scheduleWhen: (value: string) => void = unboundAction;
+  @Param @Require scheduleZone: string;
+  @Event showScheduleDetail: (message: RunMessage) => void = unboundAction;
+  @Param @Require statusBarHeight: number;
+  @Event updateSchedule: (operation: string, job?: ScheduleJob) => Promise<void> = unboundAction;
+  @Param @Require workspaces: WorkspaceRow[];
+  @Param @Require accent: string;
+  @Param @Require accentForeground: string;
+  @Param @Require accentTint: string;
+  @Param @Require canvasBg: string;
+  @Param themeId: string = 'mint';
+  @Param @Require headerHeight: number;
+  @Param @Require bottomPad: number;
+  @Param @Require computerTitle: string;
+  @Local private selectingRuns: boolean = false;
+  @Local private selectedRunKeys: string[] = [];
 
   private recentRuns(): InboxRun[] {
     return this.inboxRuns.filter((row: InboxRun): boolean => row.run.status !== 'waiting');
@@ -96,11 +102,13 @@ export struct ScheduleOverlay {
     return keys.length > 0 && keys.every((key: string): boolean => this.selectedRunKeys.includes(key));
   }
 
+  @Monitor('schedulePage')
   private resetRunSelection(): void {
     this.selectingRuns = false;
     this.selectedRunKeys = [];
   }
 
+  @Monitor('base')
   private onHistoryComputerChanged(): void {
     if (this.schedulePage === 'history') this.resetRunSelection();
   }
@@ -390,18 +398,18 @@ export struct ScheduleOverlay {
         .backgroundColor($r('app.color.pigo_control'))
         .enabled(!this.scheduleEditing && this.projects.length > 0)
         .bindMenu(this.projects.map((cwd: string): MenuElement => ({
-          value: workspaceName(this.workspaces, cwd), action: () => { this.scheduleCwd = cwd; }
+          value: workspaceName(this.workspaces, cwd), action: () => { this.$scheduleCwd(cwd); }
         })))
       Text('名称').fontSize(13).fontColor($r('app.color.pigo_muted'))
       TextInput({ text: this.scheduleName, placeholder: '例如 每日汇总' }).id('schedule-name').maxLength(80)
         .backgroundColor($r('app.color.pigo_control')).fontColor($r('app.color.pigo_text'))
         .placeholderColor($r('app.color.pigo_muted'))
-        .onChange((value: string) => { this.scheduleName = value; })
+        .onChange((value: string) => { this.$scheduleName(value); })
       Text('让 Pi 执行什么').fontSize(13).fontColor($r('app.color.pigo_muted'))
       TextArea({ text: this.schedulePrompt, placeholder: '汇总今天的工作区变更' }).id('schedule-prompt').maxLength(1600).height(112)
         .backgroundColor($r('app.color.pigo_control')).fontColor($r('app.color.pigo_text'))
         .placeholderColor($r('app.color.pigo_muted'))
-        .onChange((value: string) => { this.schedulePrompt = value; })
+        .onChange((value: string) => { this.$schedulePrompt(value); })
       Row({ space: 4 }) {
         ForEach(['once', 'daily', 'interval'], (kind: string) => {
           Button(kind === 'once' ? '指定时间' : kind === 'daily' ? '每天' : '固定间隔', { type: ButtonType.Normal }).chatAction()
@@ -411,8 +419,8 @@ export struct ScheduleOverlay {
             .fontColor(this.scheduleKind === kind ? this.accentForeground : $r('app.color.pigo_muted'))
             .onClick(() => {
               if (this.scheduleKind === kind) return;
-              this.scheduleKind = kind;
-              this.scheduleWhen = kind === 'once' ? scheduleTime(Date.now() + 120_000) : kind === 'daily' ? '18:00' : '60';
+              this.$scheduleKind(kind);
+              this.$scheduleWhen(kind === 'once' ? scheduleTime(Date.now() + 120_000) : kind === 'daily' ? '18:00' : '60');
             })
         }, (kind: string) => kind)
       }.width('100%').padding(4).borderRadius(14).backgroundColor($r('app.color.pigo_control'))
@@ -424,7 +432,7 @@ export struct ScheduleOverlay {
           this.scheduleKind === 'daily' ? 'HH:mm' : '分钟' }).maxLength(16).layoutWeight(1)
           .backgroundColor($r('app.color.pigo_control')).fontColor($r('app.color.pigo_text'))
           .placeholderColor($r('app.color.pigo_muted'))
-          .onChange((value: string) => { this.scheduleWhen = value; })
+          .onChange((value: string) => { this.$scheduleWhen(value); })
         if (this.scheduleKind !== 'interval') {
           Button({ type: ButtonType.Normal }) {
             SymbolGlyph(this.scheduleKind === 'once' ? $r('sys.symbol.calendar') : $r('sys.symbol.clock'))
@@ -439,7 +447,7 @@ export struct ScheduleOverlay {
       TextInput({ text: this.scheduleCatchUp, placeholder: '0' }).type(InputType.Number).maxLength(4)
         .backgroundColor($r('app.color.pigo_control')).fontColor($r('app.color.pigo_text'))
         .placeholderColor($r('app.color.pigo_muted'))
-        .onChange((value: string) => { this.scheduleCatchUp = value; })
+        .onChange((value: string) => { this.$scheduleCatchUp(value); })
       Button(this.scheduleSaving ? '等待电脑确认…' : '保存到电脑').chatAction().id('schedule-save')
         .width('100%').height(46)
         .backgroundColor(this.accent).fontColor(this.accentForeground)

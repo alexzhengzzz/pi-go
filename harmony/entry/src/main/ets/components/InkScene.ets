@@ -38,20 +38,20 @@ interface MistBand {
   phase: number;
 }
 
-@Component
+@ComponentV2
 export struct InkScene {
-  @Prop @Watch('onDarkModeChange') darkMode: boolean = false;
-  @Prop sceneOpacity: number = 0.92;
-  @Prop @Watch('onLoopPolicyChange') dimmed: boolean = false;
-  @Prop @Watch('onLoopPolicyChange') active: boolean = true;
-  @Prop compact: boolean = false;
-  @Prop @Watch('onBurstChange') burstSeq: number = 0;
-  @Prop burstKind: string = 'send';
-  @Prop @Watch('onTapChange') tapSeq: number = 0;
-  @Prop tapX: number = 0;
-  @Prop tapY: number = 0;
+  @Param darkMode: boolean = false;
+  @Param sceneOpacity: number = 0.92;
+  @Param dimmed: boolean = false;
+  @Param active: boolean = true;
+  @Param compact: boolean = false;
+  @Param burstSeq: number = 0;
+  @Param burstKind: string = 'send';
+  @Param tapSeq: number = 0;
+  @Param tapX: number = 0;
+  @Param tapY: number = 0;
 
-  @State private pixelsReady: boolean = false;
+  @Local private pixelsReady: boolean = false;
 
   private readonly settings: RenderingContextSettings = new RenderingContextSettings(true);
   private readonly ctx: CanvasRenderingContext2D = new CanvasRenderingContext2D(this.settings);
@@ -91,6 +91,7 @@ export struct InkScene {
     this.pixelsReady = false;
   }
 
+  @Monitor('darkMode')
   private onDarkModeChange(): void {
     void this.loadBitmap();
   }
@@ -132,6 +133,7 @@ export struct InkScene {
     }
   }
 
+  @Monitor('burstSeq')
   private onBurstChange(): void {
     if (this.compact || this.burstSeq <= 0) return;
     const celebrate = this.burstKind === 'celebrate';
@@ -164,6 +166,7 @@ export struct InkScene {
     });
   }
 
+  @Monitor('tapSeq')
   private onTapChange(): void {
     if (this.compact || this.tapSeq <= 0) return;
     this.windGust = Math.max(this.windGust, 0.55);
@@ -195,6 +198,7 @@ export struct InkScene {
     }
   }
 
+  @Monitor('dimmed', 'active')
   private onLoopPolicyChange(): void {
     if (!this.active) {
       this.stopLoop();

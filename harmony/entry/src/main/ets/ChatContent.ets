@@ -152,21 +152,21 @@ function contentBlocks(source: string): ContentBlock[] {
   return blocks;
 }
 
-@Component
+@ComponentV2
 export struct ChatContent {
-  @Prop text: string = '';
-  @Prop accent: string = '#9EE2CE';
-  @Prop codeBg: string = '';
-  @Prop codeBorder: string = '';
-  @Prop codeHeaderBg: string = '';
-  @Prop codeRadius: number = 12;
-  @Prop allowLandscape: boolean = false;
-  @State private contentWidth: number = 0;
-  loadImage: (target: string) => Promise<string> = async (): Promise<string> => '';
-  openImage: (source: string, label: string) => void = () => {};
-  openLink: (target: string) => void = () => {};
-  openLandscape: (source: string) => void = () => {};
-  copyCode?: (value: string) => void;
+  @Param text: string = '';
+  @Param accent: string = '#9EE2CE';
+  @Param codeBg: string = '';
+  @Param codeBorder: string = '';
+  @Param codeHeaderBg: string = '';
+  @Param codeRadius: number = 12;
+  @Param allowLandscape: boolean = false;
+  @Local private contentWidth: number = 0;
+  @Event loadImage: (target: string) => Promise<string> = async (): Promise<string> => '';
+  @Event openImage: (source: string, label: string) => void = () => {};
+  @Event openLink: (target: string) => void = () => {};
+  @Event openLandscape: (source: string) => void = () => {};
+  @Event copyCode?: (value: string) => void;
 
   @Builder
   inlineText(value: string, heading: boolean, tableCell: boolean = false, headingLevel: number = 0) {

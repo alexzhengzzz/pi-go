@@ -1,10 +1,10 @@
-import { Want } from '@kit.AbilityKit';
+import type { Want } from '@kit.AbilityKit';
 import { util } from '@kit.ArkTS';
 import { uniformTypeDescriptor as utd } from '@kit.ArkData';
 import { systemShare } from '@kit.ShareKit';
 import { loadPromptImage } from './PromptImage';
 import { loadPromptFile } from './PromptFile';
-import { DraftAttachment } from './model/PiGoTypes';
+import type { DraftAttachment } from './model/PiGoTypes';
 import { MAX_IMAGE_ATTACHMENTS } from './model/PiGoConstants';
 
 export const MAX_SHARED_DRAFT_BYTES = 12000;

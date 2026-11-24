@@ -13,32 +13,34 @@ function chatAction() {
   .borderRadius(12)
 }
 
-@Component
+@ComponentV2
 export struct TaskPanel {
-  @StorageProp('pigoDark') private darkMode: boolean = false;
-  @Prop topClearance: number;
-  @Prop bottomClearance: number;
-  @Prop runningRows: RunningRow[];
-  @Prop scheduleRuns: RunMessage[];
-  @Prop currentId: string;
-  @Prop busy: boolean;
-  @Prop openingSession: boolean;
-  @Prop accentTint: string;
-  @Require openRunningTask: (id: string) => void = unboundAction;
-  @Require editSchedule: (job?: ScheduleJob) => void = unboundAction;
-  @Require loadScheduleJobs: () => Promise<void> = unboundAction;
-  @Link projects: string[];
-  @Prop reachable: boolean;
-  @Link scheduleError: string;
-  @Require scheduleJobMenu: (job: ScheduleJob) => MenuElement[] = unboundAction;
-  @Link scheduleJobs: ScheduleJob[];
-  @Prop scheduleListError: string;
-  @Prop scheduleLoading: boolean;
-  @Link schedulePage: string;
-  @Prop scheduleSaving: boolean;
-  @Link workspaces: WorkspaceRow[];
-  @Prop accent: string;
-  @Prop accentForeground: string;
+  @Param @Require darkMode: boolean;
+  @Param @Require topClearance: number;
+  @Param @Require bottomClearance: number;
+  @Param @Require runningRows: RunningRow[];
+  @Param @Require scheduleRuns: RunMessage[];
+  @Param @Require currentId: string;
+  @Param @Require busy: boolean;
+  @Param @Require openingSession: boolean;
+  @Param @Require accentTint: string;
+  @Event openRunningTask: (id: string) => void = unboundAction;
+  @Event editSchedule: (job?: ScheduleJob) => void = unboundAction;
+  @Event loadScheduleJobs: () => Promise<void> = unboundAction;
+  @Param @Require projects: string[];
+  @Param @Require reachable: boolean;
+  @Param @Require scheduleError: string;
+  @Event $scheduleError: (value: string) => void = unboundAction;
+  @Event scheduleJobMenu: (job: ScheduleJob) => MenuElement[] = unboundAction;
+  @Param @Require scheduleJobs: ScheduleJob[];
+  @Param @Require scheduleListError: string;
+  @Param @Require scheduleLoading: boolean;
+  @Param @Require schedulePage: string;
+  @Event $schedulePage: (value: string) => void = unboundAction;
+  @Param @Require scheduleSaving: boolean;
+  @Param @Require workspaces: WorkspaceRow[];
+  @Param @Require accent: string;
+  @Param @Require accentForeground: string;
 
   build() {
     Scroll() {
@@ -122,7 +124,7 @@ export struct TaskPanel {
           .enabled(this.reachable && this.projects.length > 0 && !this.scheduleLoading &&
             !this.scheduleSaving && !this.scheduleListError).onClick(() => { this.editSchedule(); })
         Button('运行历史').chatAction().id('schedule-history').height(42)
-          .onClick(() => { this.scheduleError = ''; this.schedulePage = 'history'; })
+          .onClick(() => { this.$scheduleError(''); this.$schedulePage('history'); })
       }.width('100%')
       if (this.scheduleLoading) Text('正在读取电脑上的计划…').fontSize(14).fontColor($r('app.color.pigo_muted'))
       if (this.scheduleListError) Text(this.scheduleListError).fontSize(14).fontColor($r('app.color.pigo_error'))

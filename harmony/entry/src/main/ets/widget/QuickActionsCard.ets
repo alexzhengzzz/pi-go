@@ -1,20 +1,18 @@
 import type { WidgetActionParams } from '../InboxWidget';
 
-const storage = new LocalStorage();
-
-@Entry(storage)
-@Component
+@Entry
+@ComponentV2
 struct QuickActionsCard {
-  @LocalStorageProp('dimension') private dimension: number = 2;
-  @LocalStorageProp('pending') private pending: string = '0';
-  @LocalStorageProp('unread') private unread: string = '0';
-  @LocalStorageProp('running') private running: string = '0';
-  @LocalStorageProp('paired') private paired: boolean = false;
-  @LocalStorageProp('reachable') private reachable: boolean = false;
-  @LocalStorageProp('computer') private computer: string = '';
-  @LocalStorageProp('workspace') private workspace: string = '';
-  @LocalStorageProp('currentSessionId') private currentSessionId: string = '';
-  @LocalStorageProp('currentSessionTitle') private currentSessionTitle: string = '';
+  @Local private dimension: number = 2;
+  @Local private pending: string = '0';
+  @Local private unread: string = '0';
+  @Local private running: string = '0';
+  @Local private paired: boolean = false;
+  @Local private reachable: boolean = false;
+  @Local private computer: string = '';
+  @Local private workspace: string = '';
+  @Local private currentSessionId: string = '';
+  @Local private currentSessionTitle: string = '';
 
   private route(params: WidgetActionParams): void {
     postCardAction(this, {

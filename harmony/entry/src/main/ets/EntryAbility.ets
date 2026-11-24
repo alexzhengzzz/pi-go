@@ -1,3 +1,4 @@
+import { AppUiState, appUiState } from './AppUiState';
 import { UIAbility, Want, Configuration, ConfigurationConstant } from '@kit.AbilityKit';
 import { window } from '@kit.ArkUI';
 import { formInfo } from '@kit.FormKit';
@@ -6,6 +7,7 @@ import { liveActivity } from './LiveActivity';
 import { IncomingShare, readIncomingShare, releaseIncomingShare } from './IncomingShare';
 
 export default class EntryAbility extends UIAbility {
+  private readonly appState: AppUiState = appUiState();
   private mainWindow?: window.Window;
   private shareGeneration: number = 0;
 
@@ -23,7 +25,7 @@ export default class EntryAbility extends UIAbility {
   private updateColorMode(config: Configuration): void {
     if (config.colorMode === undefined) return;
     const dark = config.colorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK;
-    AppStorage.setOrCreate<boolean>('pigoDark', dark);
+    this.appState.darkMode = dark;
     const foreground = dark ? '#EDF2F4' : '#1D2933';
     void this.mainWindow?.setWindowSystemBarProperties({
       statusBarContentColor: foreground, navigationBarContentColor: foreground
@@ -44,8 +46,8 @@ export default class EntryAbility extends UIAbility {
   onWindowStageDestroy(): void { this.mainWindow = undefined; }
   async onDestroy(): Promise<void> {
     this.shareGeneration += 1;
-    releaseIncomingShare(AppStorage.get<IncomingShare>('pigoIncomingShare'));
-    AppStorage.setOrCreate<IncomingShare>('pigoIncomingShare', { text: '', attachments: [], skipped: false });
+    releaseIncomingShare(this.appState.incomingShare);
+    this.appState.incomingShare = { text: '', attachments: [], skipped: false };
     await liveActivity.dispose();
   }
 
@@ -58,18 +60,18 @@ export default class EntryAbility extends UIAbility {
       const left = Math.max(system.leftRect.width, indicator.leftRect.width, cutout.leftRect.width);
       const right = Math.max(system.rightRect.width, indicator.rightRect.width, cutout.rightRect.width);
       const rect = mainWindow.getWindowProperties().windowRect;
-      AppStorage.setOrCreate<number>('pigoLeftInset', ui.px2vp(left));
-      AppStorage.setOrCreate<number>('pigoRightInset', ui.px2vp(right));
-      AppStorage.setOrCreate<number>('pigoStatusBar', ui.px2vp(Math.max(system.topRect.height, cutout.topRect.height)));
-      AppStorage.setOrCreate<number>('pigoNavBar', ui.px2vp(Math.max(indicator.bottomRect.height, cutout.bottomRect.height)));
-      AppStorage.setOrCreate<number>('pigoWindowWidth', ui.px2vp(Math.max(0, rect.width - left - right)));
-      AppStorage.setOrCreate<number>('pigoWindowHeight', ui.px2vp(rect.height));
+      this.appState.leftInset = ui.px2vp(left);
+      this.appState.rightInset = ui.px2vp(right);
+      this.appState.statusBarHeight = ui.px2vp(Math.max(system.topRect.height, cutout.topRect.height));
+      this.appState.navBarHeight = ui.px2vp(Math.max(indicator.bottomRect.height, cutout.bottomRect.height));
+      this.appState.windowWidth = ui.px2vp(Math.max(0, rect.width - left - right));
+      this.appState.windowHeight = ui.px2vp(rect.height);
     };
     update();
     mainWindow.on('windowSizeChange', () => { update(); });
     mainWindow.on('avoidAreaChange', () => { update(); });
     mainWindow.on('keyboardHeightChange', (height: number) => {
-      AppStorage.setOrCreate<number>('pigoKeyboard', mainWindow.getUIContext().px2vp(height));
+      this.appState.keyboardHeight = mainWindow.getUIContext().px2vp(height);
     });
   }
 
@@ -85,8 +87,8 @@ export default class EntryAbility extends UIAbility {
       releaseIncomingShare(share);
       return;
     }
-    releaseIncomingShare(AppStorage.get<IncomingShare>('pigoIncomingShare'));
-    AppStorage.setOrCreate<IncomingShare>('pigoIncomingShare', share);
+    releaseIncomingShare(this.appState.incomingShare);
+    this.appState.incomingShare = share;
   }
 
   private applyLaunch(want: Want): void {
@@ -101,16 +103,16 @@ export default class EntryAbility extends UIAbility {
           const payload = JSON.parse(params) as Record<string, string>;
           const destination = typeof payload.destination === 'string' ? payload.destination : '';
           if (destination) {
-            AppStorage.setOrCreate<string>('pigoFormDestination', destination);
-            AppStorage.setOrCreate<string>('pigoFormSessionId', typeof payload.sessionId === 'string' &&
-              /^[a-zA-Z0-9._-]{1,200}$/.test(payload.sessionId) ? payload.sessionId : '');
-            AppStorage.setOrCreate<string>('pigoFormAddress', typeof payload.address === 'string' &&
-              payload.address.length <= 2048 ? payload.address : '');
-            AppStorage.setOrCreate<string>('pigoFormPendingId', typeof payload.pendingId === 'string' &&
-              /^[a-zA-Z0-9._:-]{1,200}$/.test(payload.pendingId) ? payload.pendingId : '');
-            AppStorage.setOrCreate<string>('pigoFormEventId', typeof payload.eventId === 'string' &&
-              /^[a-zA-Z0-9._:-]{1,200}$/.test(payload.eventId) ? payload.eventId : '');
-            AppStorage.setOrCreate<boolean>('pigoInboxFormLaunch', true);
+            this.appState.formDestination = destination;
+            this.appState.formSessionId = typeof payload.sessionId === 'string' &&
+              /^[a-zA-Z0-9._-]{1,200}$/.test(payload.sessionId) ? payload.sessionId : '';
+            this.appState.formAddress = typeof payload.address === 'string' &&
+              payload.address.length <= 2048 ? payload.address : '';
+            this.appState.formPendingId = typeof payload.pendingId === 'string' &&
+              /^[a-zA-Z0-9._:-]{1,200}$/.test(payload.pendingId) ? payload.pendingId : '';
+            this.appState.formEventId = typeof payload.eventId === 'string' &&
+              /^[a-zA-Z0-9._:-]{1,200}$/.test(payload.eventId) ? payload.eventId : '';
+            this.appState.inboxFormLaunch = true;
           }
         } catch { /* Ignore malformed card parameters. */ }
       }
@@ -121,29 +123,29 @@ export default class EntryAbility extends UIAbility {
     const pushPending = want.parameters?.['pigoPushPending'];
     if (typeof pushDevice === 'string' && /^[a-f0-9]{64}$/.test(pushDevice) &&
       typeof pushEvent === 'string' && /^[a-f0-9]{32,64}$/.test(pushEvent)) {
-      AppStorage.setOrCreate<string>('pigoPushDevice', pushDevice);
-      AppStorage.setOrCreate<string>('pigoPushSession', typeof pushSession === 'string' &&
-        /^[a-zA-Z0-9._-]{1,200}$/.test(pushSession) ? pushSession : '');
-      AppStorage.setOrCreate<string>('pigoPushPending', typeof pushPending === 'string' &&
-        /^[a-zA-Z0-9._:-]{1,200}$/.test(pushPending) ? pushPending : '');
-      AppStorage.setOrCreate<string>('pigoPushEvent', pushEvent);
+      this.appState.pushLaunchDevice = pushDevice;
+      this.appState.pushLaunchSession = typeof pushSession === 'string' &&
+        /^[a-zA-Z0-9._-]{1,200}$/.test(pushSession) ? pushSession : '';
+      this.appState.pushLaunchPending = typeof pushPending === 'string' &&
+        /^[a-zA-Z0-9._:-]{1,200}$/.test(pushPending) ? pushPending : '';
+      this.appState.pushLaunchEvent = pushEvent;
     }
     const liveSession = want.parameters?.['pigoLiveSession'];
     const liveAddress = want.parameters?.['pigoLiveAddress'];
     if (typeof liveSession === 'string' && /^[a-zA-Z0-9._-]{1,200}$/.test(liveSession) &&
       typeof liveAddress === 'string' && liveAddress.length <= 2048) {
-      AppStorage.setOrCreate<string>('pigoLiveAddress', liveAddress);
-      AppStorage.setOrCreate<string>('pigoLiveSession', liveSession);
+      this.appState.liveLaunchAddress = liveAddress;
+      this.appState.liveLaunchSession = liveSession;
     }
     const address = want.parameters?.['address'];
     if (typeof address === 'string' && /^http:\/\/127\.0\.0\.1:\d{1,5}$/.test(address)) {
-      AppStorage.setOrCreate<string>('pigoAddress', address);
+      this.appState.address = address;
     }
     // The pairing window on the computer hands the one-time ticket over USB
     // debugging, so the phone can pair without manual code entry.
     const ticket = want.parameters?.['ticket'];
     if (typeof ticket === 'string' && /^(\d{8}|[a-fA-F0-9]{64})$/.test(ticket)) {
-      AppStorage.setOrCreate<string>('pigoTicket', ticket.toLowerCase());
+      this.appState.launchTicket = ticket.toLowerCase();
     }
   }
 }

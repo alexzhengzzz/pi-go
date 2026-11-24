@@ -2,14 +2,14 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { stripTypeScriptTypes } from 'node:module';
 import { test } from 'node:test';
-import { pageSource } from './harmony-source.mjs';
+import { harmonyFile } from './harmony-source.mjs';
 
-const page = pageSource();
-function method(name) {
-  const start = page.search(new RegExp(`  private (?:async )?${name}\\(`));
-  assert.ok(start >= 0);
-  return page.slice(start, page.indexOf('\n  }', start) + 4);
-}
+const composerSource = harmonyFile('model/VoiceComposerController.ets')
+  .replace(/^import .*;\n|^@ObservedV2\n|^export |@Trace /gm, '');
+const createVoiceComposer = new Function(
+  'VoiceInputSession', 'ensureMicrophone', 'voiceInputSupported', 'TouchType', 'MAX_VOICE_MS', 'MIN_HOLD_MS', 'ReplySpeech',
+  stripTypeScriptTypes(composerSource) + '; return VoiceComposerController;'
+);
 const deferred = () => {
   let resolve;
   const promise = new Promise(done => { resolve = done; });
@@ -24,28 +24,35 @@ function fixture(permission = Promise.resolve(true), startup = Promise.resolve()
     async cancel() { this.cancelled = true; await startup; }
     finish() { return result.promise; }
   }
-  const source = `class Harness { ${['stopRecordClock', 'resetVoice', 'holdTouch', 'beginRecording', 'endRecording'].map(method).join('\n')} }`;
-  const Harness = new Function('VoiceInputSession', 'ensureMicrophone', 'voiceInputSupported', 'TouchType', 'MAX_VOICE_MS', 'MIN_HOLD_MS',
-    stripTypeScriptTypes(source) + '; return Harness;')(Session, () => permission, () => true,
-    { Down: 'down', Up: 'up', Move: 'move', Cancel: 'cancel' }, 60000, 400);
-  const state = Object.assign(new Harness(), {
-    currentId: 'one', epoch: 1, voiceAttempt: 0, visible: true, reachable: true, idle: true,
-    draft: '', holdActive: true, recordTimer: -1, voiceHintTimer: -1,
+  const VoiceComposer = createVoiceComposer(Session, () => permission, () => true,
+    { Down: 'down', Up: 'up', Move: 'move', Cancel: 'cancel' }, 60000, 400, class {});
+  const page = { currentId: 'one', epoch: 1, visible: true, reachable: true, idle: true, draft: '' };
+  const controller = new VoiceComposer({
+    currentId: () => page.currentId,
+    epoch: () => page.epoch,
+    visible: () => page.visible,
+    reachable: () => page.reachable,
+    idle: () => page.idle,
+    busy: () => false,
+    openingSession: () => false,
+    hasPendingSend: () => false,
+    draft: () => page.draft,
+    setDraft: (draft) => { page.draft = draft; },
     getUIContext: () => ({ getHostContext: () => ({}) }),
-    stopReplySpeech() {},
-    showVoiceHint(text) { this.voiceHint = text; },
     syncCommandPalette() {},
-    async send() { this.sent = this.draft; }
+    async send() { page.sent = page.draft; },
   });
-  return { state, sessions, result };
+  controller.holdActive = true;
+  controller.showVoiceHint = (text) => { controller.state.voiceHint = text; };
+  return { controller, state: controller.state, page, sessions, result };
 }
 
 test('release during permission request never starts recording later', async () => {
   const permission = deferred();
-  const { state, sessions } = fixture(permission.promise);
-  const begin = state.beginRecording();
-  state.holdActive = false;
-  await state.endRecording(false);
+  const { controller, state, sessions } = fixture(permission.promise);
+  const begin = controller.beginRecording();
+  controller.holdActive = false;
+  await controller.endRecording(false);
   permission.resolve(true);
   await begin;
   assert.equal(sessions.length, 0);
@@ -54,84 +61,84 @@ test('release during permission request never starts recording later', async () 
 
 test('release during engine startup cannot revive recording or start a timer', async () => {
   const startup = deferred();
-  const { state, sessions } = fixture(Promise.resolve(true), startup.promise);
-  const begin = state.beginRecording();
+  const { controller, state, sessions } = fixture(Promise.resolve(true), startup.promise);
+  const begin = controller.beginRecording();
   await Promise.resolve();
-  const end = state.endRecording(false);
+  const end = controller.endRecording(false);
   startup.resolve();
   await Promise.all([begin, end]);
   assert.equal(sessions[0].cancelled, true);
   assert.equal(state.recording, false);
-  assert.equal(state.recordTimer, -1);
+  assert.equal(controller.recordTimer, -1);
   assert.equal(state.voiceFinishing, false);
 });
 
 test('slide up cancels; sliding back restores sending using the same finger', async () => {
-  const { state } = fixture();
-  state.holdTouchId = 7;
-  state.holdStartY = 500;
-  state.holdTouch({ type: 'move', changedTouches: [{ id: 8, windowY: 100 }] });
+  const { controller, state } = fixture();
+  controller.holdTouchId = 7;
+  controller.holdStartY = 500;
+  controller.holdTouch({ type: 'move', changedTouches: [{ id: 8, windowY: 100 }] });
   assert.ok(!state.holdCancel);
-  state.holdTouch({ type: 'move', changedTouches: [{ id: 7, windowY: 400 }] });
+  controller.holdTouch({ type: 'move', changedTouches: [{ id: 7, windowY: 400 }] });
   assert.equal(state.holdCancel, true);
-  state.holdTouch({ type: 'move', changedTouches: [{ id: 7, windowY: 480 }] });
+  controller.holdTouch({ type: 'move', changedTouches: [{ id: 7, windowY: 480 }] });
   assert.equal(state.holdCancel, false);
 });
 
 test('cancel closes feedback without sending or leaving a cancellation notice', async () => {
-  const { state, sessions } = fixture();
-  await state.beginRecording();
-  state.holdStart = Date.now() - 1000;
+  const { controller, state, page, sessions } = fixture();
+  await controller.beginRecording();
+  controller.holdStart = Date.now() - 1000;
   state.holdCancel = true;
-  await state.endRecording(false);
+  await controller.endRecording(false);
   assert.equal(sessions[0].cancelled, true);
-  assert.equal(state.sent, undefined);
+  assert.equal(page.sent, undefined);
   assert.equal(state.voiceHint, '');
   assert.equal(state.recording, false);
 });
 
 test('late recognition cannot write into another session draft', async () => {
-  const { state, result } = fixture();
-  await state.beginRecording();
-  state.holdStart = Date.now() - 1000;
-  const end = state.endRecording(false);
-  state.resetVoice();
-  state.currentId = 'two';
-  state.draft = 'other draft';
+  const { controller, page, result } = fixture();
+  await controller.beginRecording();
+  controller.holdStart = Date.now() - 1000;
+  const end = controller.endRecording(false);
+  controller.resetVoice();
+  page.currentId = 'two';
+  page.draft = 'other draft';
   result.resolve('old speech');
   await end;
-  assert.equal(state.draft, 'other draft');
-  assert.equal(state.sent, undefined);
+  assert.equal(page.draft, 'other draft');
+  assert.equal(page.sent, undefined);
 });
 
 test('release sends once; busy session exposes recognized text for editing', async () => {
   for (const idle of [true, false]) {
-    const { state, result } = fixture();
-    state.idle = idle;
+    const { controller, state, page, result } = fixture();
+    page.idle = idle;
     state.voiceMode = true;
-    await state.beginRecording();
-    state.holdStart = Date.now() - 1000;
-    const end = state.endRecording(false);
-    await state.endRecording(false);
+    await controller.beginRecording();
+    controller.holdStart = Date.now() - 1000;
+    const end = controller.endRecording(false);
+    await controller.endRecording(false);
     result.resolve('hello');
     await end;
-    assert.equal(state.draft, 'hello');
-    assert.equal(state.sent, idle ? 'hello' : undefined);
+    assert.equal(page.draft, 'hello');
+    assert.equal(page.sent, idle ? 'hello' : undefined);
     if (!idle) assert.equal(state.voiceMode, false);
   }
 });
 
 test('an incomplete transcript stays editable even in an idle session', async () => {
-  const { state, sessions, result } = fixture();
+  const { controller, state, page, sessions, result } = fixture();
   state.voiceMode = true;
-  await state.beginRecording();
+  await controller.beginRecording();
   sessions[0].hasFinalTranscript = false;
-  state.holdStart = Date.now() - 1000;
-  const end = state.endRecording(false);
+  controller.holdStart = Date.now() - 1000;
+  const end = controller.endRecording(false);
   result.resolve('partial speech');
   await end;
-  assert.equal(state.draft, 'partial speech');
-  assert.equal(state.sent, undefined);
+  assert.equal(page.draft, 'partial speech');
+  assert.equal(page.sent, undefined);
   assert.equal(state.voiceMode, false);
 });
 

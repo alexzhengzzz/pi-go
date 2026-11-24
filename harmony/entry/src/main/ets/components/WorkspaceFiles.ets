@@ -1,21 +1,21 @@
 import { unboundAction } from './ComponentAction';
 import { FileTreeRow } from '../model/PiGoTypes';
 
-@Component
+@ComponentV2
 export struct WorkspaceFiles {
-  @Prop bottomContentClearance: number;
-  @Prop busy: boolean;
-  @Prop fileRoot: string;
-  fileTreeIndex: number = 0;
-  @Link fileTreeRows: FileTreeRow[];
-  @Require loadFileDirectory: (path: string, more?: boolean) => Promise<void> = unboundAction;
-  @Require openFile: (cwd: string, path: string, lookupName?: boolean) => Promise<void> = unboundAction;
-  @Prop openingSession: boolean;
-  @Prop project: string;
-  @Require toggleFileDirectory: (path: string) => Promise<void> = unboundAction;
-  @Prop topContentClearance: number;
-  @Prop accent: string;
-  @Require setFileTreeIndex: (index: number) => void = unboundAction;
+  @Param @Require bottomContentClearance: number;
+  @Param @Require busy: boolean;
+  @Param @Require fileRoot: string;
+  @Param fileTreeIndex: number = 0;
+  @Param @Require fileTreeRows: FileTreeRow[];
+  @Event loadFileDirectory: (path: string, more?: boolean) => Promise<void> = unboundAction;
+  @Event openFile: (cwd: string, path: string, lookupName?: boolean) => Promise<void> = unboundAction;
+  @Param @Require openingSession: boolean;
+  @Param @Require project: string;
+  @Event toggleFileDirectory: (path: string) => Promise<void> = unboundAction;
+  @Param @Require topContentClearance: number;
+  @Param @Require accent: string;
+  @Event setFileTreeIndex: (index: number) => void = unboundAction;
 
   build() {
     List({ initialIndex: this.fileTreeIndex }) {

@@ -15,65 +15,69 @@ function chatAction() {
   .borderRadius(12)
 }
 
-@Component
+@ComponentV2
 export struct SessionSidebar {
-  @StorageProp('pigoDark') private darkMode: boolean = false;
-  @State private refreshing: boolean = false;
-  @Link activeTab: string;
-  @Prop base: string;
-  @Prop busy: boolean;
-  @Prop canCreateWorkspace: boolean;
-  @Require confirmCloseSpace: (path: string, epoch: number) => void = unboundAction;
-  @Require openNewSession: (path?: string) => void = unboundAction;
-  @Prop currentId: string;
-  @Link expandedSpaces: string[];
-  @Prop hostAvailable: boolean;
-  @Prop idle: boolean;
-  @Prop interaction?: PendingInteraction;
-  @Require library: Scroller = new Scroller();
-  @Require loadMoreSessions: (path: string) => void = unboundAction;
-  @Prop loadedView: string;
-  @Link offlineDismissed: boolean;
-  @Require openComputers: () => void = unboundAction;
-  @Prop openingSession: boolean;
-  @Prop openingSessionId: string;
-  @Link projects: string[];
-  @Prop queued: boolean;
-  @Prop reachable: boolean;
-  @Require refreshSessions: () => Promise<void> = unboundAction;
-  @Require requestAction: (path: string, input?: Payload) => Promise<boolean> = unboundAction;
-  @Require revealLibraryAnchor: () => void = unboundAction;
-  @Link runningSessionIds: string[];
-  @Link runningSessions: RunningRow[];
-  @Require schedule: (delay: number) => void = unboundAction;
-  @Require selectSessionView: (view: string) => void = unboundAction;
-  @Prop sessionCatalogFailed: boolean;
-  @Prop sessionCatalogLoaded: boolean;
-  @Prop sessionLoading: boolean;
-  @Prop sessionView: string;
-  @Link sessions: SessionRow[];
-  @Require setDrawer: (open: boolean) => void = unboundAction;
-  @Link showFiles: boolean;
-  @Link showSettings: boolean;
-  @Require sidebarRows: SidebarRows = new SidebarRows();
-  @Prop statusBarHeight: number;
-  @Require swipeDrawer: (event: GestureEvent) => void = unboundAction;
-  @Require toggleSpace: (path: string) => void = unboundAction;
-  @Require updateSessionMeta: (session: SessionRow, pin: boolean) => Promise<void> = unboundAction;
-  @Require shareSession: (session: SessionRow) => Promise<void> = unboundAction;
-  @Prop windowHeight: number;
-  @Link workspaces: WorkspaceRow[];
-  @Prop accent: string;
-  @Prop accentForeground: string;
-  @Prop accentTint: string;
-  @Prop bottomPad: number;
-  @Prop compactSessionPane: boolean;
-  @Prop computerTitle: string;
-  @Prop dockedSessions: boolean;
-  @Prop drawerWidth: number;
-  @Prop sessionPaneWidth: number;
-  @Require onDrawerAppear: () => void = unboundAction;
-  @Require connectionEpoch: () => number = unboundAction;
+  @Param @Require darkMode: boolean;
+  @Local private refreshing: boolean = false;
+  @Param @Require activeTab: string;
+  @Event $activeTab: (value: string) => void = unboundAction;
+  @Param @Require base: string;
+  @Param @Require busy: boolean;
+  @Param @Require canCreateWorkspace: boolean;
+  @Event confirmCloseSpace: (path: string, epoch: number) => void = unboundAction;
+  @Event openNewSession: (path?: string) => void = unboundAction;
+  @Param @Require currentId: string;
+  @Param @Require expandedSpaces: string[];
+  @Param @Require hostAvailable: boolean;
+  @Param @Require idle: boolean;
+  @Param @Require interaction?: PendingInteraction;
+  @Param @Require library: Scroller = new Scroller();
+  @Event loadMoreSessions: (path: string) => void = unboundAction;
+  @Param @Require loadedView: string;
+  @Param @Require offlineDismissed: boolean;
+  @Event $offlineDismissed: (value: boolean) => void = unboundAction;
+  @Event openComputers: () => void = unboundAction;
+  @Param @Require openingSession: boolean;
+  @Param @Require openingSessionId: string;
+  @Param @Require projects: string[];
+  @Param @Require queued: boolean;
+  @Param @Require reachable: boolean;
+  @Event refreshSessions: () => Promise<void> = unboundAction;
+  @Event requestAction: (path: string, input?: Payload) => Promise<boolean> = unboundAction;
+  @Event revealLibraryAnchor: () => void = unboundAction;
+  @Param @Require runningSessionIds: string[];
+  @Param @Require runningSessions: RunningRow[];
+  @Event schedule: (delay: number) => void = unboundAction;
+  @Event selectSessionView: (view: string) => void = unboundAction;
+  @Param @Require sessionCatalogFailed: boolean;
+  @Param @Require sessionCatalogLoaded: boolean;
+  @Param @Require sessionLoading: boolean;
+  @Param @Require sessionView: string;
+  @Param @Require sessions: SessionRow[];
+  @Event setDrawer: (open: boolean) => void = unboundAction;
+  @Param @Require showFiles: boolean;
+  @Event $showFiles: (value: boolean) => void = unboundAction;
+  @Param @Require showSettings: boolean;
+  @Event $showSettings: (value: boolean) => void = unboundAction;
+  @Param @Require sidebarRows: SidebarRows = new SidebarRows();
+  @Param @Require statusBarHeight: number;
+  @Event swipeDrawer: (event: GestureEvent) => void = unboundAction;
+  @Event toggleSpace: (path: string) => void = unboundAction;
+  @Event updateSessionMeta: (session: SessionRow, pin: boolean) => Promise<void> = unboundAction;
+  @Event shareSession: (session: SessionRow) => Promise<void> = unboundAction;
+  @Param @Require windowHeight: number;
+  @Param @Require workspaces: WorkspaceRow[];
+  @Param @Require accent: string;
+  @Param @Require accentForeground: string;
+  @Param @Require accentTint: string;
+  @Param @Require bottomPad: number;
+  @Param @Require compactSessionPane: boolean;
+  @Param @Require computerTitle: string;
+  @Param @Require dockedSessions: boolean;
+  @Param @Require drawerWidth: number;
+  @Param @Require sessionPaneWidth: number;
+  @Event onDrawerAppear: () => void = unboundAction;
+  @Event connectionEpoch: () => number = unboundAction;
 
   @Builder
   sidebarHeader() {
@@ -206,18 +210,18 @@ export struct SessionSidebar {
         }.id('drawer-retry').width(36).height(34).padding(0).borderRadius(10)
           .backgroundColor(Color.Transparent).enabled(!this.busy)
           .accessibilityText('重试连接')
-          .onClick(() => { this.offlineDismissed = false; this.schedule(0); })
+          .onClick(() => { this.$offlineDismissed(false); this.schedule(0); })
       } else {
         Button('重试').chatAction().id('offline-retry')
           .height(34).fontSize(13).enabled(!this.busy)
           .accessibilityText('重试连接')
-          .onClick(() => { this.offlineDismissed = false; this.schedule(0); })
+          .onClick(() => { this.$offlineDismissed(false); this.schedule(0); })
       }
       if (!compact) {
         Button({ type: ButtonType.Normal }) {
           SymbolGlyph($r('sys.symbol.xmark')).fontSize(15).fontColor([$r('app.color.pigo_muted')])
         }.width(34).height(34).padding(0).borderRadius(10).backgroundColor(Color.Transparent)
-          .accessibilityText('关闭离线提示').onClick(() => { this.offlineDismissed = true; })
+          .accessibilityText('关闭离线提示').onClick(() => { this.$offlineDismissed(true); })
       }
     }.width('100%').padding(narrow ? 8 : compact ? 10 : 14).borderRadius(compact ? 12 : 16)
       .backgroundColor(compact ? $r('app.color.pigo_warning_panel') : $r('app.color.pigo_panel'))
@@ -266,7 +270,7 @@ export struct SessionSidebar {
         .accessibilitySelected(session.id === this.currentId)
         .onClick(() => {
           if (this.openingSession) return;
-          this.activeTab = 'tasks'; this.showSettings = false; this.showFiles = false;
+          this.$activeTab('tasks'); this.$showSettings(false); this.$showFiles(false);
           if (session.id === this.currentId) this.setDrawer(false);
           else void this.requestAction('/open', { id: session.id, agent: session.agent });
         })
@@ -314,7 +318,7 @@ export struct SessionSidebar {
   }
   @Builder
   sessionLibrary() {
-    Refresh({ refreshing: $$this.refreshing }) {
+    Refresh({ refreshing: this.refreshing!! }) {
       List({ scroller: this.library, space: 5 }) {
         if (!this.sessionLoading && !this.sessionCatalogFailed && this.loadedView === this.sessionView &&
           (this.sessionView === 'all' ? this.projects.length === 0 : this.sessions.length === 0)) {

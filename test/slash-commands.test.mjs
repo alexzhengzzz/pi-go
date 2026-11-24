@@ -28,7 +28,7 @@ test('a failed command request clears the rendered loading state and can be retr
   assert.equal(state.commandsLoading, true);
   await failed;
   assert.equal(state.commandsLoading, false);
-  assert.ok(/@State private commandsLoading:/.test(page), 'ArkUI must observe loading changes');
+  assert.ok(/@Local private commandsLoading:/.test(page), 'ArkUI must observe loading changes');
   assert.match(state.commandError, /电脑端/);
   state.request = async () => ({ session: { id: 'one' }, commands: [{ name: 'pi-go' }] });
   await state.loadCommands();

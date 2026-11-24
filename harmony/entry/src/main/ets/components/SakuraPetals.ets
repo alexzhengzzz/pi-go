@@ -22,12 +22,12 @@ const COMPACT_PETALS: CompactPetalSpec[] = [
   { id: 'c5', startX: '56%', w: 10, h: 7, startAngle: -12, endAngle: 200, driftX: -20, duration: 5600, delay: 3200, alpha: 0.60, tint: 1 }
 ];
 
-@Component
+@ComponentV2
 export struct SakuraPetals {
-  @Prop darkMode: boolean = false;
-  @Prop compact: boolean = true;
-  @State private drifting: boolean = false;
-  @State private areaHeight: number = 150;
+  @Param darkMode: boolean = false;
+  @Param compact: boolean = true;
+  @Local private drifting: boolean = false;
+  @Local private areaHeight: number = 150;
   private startTimer: number = -1;
 
   aboutToDisappear(): void {
@@ -137,22 +137,22 @@ interface FloatingSpark {
   maxLife: number;
 }
 
-@Component
+@ComponentV2
 export struct SakuraScene {
-  @Prop @Watch('onDarkModeChange') darkMode: boolean = false;
-  @Prop sceneOpacity: number = 0.92;
-  @Prop @Watch('onLoopPolicyChange') dimmed: boolean = false;
-  @Prop @Watch('onLoopPolicyChange') active: boolean = true;
-  @Prop @Watch('onGirlTap') girlTapSeq: number = 0;
-  @Prop @Watch('onCelebrate') celebrateSeq: number = 0;
-  @Prop @Watch('onBurstChange') burstSeq: number = 0;
-  @Prop burstKind: string = 'send';
-  @Prop @Watch('onBloomChange') bloomSeq: number = 0;
-  @Prop bloomX: number = 0;
-  @Prop bloomY: number = 0;
+  @Param darkMode: boolean = false;
+  @Param sceneOpacity: number = 0.92;
+  @Param dimmed: boolean = false;
+  @Param active: boolean = true;
+  @Param girlTapSeq: number = 0;
+  @Param celebrateSeq: number = 0;
+  @Param burstSeq: number = 0;
+  @Param burstKind: string = 'send';
+  @Param bloomSeq: number = 0;
+  @Param bloomX: number = 0;
+  @Param bloomY: number = 0;
 
-  @State private canvasReady: boolean = false;
-  @State private pixelsReady: boolean = false;
+  @Local private canvasReady: boolean = false;
+  @Local private pixelsReady: boolean = false;
 
   private readonly settings: RenderingContextSettings = new RenderingContextSettings(true);
   private readonly ctx: CanvasRenderingContext2D = new CanvasRenderingContext2D(this.settings);
@@ -205,6 +205,7 @@ export struct SakuraScene {
     this.pixelsReady = false;
   }
 
+  @Monitor('darkMode')
   private onDarkModeChange(): void {
     void this.loadBitmaps();
   }
@@ -321,16 +322,19 @@ export struct SakuraScene {
     );
   }
 
+  @Monitor('girlTapSeq')
   private onGirlTap(): void {
     if (this.girlTapSeq <= 0) return;
     this.triggerHappy();
   }
 
+  @Monitor('celebrateSeq')
   private onCelebrate(): void {
     if (this.celebrateSeq <= 0) return;
     this.triggerHappy();
   }
 
+  @Monitor('burstSeq')
   private onBurstChange(): void {
     if (this.burstSeq <= 0) return;
     const celebrate = this.burstKind === 'celebrate';
@@ -361,6 +365,7 @@ export struct SakuraScene {
     }
   }
 
+  @Monitor('bloomSeq')
   private onBloomChange(): void {
     if (this.bloomSeq <= 0) return;
     const vxList: number[] = [-42, -20, 4, 24, 44];
@@ -386,6 +391,7 @@ export struct SakuraScene {
     }
   }
 
+  @Monitor('dimmed', 'active')
   private onLoopPolicyChange(): void {
     if (!this.active) {
       this.stopLoop();

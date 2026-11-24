@@ -1,3 +1,8 @@
+import { runStatus } from './RunResults';
+import type { InboxRun } from './RunResults';
+import { scheduleTime, scheduleRunStatus } from './ScheduledRuns';
+import type { RunMessage, ScheduleJob } from './ScheduledRuns';
+import type { RunningRow } from './model/PiGoTypes';
 import { common } from '@kit.AbilityKit';
 import { preferences } from '@kit.ArkData';
 import { formBindingData, formProvider } from '@kit.FormKit';
@@ -66,6 +71,125 @@ interface WidgetBindingPayload {
   items: WidgetItem[];
   runningItems: WidgetItem[];
   scheduleItems: WidgetItem[];
+}
+
+export interface WidgetOverview {
+  inbox: InboxRun[];
+  scheduleMessages: RunMessage[];
+  jobs: ScheduleJob[];
+  runningRows: RunningRow[];
+  activeSchedules: RunMessage[];
+  running: number;
+  syncedAt: number;
+  paired: boolean;
+  reachable: boolean;
+  address: string;
+  computer: string;
+  pairedComputer: string;
+  workspace: string;
+  currentSessionId: string;
+  currentSessionTitle: string;
+  sessionState: (id: string) => string;
+  stateLabel: (state: string) => string;
+  workspaceName: (cwd: string) => string;
+}
+
+export function buildWidgetSnapshot(overview: WidgetOverview): WidgetSnapshot {
+  const displayedInbox = overview.inbox;
+  const pendingSet = new Set<string>();
+  const unreadSet = new Set<string>();
+  for (const row of displayedInbox) {
+    if (row.run.status === 'waiting') pendingSet.add(row.run.id);
+    if (row.unread) unreadSet.add(row.run.id);
+  }
+  for (const msg of overview.scheduleMessages) {
+    if (!msg.dismissed && msg.unread) unreadSet.add(msg.key);
+  }
+
+  const runningItems: WidgetItem[] = overview.runningRows.slice(0, 4).map((row: RunningRow): WidgetItem => {
+    const state = row.state ?? overview.sessionState(row.id);
+    return {
+      id: row.id,
+      sessionId: row.id,
+      address: overview.address,
+      computer: overview.computer,
+      title: row.name || '后台任务',
+      subtitle: row.cwd ? overview.workspaceName(row.cwd) : overview.computer,
+      status: state || 'streaming',
+      statusText: overview.stateLabel(state || 'streaming'),
+      timeText: '进行中',
+      unread: state === 'waiting'
+    };
+  }).concat(overview.activeSchedules.slice(0, 2).map((row: RunMessage): WidgetItem => ({
+    id: row.run.id,
+    sessionId: row.run.sessionId ?? '',
+    address: row.address,
+    computer: row.computer,
+    title: row.run.name || '定时任务',
+    subtitle: `${row.computer} · 定时运行中`,
+    status: 'running',
+    statusText: '运行中',
+    timeText: '进行中',
+    unread: false
+  }))).slice(0, 5);
+
+  const inboxItems: WidgetItem[] = displayedInbox.slice(0, 6).map((row: InboxRun): WidgetItem => ({
+    id: row.run.id,
+    sessionId: row.run.sessionId,
+    pendingId: row.run.pendingId ?? '',
+    address: row.address,
+    computer: row.computer,
+    title: row.run.title || 'Pi 会话',
+    subtitle: `${row.computer} · ${scheduleTime(row.run.finishedAt).slice(5)}`,
+    status: row.run.status,
+    statusText: runStatus(row.run.status),
+    timeText: scheduleTime(row.run.finishedAt).slice(5),
+    unread: row.unread
+  }));
+
+  const scheduleItems: WidgetItem[] = overview.scheduleMessages
+    .filter((msg: RunMessage): boolean => !msg.dismissed)
+    .slice(0, 5)
+    .map((msg: RunMessage): WidgetItem => ({
+      id: msg.run.id,
+      sessionId: msg.run.sessionId ?? '',
+      address: msg.address,
+      computer: msg.computer,
+      title: msg.run.name || '定时任务',
+      subtitle: msg.run.summary || `${msg.computer} · ${scheduleTime(msg.run.finishedAt ?? msg.run.scheduledAt).slice(5)}`,
+      status: msg.run.status,
+      statusText: scheduleRunStatus(msg.run.status),
+      timeText: scheduleTime(msg.run.finishedAt ?? msg.run.scheduledAt).slice(5),
+      unread: msg.unread
+    }));
+
+  const combinedItems: WidgetItem[] = inboxItems
+    .filter((item: WidgetItem): boolean => item.status === 'waiting')
+    .concat(runningItems.filter((runItem: WidgetItem): boolean =>
+      !inboxItems.some((inItem: WidgetItem): boolean => inItem.status === 'waiting' && inItem.sessionId === runItem.sessionId)))
+    .concat(inboxItems.filter((item: WidgetItem): boolean => item.status !== 'waiting'))
+    .concat(scheduleItems)
+    .slice(0, 6);
+
+  const nextJob = overview.jobs.find((job: ScheduleJob): boolean => job.enabled && job.nextAt !== null);
+  return {
+    pending: pendingSet.size,
+    unread: unreadSet.size,
+    running: overview.running,
+    scheduleCount: overview.jobs.filter((job: ScheduleJob): boolean => job.enabled).length,
+    syncedAt: overview.syncedAt,
+    paired: overview.paired,
+    reachable: overview.reachable,
+    computer: overview.pairedComputer,
+    workspace: overview.workspace,
+    currentSessionId: overview.currentSessionId,
+    currentSessionTitle: overview.currentSessionTitle,
+    nextScheduleName: nextJob?.name ?? '',
+    nextScheduleTime: nextJob?.nextAt ? scheduleTime(nextJob.nextAt).slice(5) : '',
+    items: combinedItems,
+    runningItems: runningItems,
+    scheduleItems: scheduleItems
+  };
 }
 
 export function emptyWidgetSnapshot(): WidgetSnapshot {

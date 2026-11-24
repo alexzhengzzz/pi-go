@@ -7,23 +7,23 @@ import { immersiveSurface, themedCardSurface } from '../Immersive';
 import { headerSymbol } from './HeaderSymbol';
 import { runStatusInk, runStatusMark } from './RunStatusMark';
 
-@Component
+@ComponentV2
 export struct RunResultView {
-  @Prop result: RunEvent | undefined = undefined;
-  @Prop file: RunFile | undefined = undefined;
-  @Prop patch: string = '';
-  @Prop loading: boolean = false;
-  @Prop error: string = '';
-  @Prop top: number = 0;
-  @Prop bottom: number = 0;
-  @Prop themeId: string = 'mint';
-  @Prop darkMode: boolean = false;
-  @Require back: () => void = unboundAction;
-  @Require openDiff: (file: RunFile) => void = unboundAction;
-  @Require openArtifact: (file: RunFile) => void = unboundAction;
-  @Require loadScreenshot: (image: RunScreenshot) => Promise<string> = unboundAction;
-  @Require openScreenshot: (source: string, label: string) => void = unboundAction;
-  @Require citeLine: (line: DiffLine) => void = unboundAction;
+  @Param result: RunEvent | undefined = undefined;
+  @Param file: RunFile | undefined = undefined;
+  @Param patch: string = '';
+  @Param loading: boolean = false;
+  @Param error: string = '';
+  @Param top: number = 0;
+  @Param bottom: number = 0;
+  @Param themeId: string = 'mint';
+  @Param darkMode: boolean = false;
+  @Event back: () => void = unboundAction;
+  @Event openDiff: (file: RunFile) => void = unboundAction;
+  @Event openArtifact: (file: RunFile) => void = unboundAction;
+  @Event loadScreenshot: (image: RunScreenshot) => Promise<string> = unboundAction;
+  @Event openScreenshot: (source: string, label: string) => void = unboundAction;
+  @Event citeLine: (line: DiffLine) => void = unboundAction;
 
   private palette(): ThemePalette {
     return themePalette(this.themeId, this.darkMode);

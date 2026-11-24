@@ -1,26 +1,24 @@
 import type { WidgetActionParams, WidgetItem } from '../InboxWidget';
 
-const storage = new LocalStorage();
-
-@Entry(storage)
-@Component
+@Entry
+@ComponentV2
 struct InboxCard {
-  @LocalStorageProp('dimension') private dimension: number = 3;
-  @LocalStorageProp('pending') private pending: string = '0';
-  @LocalStorageProp('unread') private unread: string = '0';
-  @LocalStorageProp('running') private running: string = '0';
-  @LocalStorageProp('scheduleCount') private scheduleCount: string = '0';
-  @LocalStorageProp('syncedAt') private syncedAt: string = '';
-  @LocalStorageProp('paired') private paired: boolean = false;
-  @LocalStorageProp('reachable') private reachable: boolean = false;
-  @LocalStorageProp('computer') private computer: string = '';
-  @LocalStorageProp('workspace') private workspace: string = '';
-  @LocalStorageProp('currentSessionId') private currentSessionId: string = '';
-  @LocalStorageProp('currentSessionTitle') private currentSessionTitle: string = '';
-  @LocalStorageProp('nextScheduleName') private nextScheduleName: string = '';
-  @LocalStorageProp('nextScheduleTime') private nextScheduleTime: string = '';
-  @LocalStorageProp('items') private items: WidgetItem[] = [];
-  @LocalStorageProp('runningItems') private runningItems: WidgetItem[] = [];
+  @Local private dimension: number = 3;
+  @Local private pending: string = '0';
+  @Local private unread: string = '0';
+  @Local private running: string = '0';
+  @Local private scheduleCount: string = '0';
+  @Local private syncedAt: string = '';
+  @Local private paired: boolean = false;
+  @Local private reachable: boolean = false;
+  @Local private computer: string = '';
+  @Local private workspace: string = '';
+  @Local private currentSessionId: string = '';
+  @Local private currentSessionTitle: string = '';
+  @Local private nextScheduleName: string = '';
+  @Local private nextScheduleTime: string = '';
+  @Local private items: WidgetItem[] = [];
+  @Local private runningItems: WidgetItem[] = [];
 
   private syncLabel(): string {
     if (!Number(this.syncedAt)) return '轻触连接电脑';

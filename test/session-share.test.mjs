@@ -14,30 +14,28 @@ const {
   shareSessionViaSystem
 } = await import('../harmony/entry/src/main/ets/SessionShare.ets');
 
+const { StreamSyncController } = await import('../harmony/entry/src/main/ets/model/StreamSyncController.ets');
+const { ShareAttachmentController } = await import('../harmony/entry/src/main/ets/model/ShareAttachmentController.ets');
+
 test('a new share is visible when it arrives over the session drawer or computer list', () => {
-  const page = pageSource();
-  const methods = ['onIncomingShare', 'showIncomingShare'].map(name => {
-    const start = page.indexOf(`  private ${name}(`);
-    assert.ok(start >= 0, `Missing page method: ${name}`);
-    return page.slice(start, page.indexOf('\n  }', start) + 4);
+  let drawer = true;
+  const sharing = new ShareAttachmentController({
+    appState: { incomingShare: { text: 'https://example.com/', attachments: [], skipped: false } },
+    activeTab: () => 'mine',
+    minePage: () => 'computers',
+    drawerOpen: () => drawer,
+    setDrawer: (open) => { drawer = open; }
   });
-  const SharePage = new Function(stripTypeScriptTypes(`class SharePage {\n${methods.join('\n')}\n}`) + '; return SharePage;')();
-  const state = new SharePage();
-  Object.assign(state, {
-    incomingShare: { text: 'https://example.com/', attachments: [], skipped: false },
-    showSessions: true, activeTab: 'mine', minePage: 'computers', shareTargetPicker: 'computer',
-    drawerOpen() { return this.showSessions; },
-    setDrawer(open) { this.showSessions = open; }
-  });
-  assert.equal(state.showIncomingShare(), false, 'allow the user to choose a computer');
-  state.onIncomingShare();
-  assert.equal(state.showIncomingShare(), true, 'a new system share is presented over the previous selection');
-  assert.equal(state.showSessions, false);
-  state.shareTargetPicker = 'session';
-  state.showSessions = true;
-  assert.equal(state.showIncomingShare(), false, 'allow the user to choose a session');
-  state.showSessions = false;
-  assert.equal(state.showIncomingShare(), true);
+  sharing.state.shareTargetPicker = 'computer';
+  assert.equal(sharing.showIncomingShare(), false, 'allow the user to choose a computer');
+  sharing.onIncomingShare();
+  assert.equal(sharing.showIncomingShare(), true, 'a new system share is presented over the previous selection');
+  assert.equal(drawer, false);
+  sharing.state.shareTargetPicker = 'session';
+  drawer = true;
+  assert.equal(sharing.showIncomingShare(), false, 'allow the user to choose a session');
+  drawer = false;
+  assert.equal(sharing.showIncomingShare(), true);
 });
 
 test('incoming share accepts text, links and a granted image while skipping unsupported records', async () => {
@@ -250,29 +248,24 @@ test('Index page collects paginated history and full truncated replies before in
     const end = page.indexOf('\n  }', start) + 4;
     return page.slice(start, end);
   }
+  const { files, api } = createMemoryFiles();
   const shareCalls = [];
+  globalThis.pigoTestFiles = api;
+  globalThis.pigoTestShareShow = async (data, context, options) => {
+    shareCalls.push({ records: data.getRecords(), context, options });
+  };
   const Harness = new Function(
-    'formatSessionMarkdown',
-    'shareSessionViaSystem',
-    stripTypeScriptTypes(`class Harness {\n${['fetchFullMessageText', 'collectCurrentSessionMessages', 'shareCurrentSession', 'chatHeaderMenu'].map(method).join('\n')}\n}`) + '; return Harness;'
-  )(
-    formatSessionMarkdown,
-    async (context, content, meta, count, mode, anchor) => {
-      shareCalls.push({ context, content, meta, count, mode, anchor });
-      return { mode, fallbackToFile: false };
-    }
-  );
+    stripTypeScriptTypes(`class Harness {\n${['chatHeaderMenu'].map(method).join('\n')}\n}`) + '; return Harness;'
+  )();
 
   const state = new Harness();
   const requests = [];
   Object.assign(state, {
     epoch: 1,
     currentId: 'sess-1',
-    noSession: '',
     activeTab: 'tasks',
     reachable: true,
     syncMode: 'sequenced',
-    sharingSession: false,
     openingSession: false,
     historyCursor: 'cursor-1',
     project: 'pi-go',
@@ -305,15 +298,37 @@ test('Index page collects paginated history and full truncated replies before in
     }
   });
 
-  const menu = state.chatHeaderMenu();
-  assert.equal(menu[0].value, '分享会话');
-
-  await state.shareCurrentSession('session-settings');
-  assert.equal(requests.length, 2);
-  assert.equal(shareCalls.length, 1);
-  assert.equal(shareCalls[0].mode, 'markdown');
-  assert.equal(shareCalls[0].count, 2);
-  assert.match(shareCalls[0].content, /最早的一条提问/);
-  assert.match(shareCalls[0].content, /这是完整的助手回复内容。/);
-  assert.equal(shareCalls[0].anchor, 'session-settings');
+  state.session = { currentId: state.currentId, epoch: state.epoch, noSession: '' };
+  state.streamSync = new StreamSyncController({ session: state.session, request: (path) => state.request(path) });
+  state.shareController = new ShareAttachmentController({
+    currentId: () => state.currentId,
+    epoch: () => state.epoch,
+    openingSession: () => state.openingSession,
+    reachable: () => state.reachable,
+    historyCursor: () => state.historyCursor,
+    syncMode: () => state.syncMode,
+    messages: () => state.messages,
+    project: () => state.project,
+    liveText: () => state.liveText,
+    request: (path) => state.request(path),
+    fetchFullMessageText: (...args) => state.streamSync.fetchFullMessageText(...args),
+    dismissKeyboard: () => state.dismissKeyboard(),
+    getUIContext: () => state.getUIContext(),
+    chatTitle: () => state.chatTitle(),
+    computerTitle: () => state.computerTitle(),
+  });
+  try {
+    assert.equal(state.chatHeaderMenu()[0].value, '分享会话');
+    await state.shareController.shareCurrentSession('session-settings');
+    assert.equal(requests.length, 2);
+    assert.equal(shareCalls.length, 1);
+    assert.equal(shareCalls[0].options.anchor, 'session-settings');
+    assert.equal(shareCalls[0].records[0].utd, 'general.markdown');
+    const content = new TextDecoder().decode([...files.values()][0].bytes);
+    assert.match(content, /最早的一条提问/);
+    assert.match(content, /这是完整的助手回复内容。/);
+  } finally {
+    delete globalThis.pigoTestFiles;
+    delete globalThis.pigoTestShareShow;
+  }
 });

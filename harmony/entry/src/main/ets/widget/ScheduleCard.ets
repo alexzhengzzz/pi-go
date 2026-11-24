@@ -1,20 +1,18 @@
 import type { WidgetActionParams, WidgetItem } from '../InboxWidget';
 
-const storage = new LocalStorage();
-
-@Entry(storage)
-@Component
+@Entry
+@ComponentV2
 struct ScheduleCard {
-  @LocalStorageProp('dimension') private dimension: number = 3;
-  @LocalStorageProp('running') private running: string = '0';
-  @LocalStorageProp('scheduleCount') private scheduleCount: string = '0';
-  @LocalStorageProp('paired') private paired: boolean = false;
-  @LocalStorageProp('reachable') private reachable: boolean = false;
-  @LocalStorageProp('computer') private computer: string = '';
-  @LocalStorageProp('nextScheduleName') private nextScheduleName: string = '';
-  @LocalStorageProp('nextScheduleTime') private nextScheduleTime: string = '';
-  @LocalStorageProp('runningItems') private runningItems: WidgetItem[] = [];
-  @LocalStorageProp('scheduleItems') private scheduleItems: WidgetItem[] = [];
+  @Local private dimension: number = 3;
+  @Local private running: string = '0';
+  @Local private scheduleCount: string = '0';
+  @Local private paired: boolean = false;
+  @Local private reachable: boolean = false;
+  @Local private computer: string = '';
+  @Local private nextScheduleName: string = '';
+  @Local private nextScheduleTime: string = '';
+  @Local private runningItems: WidgetItem[] = [];
+  @Local private scheduleItems: WidgetItem[] = [];
 
   private route(params: WidgetActionParams): void {
     postCardAction(this, {

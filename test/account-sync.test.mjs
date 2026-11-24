@@ -131,3 +131,74 @@ test('sync uploads new and legacy computer removals and keeps them out of the re
   assert.equal(await store.synchronize(), 0);
   assert.deepEqual((await store.read()).computers, [{ address: 'https://192.168.5.2:18981', mode: 'lan' }]);
 });
+
+const controllerSource = readFileSync(new URL('../harmony/entry/src/main/ets/model/AccountSyncController.ets', import.meta.url), 'utf8')
+  .replace(/^import .*\n|^@ObservedV2\n|^export |@Trace /gm, '');
+const loadController = new Function('AccountSync', 'isHuaweiProfileCurrent', 'relationalStore',
+  stripTypeScriptTypes(controllerSource) + '\nreturn AccountSyncController;');
+
+test('signing out during cloud sync prevents the old account snapshot from reaching the page', async () => {
+  const started = Promise.withResolvers();
+  const cloud = Promise.withResolvers();
+  const applied = [];
+  const saved = [];
+  const profile = { openId: 'first-account' };
+  const store = {
+    read: async () => ({ computers: [] }),
+    synchronize: async () => {
+      started.resolve();
+      return cloud.promise;
+    },
+    seed: async () => assert.fail('a signed-out profile must not seed cloud settings')
+  };
+  const Controller = loadController({ open: async () => store }, async () => true, { ProgressCode: { SUCCESS: 0 } });
+  const controller = new Controller({
+    context: () => ({}),
+    whenRestored: async () => {},
+    settings: () => ({ getSync: () => profile.openId }),
+    saveSetting: async (key, value) => saved.push([key, value]),
+    resetAvatar() {},
+    cancelComputerRestore() {},
+    applyTheme: (theme) => applied.push(theme),
+    applyMode: (mode) => applied.push(mode)
+  });
+  controller.state.huaweiProfile = profile;
+  const synchronization = controller.syncAccountSettings(profile, 0);
+  await started.promise;
+  assert.equal(controller.state.cloudSyncBusy, true);
+  await controller.signOutHuawei();
+  cloud.resolve(0);
+  await synchronization;
+  assert.deepEqual(saved, [['huawei_profile', '']]);
+  assert.equal(controller.state.huaweiProfile, undefined);
+  assert.deepEqual(controller.state.cloudComputers, []);
+  assert.equal(controller.state.cloudSyncStatus, '');
+  assert.equal(controller.state.cloudSyncBusy, false);
+  assert.deepEqual(applied, []);
+});
+
+test('a setting changed during a cloud database write is saved after the earlier value', async () => {
+  const saving = Promise.withResolvers();
+  const release = Promise.withResolvers();
+  const values = [];
+  const store = {
+    async save(row) {
+      values.push(row.payload);
+      if (values.length === 1) {
+        saving.resolve();
+        await release.promise;
+      }
+    }
+  };
+  const Controller = loadController({ open: async () => store });
+  const controller = new Controller({ context: () => ({}) });
+  controller.state.huaweiProfile = { openId: 'account' };
+  controller.scheduleCloudSync = () => {};
+  controller.writeCloudRow({ key: 'theme_style', payload: 'sakura' });
+  await saving.promise;
+  controller.writeCloudRow({ key: 'theme_style', payload: 'graphite' });
+  release.resolve();
+  await controller.cloudWrites;
+  assert.deepEqual(values, ['sakura', 'graphite']);
+  assert.equal(controller.pendingCloudRows.size, 0);
+});

@@ -22,74 +22,82 @@ function chatAction() {
   .borderRadius(12)
 }
 
-@Component
+@ComponentV2
 export struct SettingsView {
-  @Prop accountBusy: boolean;
-  @Prop accountNotice: string;
-  @Require addComputerConnection: (id?: string) => void = unboundAction;
-  @Prop addingComputer: boolean;
-  @Link address: string;
-  @Prop appearanceNotice: string;
-  @Require assignComputerConnection: (address: string, group?: ComputerGroup) => void = unboundAction;
-  @Link avatarUnavailable: boolean;
-  @Prop base: string;
-  @Prop bottomContentClearance: number;
-  @Prop busy: boolean;
-  @Require chooseComputer: (record: Companion) => void = unboundAction;
-  @Require closeComputerEditors: () => void = unboundAction;
-  @Link cloudComputers: CloudComputer[];
-  @Prop cloudSyncBusy: boolean;
-  @Prop cloudSyncStatus: string;
-  @Require computerConnectionMenu: (record: Companion) => MenuElement[] = unboundAction;
-  @Link computerNameDraft: string;
-  @Link computers: Companion[];
-  @Prop darkMode: boolean;
-  @Require dismissKeyboard: () => void = unboundAction;
-  @Require findLanCompanions: () => Promise<void> = unboundAction;
-  @Prop huaweiProfile?: HuaweiProfile;
-  @Prop isPaired: boolean;
-  @Link lanCandidates: string[];
-  @Prop liveViewStatus: string;
-  @Prop liveViewsEnabled: boolean;
-  @Link minePage: string;
-  @Prop modeId: string;
-  @Prop moveConnectionAddress: string;
-  @Prop openingSession: boolean;
-  @Require pair: () => Promise<void> = unboundAction;
-  @Link pairingBundle: string;
-  @Prop pairingComputerId: string;
-  @Prop pairingMode: string;
-  @Prop reachable: boolean;
-  @Require removeCloudComputer: (computer: CloudComputer) => void = unboundAction;
-  @Require removeComputer: (address: string) => void = unboundAction;
-  @Link removeTarget: string;
-  @Link renameComputerId: string;
-  @Require restoreCloudComputer: (computer: CloudComputer) => void = unboundAction;
-  @Prop restoringComputer?: CloudComputer;
-  @Prop runNoticesEnabled: boolean;
-  @Prop watchRemindersEnabled: boolean;
-  @Prop watchReminderStatus: string;
-  @Prop watchReminderTesting: boolean;
-  @Require setWatchRemindersEnabled: (enabled: boolean) => Promise<void> = unboundAction;
-  @Require testWatchReminder: () => Promise<void> = unboundAction;
-  @Require saveComputerName: (id: string) => void = unboundAction;
-  @Require scanPairingBundle: () => Promise<void> = unboundAction;
-  @Require scheduleCloudSync: (delay?: number) => void = unboundAction;
-  @Require selectAppearanceMode: (mode: AppearanceMode) => void = unboundAction;
-  @Require selectPairingMode: (mode: string) => void = unboundAction;
-  @Require selectTheme: (id: string) => void = unboundAction;
-  @Require setThemeMotionEnabled: (enabled: boolean) => Promise<void> = unboundAction;
-  @Prop themeMotionEnabled: boolean = true;
-  @Require setLiveViewsEnabled: (enabled: boolean) => Promise<void> = unboundAction;
-  @Require setRunNoticesEnabled: (enabled: boolean) => Promise<void> = unboundAction;
-  @Require signInHuawei: () => Promise<void> = unboundAction;
-  @Require signOutHuawei: () => Promise<void> = unboundAction;
-  @Prop themeId: string;
-  @Link ticket: string;
-  @Prop topContentClearance: number;
-  @Prop accent: string;
-  @Prop accentForeground: string;
-  @Prop accentTint: string;
+  @Param @Require accountBusy: boolean;
+  @Param @Require accountNotice: string;
+  @Event addComputerConnection: (id?: string) => void = unboundAction;
+  @Param @Require addingComputer: boolean;
+  @Param @Require address: string;
+  @Event $address: (value: string) => void = unboundAction;
+  @Param @Require appearanceNotice: string;
+  @Event assignComputerConnection: (address: string, group?: ComputerGroup) => void = unboundAction;
+  @Param @Require avatarUnavailable: boolean;
+  @Event $avatarUnavailable: (value: boolean) => void = unboundAction;
+  @Param @Require base: string;
+  @Param @Require bottomContentClearance: number;
+  @Param @Require busy: boolean;
+  @Event chooseComputer: (record: Companion) => void = unboundAction;
+  @Event closeComputerEditors: () => void = unboundAction;
+  @Param @Require cloudComputers: CloudComputer[];
+  @Param @Require cloudSyncBusy: boolean;
+  @Param @Require cloudSyncStatus: string;
+  @Event computerConnectionMenu: (record: Companion) => MenuElement[] = unboundAction;
+  @Param @Require computerNameDraft: string;
+  @Event $computerNameDraft: (value: string) => void = unboundAction;
+  @Param @Require computers: Companion[];
+  @Param @Require darkMode: boolean;
+  @Event dismissKeyboard: () => void = unboundAction;
+  @Event findLanCompanions: () => Promise<void> = unboundAction;
+  @Param @Require huaweiProfile?: HuaweiProfile;
+  @Param @Require isPaired: boolean;
+  @Param @Require lanCandidates: string[];
+  @Param @Require liveViewStatus: string;
+  @Param @Require liveViewsEnabled: boolean;
+  @Param @Require minePage: string;
+  @Event $minePage: (value: string) => void = unboundAction;
+  @Param @Require modeId: string;
+  @Param @Require moveConnectionAddress: string;
+  @Param @Require openingSession: boolean;
+  @Event pair: () => Promise<void> = unboundAction;
+  @Param @Require pairingBundle: string;
+  @Event $pairingBundle: (value: string) => void = unboundAction;
+  @Param @Require pairingComputerId: string;
+  @Param @Require pairingMode: string;
+  @Param @Require reachable: boolean;
+  @Event removeCloudComputer: (computer: CloudComputer) => void = unboundAction;
+  @Event removeComputer: (address: string) => void = unboundAction;
+  @Param @Require removeTarget: string;
+  @Event $removeTarget: (value: string) => void = unboundAction;
+  @Param @Require renameComputerId: string;
+  @Event $renameComputerId: (value: string) => void = unboundAction;
+  @Event restoreCloudComputer: (computer: CloudComputer) => void = unboundAction;
+  @Param @Require restoringComputer?: CloudComputer;
+  @Param @Require runNoticesEnabled: boolean;
+  @Param @Require watchRemindersEnabled: boolean;
+  @Param @Require watchReminderStatus: string;
+  @Param @Require watchReminderTesting: boolean;
+  @Event setWatchRemindersEnabled: (enabled: boolean) => Promise<void> = unboundAction;
+  @Event testWatchReminder: () => Promise<void> = unboundAction;
+  @Event saveComputerName: (id: string) => void = unboundAction;
+  @Event scanPairingBundle: () => Promise<void> = unboundAction;
+  @Event scheduleCloudSync: (delay?: number) => void = unboundAction;
+  @Event selectAppearanceMode: (mode: AppearanceMode) => void = unboundAction;
+  @Event selectPairingMode: (mode: string) => void = unboundAction;
+  @Event selectTheme: (id: string) => void = unboundAction;
+  @Event setThemeMotionEnabled: (enabled: boolean) => Promise<void> = unboundAction;
+  @Param themeMotionEnabled: boolean = true;
+  @Event setLiveViewsEnabled: (enabled: boolean) => Promise<void> = unboundAction;
+  @Event setRunNoticesEnabled: (enabled: boolean) => Promise<void> = unboundAction;
+  @Event signInHuawei: () => Promise<void> = unboundAction;
+  @Event signOutHuawei: () => Promise<void> = unboundAction;
+  @Param @Require themeId: string;
+  @Param @Require ticket: string;
+  @Event $ticket: (value: string) => void = unboundAction;
+  @Param @Require topContentClearance: number;
+  @Param @Require accent: string;
+  @Param @Require accentForeground: string;
+  @Param @Require accentTint: string;
 
   build() {
     Scroll() {
@@ -162,7 +170,7 @@ export struct SettingsView {
           Button('确认移除').chatAction().id('confirm-remove').height(40).enabled(!this.busy)
             .backgroundColor($r('app.color.pigo_error_panel')).fontColor($r('app.color.pigo_error'))
             .onClick(() => { this.removeComputer(record.address); })
-          Button('取消').chatAction().height(40).enabled(!this.busy).onClick(() => { this.removeTarget = ''; })
+          Button('取消').chatAction().height(40).enabled(!this.busy).onClick(() => { this.$removeTarget(''); })
         } else {
           Button({ type: ButtonType.Normal }) {
             Image($r('app.media.ic_more')).width(18).height(18).fillColor($r('app.color.pigo_muted'))
@@ -213,15 +221,15 @@ export struct SettingsView {
             .enabled(!this.busy && !this.removeTarget)
             .onClick(() => {
               this.closeComputerEditors();
-              this.computerNameDraft = group.name;
-              this.renameComputerId = group.id;
+              this.$computerNameDraft(group.name);
+              this.$renameComputerId(group.id);
             })
         }.width('100%')
         if (this.renameComputerId === group.id) {
           TextInput({ placeholder: '电脑备注名', text: this.computerNameDraft }).id('computer-name-input')
             .backgroundColor($r('app.color.pigo_control')).fontColor($r('app.color.pigo_text'))
             .placeholderColor($r('app.color.pigo_muted'))
-            .maxLength(40).onChange((value: string) => { this.computerNameDraft = value; }).width('100%')
+            .maxLength(40).onChange((value: string) => { this.$computerNameDraft(value); }).width('100%')
           Row({ space: 8 }) {
             Button('保存').chatAction().id('save-computer-name').height(38)
               .backgroundColor(this.accent).fontColor(this.accentForeground)
@@ -252,13 +260,13 @@ export struct SettingsView {
               Button('从账号移除').chatAction().enabled(!this.busy)
                 .backgroundColor($r('app.color.pigo_error_panel')).fontColor($r('app.color.pigo_error'))
                 .onClick(() => { this.removeCloudComputer(computer); })
-              Button('取消').chatAction().onClick(() => { this.removeTarget = ''; })
+              Button('取消').chatAction().onClick(() => { this.$removeTarget(''); })
             } else {
               Button('在本机配对').chatAction().backgroundColor(this.accent).fontColor(this.accentForeground)
                 .enabled(!this.busy && !this.openingSession && !this.removeTarget)
                 .onClick(() => { this.restoreCloudComputer(computer); })
               Button('移除').chatAction().enabled(!this.busy && !this.removeTarget)
-                .onClick(() => { this.removeTarget = computer.address; })
+                .onClick(() => { this.$removeTarget(computer.address); })
             }
           }.width('100%')
         }.width('100%').padding(14).attributeModifier(themedCardSurface(this.darkMode, this.themeId))
@@ -318,17 +326,17 @@ export struct SettingsView {
           .id(this.pairingMode === 'remote' ? 'remote-bundle' : 'lan-bundle').type(InputType.Password).maxLength(4096)
           .backgroundColor($r('app.color.pigo_control')).fontColor($r('app.color.pigo_text'))
           .placeholderColor($r('app.color.pigo_muted'))
-          .onChange((value: string) => { this.pairingBundle = value; }).width('100%')
+          .onChange((value: string) => { this.$pairingBundle(value); }).width('100%')
       } else {
         Text('用 USB 连接电脑并允许调试，再在 Pi Go.app 选择「USB」并点「连接手机」。').fontSize(14).fontColor($r('app.color.pigo_muted')).width('100%')
         TextInput({ placeholder: 'USB 地址', text: this.address }).id('address')
           .backgroundColor($r('app.color.pigo_control')).fontColor($r('app.color.pigo_text'))
           .placeholderColor($r('app.color.pigo_muted'))
-          .onChange((value: string) => { this.address = value; }).width('100%')
+          .onChange((value: string) => { this.$address(value); }).width('100%')
         TextInput({ placeholder: '8 位配对码或一次性票据', text: this.ticket }).id('ticket').type(InputType.Password)
           .backgroundColor($r('app.color.pigo_control')).fontColor($r('app.color.pigo_text'))
           .placeholderColor($r('app.color.pigo_muted'))
-          .onChange((value: string) => { this.ticket = value; }).width('100%')
+          .onChange((value: string) => { this.$ticket(value); }).width('100%')
       }
       Button('配对并连接').chatAction().id('pair').enabled(!this.busy && !this.openingSession && !this.removeTarget)
         .backgroundColor(this.accent).fontColor(this.accentForeground).width('100%').height(46)
@@ -342,7 +350,7 @@ export struct SettingsView {
         Stack() {
           if (this.huaweiProfile?.avatar && !this.avatarUnavailable) {
             Image(this.huaweiProfile.avatar).width(50).height(50).objectFit(ImageFit.Cover)
-              .onError(() => { this.avatarUnavailable = true; })
+              .onError(() => { this.$avatarUnavailable(true); })
           } else {
             SymbolGlyph($r('sys.symbol.person')).fontSize(24).fontColor([this.accent])
           }
@@ -408,7 +416,7 @@ export struct SettingsView {
       }.width('100%').padding(14)
     }.id(`mine-${page}`).width('100%').padding(0)
       .attributeModifier(themedCardSurface(this.darkMode, this.themeId))
-      .onClick(() => { this.minePage = page; })
+      .onClick(() => { this.$minePage(page); })
   }
   @Builder
   themePreviewCard() {

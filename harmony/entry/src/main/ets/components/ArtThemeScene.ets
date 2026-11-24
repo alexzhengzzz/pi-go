@@ -28,21 +28,21 @@ interface SkyStar {
   speed: number;
 }
 
-@Component
+@ComponentV2
 export struct ArtThemeScene {
-  @Prop @Watch('onAssetChange') themeId: string = 'bookstore';
-  @Prop @Watch('onAssetChange') darkMode: boolean = false;
-  @Prop sceneOpacity: number = 0.92;
-  @Prop @Watch('onLoopPolicyChange') dimmed: boolean = false;
-  @Prop @Watch('onLoopPolicyChange') active: boolean = true;
-  @Prop compact: boolean = false;
-  @Prop @Watch('onBurstChange') burstSeq: number = 0;
-  @Prop burstKind: string = 'send';
-  @Prop @Watch('onTapChange') tapSeq: number = 0;
-  @Prop tapX: number = 0;
-  @Prop tapY: number = 0;
+  @Param themeId: string = 'bookstore';
+  @Param darkMode: boolean = false;
+  @Param sceneOpacity: number = 0.92;
+  @Param dimmed: boolean = false;
+  @Param active: boolean = true;
+  @Param compact: boolean = false;
+  @Param burstSeq: number = 0;
+  @Param burstKind: string = 'send';
+  @Param tapSeq: number = 0;
+  @Param tapX: number = 0;
+  @Param tapY: number = 0;
 
-  @State private pixelsReady: boolean = false;
+  @Local private pixelsReady: boolean = false;
 
   private readonly settings: RenderingContextSettings = new RenderingContextSettings(true);
   private readonly ctx: CanvasRenderingContext2D = new CanvasRenderingContext2D(this.settings);
@@ -82,6 +82,7 @@ export struct ArtThemeScene {
     this.pixelsReady = false;
   }
 
+  @Monitor('themeId', 'darkMode')
   private onAssetChange(): void {
     this.initializedForTheme = '';
     void this.loadBitmap();
@@ -141,6 +142,7 @@ export struct ArtThemeScene {
     }
   }
 
+  @Monitor('burstSeq')
   private onBurstChange(): void {
     if (this.compact || this.burstSeq <= 0) return;
     const celebrate = this.burstKind === 'celebrate';
@@ -148,8 +150,8 @@ export struct ArtThemeScene {
     const w = this.canvasW > 0 ? this.canvasW : 390;
     const h = this.canvasH > 0 ? this.canvasH : 840;
     const count = celebrate ? 12 : 6;
-    const originX = this.themeId === 'bookstore' ? w * 0.64 : (this.themeId === 'jellyfish' ? w * 0.74 : w * 0.73);
-    const originY = this.themeId === 'bookstore' ? h * 0.36 : (this.themeId === 'jellyfish' ? h * 0.54 : h * 0.61);
+    const originX = this.themeId === 'bookstore' ? w * 0.64 : (this.themeId === 'jellyfish' ? w * 0.74 : w * 0.585);
+    const originY = this.themeId === 'bookstore' ? h * 0.36 : (this.themeId === 'jellyfish' ? h * 0.54 : h * 0.635);
 
     for (let i = 0; i < count; i += 1) {
       const spread = (i - (count - 1) * 0.5) * 14;
@@ -174,6 +176,7 @@ export struct ArtThemeScene {
     });
   }
 
+  @Monitor('tapSeq')
   private onTapChange(): void {
     if (this.compact || this.tapSeq <= 0) return;
     this.energyBoost = Math.max(this.energyBoost, 0.55);
@@ -195,6 +198,7 @@ export struct ArtThemeScene {
     }
   }
 
+  @Monitor('dimmed', 'active')
   private onLoopPolicyChange(): void {
     if (!this.active) {
       this.stopLoop();
@@ -255,9 +259,9 @@ export struct ArtThemeScene {
           ambient: true
         });
       } else {
-        // sahara embers rising from campfire around (0.73, 0.61)
+        // sahara embers rising from campfire around (0.585, 0.635)
         this.particles.push({
-          x: w * (0.64 + ((i * 0.11) % 0.22)),
+          x: w * (0.53 + ((i * 0.09) % 0.14)),
           y: h * (0.28 + (i / count) * 0.36),
           vx: -(3 + (i % 3) * 2.5),
           vy: -(12 + (i % 4) * 5.5),
@@ -354,10 +358,10 @@ export struct ArtThemeScene {
         this.ctx.restore();
       }
     } else if (this.themeId === 'sahara') {
-      // 仅对篝火火焰与热浪带 (0.56 ~ 0.65) 做轻微热浪摇曳
-      const strips = this.compact ? 4 : 6;
+      // 仅对篝火火焰与热浪带 (0.56 ~ 0.67) 做轻微热浪摇曳
+      const strips = this.compact ? 4 : 7;
       const bandTop = h * 0.56;
-      const bandH = h * 0.09;
+      const bandH = h * 0.11;
       const stepH = bandH / strips;
       for (let i = 0; i < strips; i += 1) {
         const local = (i + 0.5) / strips;
@@ -421,11 +425,11 @@ export struct ArtThemeScene {
       this.ctx.arc(jx, jy, rad, 0, Math.PI * 2);
       this.ctx.fill();
     } else {
-      // 撒哈拉：篝火暖光呼吸 + 夜空微闪星点
-      const fx = drawX + drawW * 0.725;
-      const fy = h * 0.615;
+      // 撒哈拉：篝火暖光呼吸 + 帐篷挂灯微光 + 夜空微闪星点
+      const fx = drawX + drawW * 0.585;
+      const fy = h * 0.635;
       const flicker = 0.90 + 0.10 * Math.sin(t * 4.2) + 0.05 * Math.cos(t * 7.1) + this.energyBoost * 0.24;
-      const rad = Math.min(w, h) * (this.compact ? 0.28 : 0.22) * flicker;
+      const rad = Math.min(w, h) * (this.compact ? 0.34 : 0.28) * flicker;
       const grad = this.ctx.createRadialGradient(fx, fy, 3, fx, fy, rad);
       const peakAlpha = (this.darkMode ? 0.30 : 0.18) * dimFactor;
       grad.addColorStop(0, `rgba(255,176,84,${peakAlpha.toFixed(3)})`);
@@ -470,8 +474,8 @@ export struct ArtThemeScene {
             p.x = drawX + drawW * (0.48 + ((i * 0.17) % 0.46));
             p.y = h * (0.68 + ((i * 0.05) % 0.08));
           } else {
-            p.x = drawX + drawW * (0.68 + ((i * 0.07) % 0.12));
-            p.y = h * (0.58 + ((i * 0.03) % 0.06));
+            p.x = drawX + drawW * (0.54 + ((i * 0.07) % 0.10));
+            p.y = h * (0.57 + ((i * 0.03) % 0.06));
           }
         }
         next.push(p);

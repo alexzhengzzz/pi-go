@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { stripTypeScriptTypes } from 'node:module';
 import { test } from 'node:test';
-import { pageSource } from './harmony-source.mjs';
 
 const chat = readFileSync(new URL('../harmony/entry/src/main/ets/ChatContent.ets', import.meta.url), 'utf8');
 const { contentBlocks, inlineParts, replySpeechText } = new Function(stripTypeScriptTypes(
@@ -49,20 +48,14 @@ test('landscape reader opens the selected table with its original Markdown synta
   assert.deepEqual(contentBlocks(selected.text)[0].rows, selected.rows);
 });
 
-const indexSource = pageSource();
-const readerMethods = ['openMarkdownTableReader', 'closeMarkdownTableReader'].map((name) => {
-  const start = indexSource.indexOf(`  private ${name}(`);
-  assert.ok(start >= 0);
-  return indexSource.slice(start, indexSource.indexOf('\n  }', start) + 4);
-}).join('\n');
-const createReader = new Function('window', stripTypeScriptTypes(`class Reader { ${readerMethods} }`) + '; return new Reader();');
+import './harmony-modules.mjs';
+const { WorkspaceFileController } = await import('../harmony/entry/src/main/ets/model/WorkspaceFileController.ets');
 
 function rotationHarness(mainWindow) {
-  return Object.assign(createReader({ Orientation: { LANDSCAPE: 2 }, getLastWindow: async () => mainWindow }), {
+  globalThis.pigoTestLastWindow = async () => mainWindow;
+  return new WorkspaceFileController({
     getUIContext: () => ({ getHostContext: () => ({}) }),
-    dismissKeyboard() {},
-    markdownRotation: Promise.resolve(),
-    markdownRotationRevision: 0
+    dismissKeyboard() {}
   });
 }
 
@@ -83,7 +76,7 @@ test('closing a table during rotation restores the original window orientation',
   reader.openMarkdownTableReader('table', '/workspace', '');
   await rotating.promise;
   reader.closeMarkdownTableReader();
-  assert.equal(reader.markdownTableReader, undefined);
+  assert.equal(reader.state.markdownTableReader, undefined);
   finishRotation.resolve();
   await reader.markdownRotation;
   assert.deepEqual(requests, [2, 0]);

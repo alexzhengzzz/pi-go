@@ -12,59 +12,66 @@ function chatAction() {
   .borderRadius(12)
 }
 
-@Component
+@ComponentV2
 export struct ChatComposer {
-  @StorageProp('pigoDark') private darkMode: boolean = false;
-  @Prop acceptsImage: boolean;
-  @Require applyModelFromMenu: (index: number) => Promise<void> = unboundAction;
-  @Require applyThinkingLevelFromMenu: (level: string) => Promise<void> = unboundAction;
-  @Require armTranscriptFollow: () => void = unboundAction;
-  @Require attachFile: () => Promise<void> = unboundAction;
-  @Require attachImage: (source: string) => Promise<void> = unboundAction;
-  @Link attachments: DraftAttachment[];
-  @Prop busy: boolean;
-  @Prop commandError: string;
-  @Link commandRows: CommandRow[];
-  @Prop commandsLoading: boolean;
-  @Prop currentId: string;
-  @Prop currentLevel: string;
-  @Prop currentModel?: ModelOption;
-  @Require dismissKeyboard: () => void = unboundAction;
-  @Link draft: string;
-  @Prop holdCancel: boolean;
-  @Require holdTouch: (event: TouchEvent) => void = unboundAction;
-  @Prop idle: boolean;
-  @Link liveVoiceText: string;
-  @Require loadCommands: () => Promise<void> = unboundAction;
-  @Prop modelLabel: string;
-  @Link models: ModelOption[];
-  @Require openComposerMenu: () => void = unboundAction;
-  @Require openModelMenu: () => Promise<void> = unboundAction;
-  @Require openSkillPicker: () => void = unboundAction;
-  @Prop openingSession: boolean;
-  @Prop hasPendingSend: boolean;
-  @Require pickSkill: (row: CommandRow) => void = unboundAction;
-  @Prop queued: boolean;
-  @Prop reachable: boolean;
-  @Prop recording: boolean;
-  @Require removeAttachment: (index: number) => void = unboundAction;
-  @Require requestAction: (path: string, input?: Payload) => Promise<boolean> = unboundAction;
-  @Prop runId: string;
-  @Require send: () => Promise<void> = unboundAction;
-  @Link showComposerMenu: boolean;
-  @Link showModelMenu: boolean;
-  @Link showSkillPicker: boolean;
-  @Link status: string;
-  @Require syncCommandPalette: () => void = unboundAction;
-  @Prop voiceCancelling: boolean;
-  @Prop voiceFinishing: boolean;
-  @Link voiceMode: boolean;
-  @Prop voicePreparing: boolean;
-  @Prop windowHeight: number;
-  @Prop windowWidth: number;
-  @Prop accent: string;
-  @Prop accentForeground: string;
-  @Prop accentTint: string;
+  @Param @Require darkMode: boolean;
+  @Param @Require acceptsImage: boolean;
+  @Event applyModelFromMenu: (index: number) => Promise<void> = unboundAction;
+  @Event applyThinkingLevelFromMenu: (level: string) => Promise<void> = unboundAction;
+  @Event armTranscriptFollow: () => void = unboundAction;
+  @Event attachFile: () => Promise<void> = unboundAction;
+  @Event attachImage: (source: string) => Promise<void> = unboundAction;
+  @Param @Require attachments: DraftAttachment[];
+  @Param @Require busy: boolean;
+  @Param @Require commandError: string;
+  @Param @Require commandRows: CommandRow[];
+  @Param @Require commandsLoading: boolean;
+  @Param @Require currentId: string;
+  @Param @Require currentLevel: string;
+  @Param @Require currentModel?: ModelOption;
+  @Event dismissKeyboard: () => void = unboundAction;
+  @Param @Require draft: string;
+  @Event $draft: (value: string) => void = unboundAction;
+  @Param @Require holdCancel: boolean;
+  @Event holdTouch: (event: TouchEvent) => void = unboundAction;
+  @Param @Require idle: boolean;
+  @Param @Require liveVoiceText: string;
+  @Event $liveVoiceText: (value: string) => void = unboundAction;
+  @Event loadCommands: () => Promise<void> = unboundAction;
+  @Param @Require modelLabel: string;
+  @Param @Require models: ModelOption[];
+  @Event openComposerMenu: () => void = unboundAction;
+  @Event openModelMenu: () => Promise<void> = unboundAction;
+  @Event openSkillPicker: () => void = unboundAction;
+  @Param @Require openingSession: boolean;
+  @Param @Require hasPendingSend: boolean;
+  @Event pickSkill: (row: CommandRow) => void = unboundAction;
+  @Param @Require queued: boolean;
+  @Param @Require reachable: boolean;
+  @Param @Require recording: boolean;
+  @Event removeAttachment: (index: number) => void = unboundAction;
+  @Event requestAction: (path: string, input?: Payload) => Promise<boolean> = unboundAction;
+  @Param @Require runId: string;
+  @Event send: () => Promise<void> = unboundAction;
+  @Param @Require showComposerMenu: boolean;
+  @Event $showComposerMenu: (value: boolean) => void = unboundAction;
+  @Param @Require showModelMenu: boolean;
+  @Event $showModelMenu: (value: boolean) => void = unboundAction;
+  @Param @Require showSkillPicker: boolean;
+  @Event $showSkillPicker: (value: boolean) => void = unboundAction;
+  @Param @Require status: string;
+  @Event $status: (value: string) => void = unboundAction;
+  @Event syncCommandPalette: () => void = unboundAction;
+  @Param @Require voiceCancelling: boolean;
+  @Param @Require voiceFinishing: boolean;
+  @Param @Require voiceMode: boolean;
+  @Event $voiceMode: (value: boolean) => void = unboundAction;
+  @Param @Require voicePreparing: boolean;
+  @Param @Require windowHeight: number;
+  @Param @Require windowWidth: number;
+  @Param @Require accent: string;
+  @Param @Require accentForeground: string;
+  @Param @Require accentTint: string;
 
   build() {
     Column({ space: 2 }) {
@@ -113,7 +120,7 @@ export struct ChatComposer {
           .id('draft').width('100%').constraintSize({ minHeight: 42, maxHeight: 108 }).onFocus(() => { this.armTranscriptFollow(); })
           .fontSize(16).fontColor($r('app.color.pigo_text')).placeholderColor($r('app.color.pigo_muted')).backgroundColor(Color.Transparent)
           .padding({ left: 6, right: 6, top: 8, bottom: 8 })
-          .enabled(!this.hasPendingSend).onChange((value: string) => { this.draft = value; this.syncCommandPalette(); })
+          .enabled(!this.hasPendingSend).onChange((value: string) => { this.$draft(value); this.syncCommandPalette(); })
       }
       Row({ space: 6 }) {
         Button({ type: ButtonType.Normal }) {
@@ -122,7 +129,11 @@ export struct ChatComposer {
         }.id('voice-toggle').width(44).height(44).padding(0).backgroundColor(Color.Transparent).borderRadius(12)
           .accessibilityText(this.voiceMode ? '切换到文字输入' : '切换到语音输入')
           .enabled(!!this.currentId && !this.hasPendingSend && !this.busy && !this.recording && !this.voicePreparing && !this.voiceFinishing)
-          .onClick(() => { this.voiceMode = !this.voiceMode; this.liveVoiceText = ''; this.status = ''; if (this.voiceMode) this.dismissKeyboard(); })
+          .onClick(() => { const voiceMode = !this.voiceMode;
+            this.$voiceMode(voiceMode);
+            this.$liveVoiceText('');
+            this.$status('');
+            if (voiceMode) this.dismissKeyboard(); })
         Button({ type: ButtonType.Normal }) {
           Row({ space: 5 }) {
             Text(this.modelLabel || '选择模型').fontSize(12).fontWeight(FontWeight.Medium)
@@ -135,7 +146,7 @@ export struct ChatComposer {
           .accessibilityText(this.modelLabel ? `切换模型，当前为${this.modelLabel}` : '切换模型')
           .enabled(this.reachable && !this.busy && !this.openingSession && !!this.currentId && this.idle && !this.queued)
           .onClick(() => { void this.openModelMenu(); })
-          .bindSheet($$this.showModelMenu, this.modelSheet(), {
+          .bindSheet(this.showModelMenu!!, this.modelSheet(), {
             detents: ['60%', SheetSize.LARGE], preferType: SheetType.BOTTOM, dragBar: true, showClose: false,
             backgroundColor: hasImmersiveMaterial() ? undefined : $r('app.color.pigo_panel'),
             systemMaterial: immersiveSheetMaterial(),
@@ -149,7 +160,7 @@ export struct ChatComposer {
           .enabled(!!this.currentId && this.reachable && !this.busy && !this.openingSession && !this.hasPendingSend &&
             !this.recording && !this.voicePreparing && !this.voiceFinishing)
           .onClick(() => { this.openComposerMenu(); })
-          .bindSheet($$this.showComposerMenu, this.composerMenu(), {
+          .bindSheet(this.showComposerMenu!!, this.composerMenu(), {
             height: SheetSize.FIT_CONTENT, preferType: SheetType.BOTTOM, showClose: false,
             backgroundColor: hasImmersiveMaterial() ? undefined : $r('app.color.pigo_panel'),
             systemMaterial: immersiveSheetMaterial(),
@@ -190,7 +201,7 @@ export struct ChatComposer {
       Button({ type: ButtonType.Normal }) {
         SymbolGlyph($r('sys.symbol.chevron_left')).fontSize(20).fontColor([$r('app.color.pigo_text')])
       }.width(44).height(44).borderRadius(12).padding(0).backgroundColor(Color.Transparent)
-        .accessibilityText('返回添加菜单').onClick(() => { this.showSkillPicker = false; })
+        .accessibilityText('返回添加菜单').onClick(() => { this.$showSkillPicker(false); })
       Text('技能').fontSize(20).fontWeight(FontWeight.Bold).fontColor($r('app.color.pigo_text'))
     }.width('100%')
     if (this.attachments.length) {
@@ -235,15 +246,15 @@ export struct ChatComposer {
       } else {
         Row({ space: 8 }) {
           this.composerMenuAction('拍照', $r('sys.symbol.camera'), 'composer-camera', this.acceptsImage, () => {
-            this.showComposerMenu = false;
+            this.$showComposerMenu(false);
             void this.attachImage('camera');
           })
           this.composerMenuAction('照片', $r('sys.symbol.picture'), 'composer-photos', this.acceptsImage, () => {
-            this.showComposerMenu = false;
+            this.$showComposerMenu(false);
             void this.attachImage('gallery');
           })
           this.composerMenuAction('添加文件', $r('sys.symbol.paperclip'), 'composer-files', true, () => {
-            this.showComposerMenu = false;
+            this.$showComposerMenu(false);
             void this.attachFile();
           })
         }.width('100%')
@@ -279,7 +290,7 @@ export struct ChatComposer {
                 .backgroundColor(this.currentLevel === level ? this.accent : Color.Transparent)
                 .fontColor(this.currentLevel === level ? this.accentForeground : $r('app.color.pigo_muted'))
                 .enabled(this.reachable && this.idle && !this.queued && !this.busy)
-                .onClick(() => { this.showModelMenu = false; void this.applyThinkingLevelFromMenu(level); })
+                .onClick(() => { this.$showModelMenu(false); void this.applyThinkingLevelFromMenu(level); })
             }, (level: string) => level)
           }.width('100%').padding(4).borderRadius(14).backgroundColor($r('app.color.pigo_control'))
         }.width('100%')
@@ -305,7 +316,7 @@ export struct ChatComposer {
               .border({ width: this.isCurrentModel(model) ? 1 : 0, radius: 12, color: this.accent })
               .accessibilitySelected(this.isCurrentModel(model))
               .enabled(this.reachable && this.idle && !this.queued && !this.busy)
-              .onClick(() => { this.showModelMenu = false; void this.applyModelFromMenu(index); })
+              .onClick(() => { this.$showModelMenu(false); void this.applyModelFromMenu(index); })
           }
         }, (model: ModelOption) => `${model.provider}-${model.id}`)
         if (!this.models.length) {
