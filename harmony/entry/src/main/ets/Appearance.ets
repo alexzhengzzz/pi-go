@@ -117,6 +117,81 @@ export const THEME_STYLES: ThemeStyle[] = [
       codeBg: '#171B21', codeBorder: '#2C343F', codeHeaderBg: '#1E242C',
       cardBg: '#E6181C22', cardBorder: '#343E4A', cardShadow: '#3A000000'
     }
+  },
+  {
+    id: 'bookstore',
+    label: '左岸书店',
+    subtitle: '复古暖灯 · 羊皮纸墨',
+    styleTag: '书房',
+    surface: 'paper',
+    bubble: 'tinted',
+    bubbleRadius: 14,
+    cardRadius: 14,
+    codeRadius: 10,
+    light: {
+      accent: '#8A5016', accentForeground: '#FFFFFF', accentTint: '#F5E7CE',
+      canvas: '#FAF6EE', auraTop: '#40F0CE96', auraBottom: '#36DFB47A',
+      bubbleStart: '#F3E7D2', bubbleEnd: '#F8EFE0', bubbleBorder: '#DFC7A0',
+      codeBg: '#FDFBF6', codeBorder: '#E5D8C3', codeHeaderBg: '#F4ECDD',
+      cardBg: '#F2FCF9F2', cardBorder: '#E2D4BC', cardShadow: '#164A3012'
+    },
+    dark: {
+      accent: '#F2C483', accentForeground: '#1D150D', accentTint: '#3A2B1C',
+      canvas: '#171310', auraTop: '#366E4B26', auraBottom: '#2C52371B',
+      bubbleStart: '#382A1D', bubbleEnd: '#2B2016', bubbleBorder: '#694F35',
+      codeBg: '#1F1914', codeBorder: '#3C3025', codeHeaderBg: '#28201A',
+      cardBg: '#E6201A15', cardBorder: '#47382B', cardShadow: '#44000000'
+    }
+  },
+  {
+    id: 'jellyfish',
+    label: '深海水母',
+    subtitle: '荧光水母 · 蔚蓝浮泡',
+    styleTag: '深海',
+    surface: 'glass',
+    bubble: 'gradient',
+    bubbleRadius: 22,
+    cardRadius: 20,
+    codeRadius: 14,
+    light: {
+      accent: '#0E6888', accentForeground: '#FFFFFF', accentTint: '#D8EFF9',
+      canvas: '#F1F8FC', auraTop: '#469BE2FA', auraBottom: '#3CB2D6FF',
+      bubbleStart: '#D8F0FA', bubbleEnd: '#E7F3FD', bubbleBorder: '#A9D9EE',
+      codeBg: '#F8FCFF', codeBorder: '#CEE5F2', codeHeaderBg: '#E8F4FA',
+      cardBg: '#EBF8FCFF', cardBorder: '#CBE3F1', cardShadow: '#160E5270'
+    },
+    dark: {
+      accent: '#82E1F7', accentForeground: '#081622', accentTint: '#163148',
+      canvas: '#0A1220', auraTop: '#381B5A7E', auraBottom: '#3029437A',
+      bubbleStart: '#16334A', bubbleEnd: '#1C294A', bubbleBorder: '#346689',
+      codeBg: '#101B2D', codeBorder: '#243A57', codeHeaderBg: '#16243A',
+      cardBg: '#CC101B2E', cardBorder: '#2B4666', cardShadow: '#4A000000'
+    }
+  },
+  {
+    id: 'sahara',
+    label: '撒哈拉篝火',
+    subtitle: '沙丘星夜 · 暖火微光',
+    styleTag: '星夜',
+    surface: 'paper',
+    bubble: 'gradient',
+    bubbleRadius: 18,
+    cardRadius: 16,
+    codeRadius: 12,
+    light: {
+      accent: '#A8491C', accentForeground: '#FFFFFF', accentTint: '#FBE5D4',
+      canvas: '#FBF5EC', auraTop: '#44F6C798', auraBottom: '#38E8B088',
+      bubbleStart: '#FAE3D0', bubbleEnd: '#F7ECD9', bubbleBorder: '#EBC2A2',
+      codeBg: '#FEFAF4', codeBorder: '#EAD8C4', codeHeaderBg: '#F6EADF',
+      cardBg: '#F0FDF9F2', cardBorder: '#E6D4C0', cardShadow: '#165E2C12'
+    },
+    dark: {
+      accent: '#FFB584', accentForeground: '#1F120A', accentTint: '#3E251A',
+      canvas: '#121118', auraTop: '#364A325C', auraBottom: '#346E361E',
+      bubbleStart: '#3D261C', bubbleEnd: '#2A2233', bubbleBorder: '#734632',
+      codeBg: '#1A1822', codeBorder: '#352E40', codeHeaderBg: '#231F2C',
+      cardBg: '#E61A1822', cardBorder: '#43384C', cardShadow: '#48000000'
+    }
   }
 ];
 

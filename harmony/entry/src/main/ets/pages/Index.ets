@@ -13,6 +13,7 @@ import { ChatComposer } from '../components/ChatComposer';
 import { ChatTranscript } from '../components/ChatTranscript';
 import { toolActionTitle } from '../TranscriptTurns';
 import { SakuraScene } from '../components/SakuraPetals';
+import { ArtThemeScene } from '../components/ArtThemeScene';
 import { InkScene } from '../components/InkScene';
 import { SunsetScene } from '../components/SunsetScene';
 import { RunResultView } from '../components/RunResultView';
@@ -851,10 +852,33 @@ struct Index {
     } catch { /* Old bridges can still display the session transcript. */ }
   }
 
+  private inboxSessionKey(row: InboxRun): string {
+    if (!row.run.sessionId) return '';
+    const companion = this.computers.find((item: Companion): boolean => item.address === row.address);
+    const group = companion ? computerGroupId(companion) : row.address;
+    return `${group}:${row.run.sessionId}`;
+  }
+
   private displayedInboxRuns(): InboxRun[] {
-    const records = new Map<string, InboxRun>();
+    const byId = new Map<string, InboxRun>();
     for (const row of this.inboxRuns) {
-      if (!records.has(row.run.id) || row.address === this.base) records.set(row.run.id, row);
+      if (!byId.has(row.run.id) || row.address === this.base) byId.set(row.run.id, row);
+    }
+    const records = new Map<string, InboxRun>();
+    for (const row of byId.values()) {
+      const sessionKey = row.run.status === 'waiting' ? '' : this.inboxSessionKey(row);
+      const key = row.run.status === 'waiting' ? `waiting:${row.run.id}` :
+        (sessionKey ? `session:${sessionKey}` : `run:${row.run.id}`);
+      const existing = records.get(key);
+      if (!existing) {
+        records.set(key, row);
+        continue;
+      }
+      const nextTime = row.run.finishedAt ?? 0;
+      const prevTime = existing.run.finishedAt ?? 0;
+      if (nextTime > prevTime || (nextTime === prevTime && row.address === this.base)) {
+        records.set(key, row);
+      }
     }
     return Array.from(records.values()).sort((a: InboxRun, b: InboxRun): number =>
       Number(b.run.status === 'waiting') - Number(a.run.status === 'waiting') || b.run.finishedAt - a.run.finishedAt);
@@ -863,9 +887,20 @@ struct Index {
   private async dismissInboxRuns(ids: string[]): Promise<boolean> {
     if (this.inboxCleaning) return false;
     const selected = new Set<string>(ids);
+    const dismissedSessions = new Set<string>();
+    for (const row of this.inboxRuns) {
+      if (row.run.status !== 'waiting' && selected.has(row.run.id)) {
+        const sessionKey = this.inboxSessionKey(row);
+        if (sessionKey) dismissedSessions.add(sessionKey);
+      }
+    }
     const dismissed = new Set<string>(this.dismissedInboxRuns);
     for (const row of this.inboxRuns) {
-      if (row.run.status !== 'waiting' && selected.has(row.run.id)) dismissed.add(row.run.id);
+      if (row.run.status === 'waiting') continue;
+      const sessionKey = this.inboxSessionKey(row);
+      if (selected.has(row.run.id) || (sessionKey && dismissedSessions.has(sessionKey))) {
+        dismissed.add(row.run.id);
+      }
     }
     this.inboxCleaning = true;
     try {
@@ -1270,16 +1305,16 @@ struct Index {
   private publishWidgets(): void {
     const context = this.getUIContext().getHostContext();
     if (!context) return;
+    const displayedInbox = this.displayedInboxRuns();
     const pendingSet = new Set<string>();
     const unreadSet = new Set<string>();
-    for (const row of this.inboxRuns) {
+    for (const row of displayedInbox) {
       if (row.run.status === 'waiting') pendingSet.add(row.run.id);
       if (row.unread) unreadSet.add(row.run.id);
     }
     for (const msg of this.scheduleMessages) {
       if (!msg.dismissed && msg.unread) unreadSet.add(msg.key);
     }
-    const displayedInbox = this.displayedInboxRuns();
     const runningRows = this.taskPanelRows();
     const activeSchedules = this.standaloneScheduleRuns();
 
@@ -6500,13 +6535,13 @@ struct Index {
         Stack() {
           headerSymbol($r('sys.symbol.inbox'), $r('app.color.pigo_text'), 19)
         }.width('100%').height('100%')
-        if (this.scheduleMessages.some((item: RunMessage): boolean => item.unread) || this.inboxRuns.some((item: InboxRun): boolean => item.unread)) {
+        if (this.scheduleMessages.some((item: RunMessage): boolean => item.unread) || this.displayedInboxRuns().some((item: InboxRun): boolean => item.unread)) {
           Blank().width(8).height(8).borderRadius(4).backgroundColor(this.accent())
             .margin({ top: 9, right: 9 })
         }
       }.width('100%').height('100%')
     }.id('schedule-inbox').headerAction().attributeModifier(immersiveSurface(this.darkMode)).accessibilityText(this.scheduleMessages.some((item: RunMessage): boolean =>
-      item.unread) || this.inboxRuns.some((item: InboxRun): boolean => item.unread) ? '收件箱，有未读消息' : '收件箱')
+      item.unread) || this.displayedInboxRuns().some((item: InboxRun): boolean => item.unread) ? '收件箱，有未读消息' : '收件箱')
       .onClick(() => { this.showScheduleInbox(); })
   }
 
@@ -6633,7 +6668,19 @@ struct Index {
   private staticThemeWallpaper(): Resource {
     if (this.themeId === 'graphite') return $rawfile(this.darkMode ? 'ink_dark.jpg' : 'ink_light.jpg');
     if (this.themeId === 'sunset') return $rawfile(this.darkMode ? 'sunset_dark.jpg' : 'sunset_light.jpg');
+    if (this.themeId === 'bookstore') return $rawfile(this.darkMode ? 'bookstore_dark.jpg' : 'bookstore_light.jpg');
+    if (this.themeId === 'jellyfish') return $rawfile(this.darkMode ? 'jellyfish_dark.jpg' : 'jellyfish_light.jpg');
+    if (this.themeId === 'sahara') return $rawfile(this.darkMode ? 'sahara_dark.jpg' : 'sahara_light.jpg');
     return $rawfile(this.darkMode ? 'sakura_dark.jpg' : 'sakura_light.jpg');
+  }
+
+  private themeVeilStops(): [ResourceColor, number][] {
+    const raw = this.palette().canvas;
+    const rgb = raw.startsWith('#') ? raw.slice(1) : raw;
+    if (this.darkMode) {
+      return [[`#B8${rgb}`, 0], [`#8A${rgb}`, 0.62], [`#24${rgb}`, 1]];
+    }
+    return [[`#C4${rgb}`, 0], [`#96${rgb}`, 0.62], [`#26${rgb}`, 1]];
   }
 
   @Builder
@@ -6663,14 +6710,7 @@ struct Index {
         if (this.sakuraConversationFocus()) {
           Column()
             .width('100%').height('100%')
-            .linearGradient({
-              angle: 90,
-              colors: this.themeId === 'graphite'
-                ? (this.darkMode ? [['#B8111317', 0], ['#8A111317', 0.62], ['#24111317', 1]] : [['#C4F6F5F0', 0], ['#96F6F5F0', 0.62], ['#26F6F5F0', 1]])
-                : this.themeId === 'sunset'
-                  ? (this.darkMode ? [['#B81A1210', 0], ['#8A1A1210', 0.62], ['#241A1210', 1]] : [['#C4FDF6F2', 0], ['#96FDF6F2', 0.62], ['#26FDF6F2', 1]])
-                  : (this.darkMode ? [['#B81C1217', 0], ['#8A1C1217', 0.62], ['#261C1217', 1]] : [['#C4FFF6F9', 0], ['#96FFF6F9', 0.62], ['#28FFF6F9', 1]])
-            })
+            .linearGradient({ angle: 90, colors: this.themeVeilStops() })
         }
       } else if (this.themeId === 'sakura') {
         SakuraScene({
@@ -6691,12 +6731,7 @@ struct Index {
         if (this.sakuraConversationFocus()) {
           Column()
             .width('100%').height('100%')
-            .linearGradient({
-              angle: 90,
-              colors: this.darkMode
-                ? [['#B81C1217', 0], ['#8A1C1217', 0.62], ['#261C1217', 1]]
-                : [['#C4FFF6F9', 0], ['#96FFF6F9', 0.62], ['#28FFF6F9', 1]]
-            })
+            .linearGradient({ angle: 90, colors: this.themeVeilStops() })
         }
       } else if (this.themeId === 'graphite') {
         InkScene({
@@ -6715,12 +6750,7 @@ struct Index {
         if (this.sakuraConversationFocus()) {
           Column()
             .width('100%').height('100%')
-            .linearGradient({
-              angle: 90,
-              colors: this.darkMode
-                ? [['#B8111317', 0], ['#8A111317', 0.62], ['#24111317', 1]]
-                : [['#C4F6F5F0', 0], ['#96F6F5F0', 0.62], ['#26F6F5F0', 1]]
-            })
+            .linearGradient({ angle: 90, colors: this.themeVeilStops() })
         }
       } else if (this.themeId === 'sunset') {
         SunsetScene({
@@ -6739,12 +6769,27 @@ struct Index {
         if (this.sakuraConversationFocus()) {
           Column()
             .width('100%').height('100%')
-            .linearGradient({
-              angle: 90,
-              colors: this.darkMode
-                ? [['#B81A1210', 0], ['#8A1A1210', 0.62], ['#241A1210', 1]]
-                : [['#C4FDF6F2', 0], ['#96FDF6F2', 0.62], ['#26FDF6F2', 1]]
-            })
+            .linearGradient({ angle: 90, colors: this.themeVeilStops() })
+        }
+      } else {
+        ArtThemeScene({
+          themeId: this.themeId,
+          darkMode: this.darkMode,
+          dimmed: this.sakuraConversationFocus(),
+          active: this.visible,
+          burstSeq: this.sakuraBurstSeq,
+          burstKind: this.sakuraBurstKind,
+          tapSeq: this.sakuraBloomSeq,
+          tapX: this.sakuraBloomX,
+          tapY: this.sakuraBloomY,
+          sceneOpacity: this.sakuraConversationFocus()
+            ? (this.darkMode ? 0.56 : 0.60)
+            : (this.darkMode ? 0.90 : 0.94)
+        })
+        if (this.sakuraConversationFocus()) {
+          Column()
+            .width('100%').height('100%')
+            .linearGradient({ angle: 90, colors: this.themeVeilStops() })
         }
       }
     }.width('100%').height(this.windowHeight).position({ x: 0, y: 0 }).hitTestBehavior(HitTestMode.None)

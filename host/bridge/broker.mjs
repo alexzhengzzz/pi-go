@@ -378,6 +378,14 @@ async function runInbox(live, context, sessionId) {
     live.some(({ session }) => session.id === row.sessionId && session.cwd === row.cwd);
   const finished = readRuns(pairingProfile).filter((row) => visible(row) && (sessionId ? row.sessionId === sessionId : !row.scheduled));
   if (sessionId) return finished;
+  const latestBySession = [];
+  const seenSessions = new Set();
+  for (const row of finished) {
+    const key = row.sessionId ? `${row.cwd}\0${row.sessionId}` : row.id;
+    if (seenSessions.has(key)) continue;
+    seenSessions.add(key);
+    latestBySession.push(row);
+  }
   const pending = await Promise.all(live.slice(0, 32).map(async (worker) => {
     const interaction = await pendingInteraction(worker);
     if (!interaction || typeof interaction.id !== 'string') return;
@@ -386,7 +394,7 @@ async function runInbox(live, context, sessionId) {
       sessionId: session.id, cwd: session.cwd, title: session.name, status: 'waiting',
       pendingId: interaction.id, finishedAt: interaction.requestedAt || Date.now() };
   }));
-  return [...pending.filter(Boolean), ...finished];
+  return [...pending.filter(Boolean), ...latestBySession];
 }
 
 async function pollRunPush() {

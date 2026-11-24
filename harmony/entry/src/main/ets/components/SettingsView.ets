@@ -1,5 +1,6 @@
 import { glassCardSurface, themedCardSurface } from '../Immersive';
 import { SakuraPetals } from './SakuraPetals';
+import { ArtThemeScene } from './ArtThemeScene';
 import { InkScene } from './InkScene';
 import { SunsetScene } from './SunsetScene';
 import { unboundAction } from './ComponentAction';
@@ -452,6 +453,13 @@ export struct SettingsView {
             Image($rawfile(this.darkMode ? 'sunset_dark.jpg' : 'sunset_light.jpg'))
               .width('100%').height('100%').objectFit(ImageFit.Cover).opacity(this.darkMode ? 0.78 : 0.85)
           }
+        } else {
+          if (this.themeMotionEnabled) {
+            ArtThemeScene({ themeId: this.themeId, darkMode: this.darkMode, compact: true })
+          } else {
+            Image($rawfile(`${this.themeId}_${this.darkMode ? 'dark' : 'light'}.jpg`))
+              .width('100%').height('100%').objectFit(ImageFit.Cover).opacity(this.darkMode ? 0.78 : 0.85)
+          }
         }
         Column({ space: 8 }) {
           Row() {
@@ -540,6 +548,11 @@ export struct SettingsView {
               .opacity(this.darkMode ? 0.80 : 0.88)
           } else if (style.id === 'sunset') {
             Image($rawfile(this.darkMode ? 'sunset_dark.jpg' : 'sunset_light.jpg'))
+              .width('100%').height('100%')
+              .objectFit(ImageFit.Cover)
+              .opacity(this.darkMode ? 0.82 : 0.90)
+          } else {
+            Image($rawfile(`${style.id}_${this.darkMode ? 'dark' : 'light'}.jpg`))
               .width('100%').height('100%')
               .objectFit(ImageFit.Cover)
               .opacity(this.darkMode ? 0.82 : 0.90)

@@ -35,7 +35,7 @@ methods.push('workspaceName', 'openNewSpace', 'closeNewSpace', 'createWorkspaceT
 methods.push('dockedSessions', 'sessionPaneWidth', 'compactSessionPane', 'onWindowWidthChange');
 methods.push('chatTitle', 'updateCachedSessionTitle', 'observeSessionRun', 'observeRun', 'advanceRunNotice', 'clearRunNotices');
 methods.push('restoreSettings', 'saveSetting', 'setRunNoticesEnabled', 'setLiveViewsEnabled');
-methods.push('dismissInboxRuns', 'syncRunInbox', 'publishBackgroundRunNotice', 'queueWatchReminder', 'rememberWatchReminder',
+methods.push('inboxSessionKey', 'displayedInboxRuns', 'dismissInboxRuns', 'syncRunInbox', 'publishBackgroundRunNotice', 'queueWatchReminder', 'rememberWatchReminder',
   'deleteScheduleRuns', 'removeScheduleMessage', 'scheduleFailure');
 methods.push('trackDispatchedLiveRun', 'backgroundLiveActivity', 'syncLiveActivity', 'canSwitchNetwork', 'tryPublicConnection');
 const liveViewCalls = [];
@@ -128,6 +128,60 @@ test('inbox cleanup survives restart and polling while keeping pending and new r
   await restarted.syncRunInbox(computer);
   assert.deepEqual(restarted.inboxRuns.map(({ run }) => run.id), ['pending', 'kept', 'new']);
   assert.equal(restarted.inboxRuns[0].unread, true);
+});
+
+test('inbox aggregates recent runs by sessionId per computer and dismisses earlier runs of the same session', async () => {
+  const lan = { address: 'https://lan', token: 'token-1', computerId: 'mac-a' };
+  const remote = { address: 'https://remote', token: 'token-2', computerId: 'mac-a' };
+  const other = { address: 'https://other', token: 'token-3', computerId: 'mac-b' };
+  const values = new Map();
+  const settings = {
+    getSync: (key, fallback) => values.get(key) ?? fallback,
+    putSync: (key, value) => values.set(key, value),
+    flush: async () => {},
+  };
+  const state = fixture();
+  Object.assign(state, {
+    base: lan.address,
+    computers: [lan, remote, other],
+    inboxCleaning: false,
+    dismissedInboxRuns: new Set(),
+    settings,
+    inboxRuns: [
+      { run: { id: 's1-old', sessionId: 'sess-1', status: 'completed', finishedAt: 100 }, address: lan.address, computer: 'Mac A', unread: true },
+      { run: { id: 's1-new', sessionId: 'sess-1', status: 'failed', finishedAt: 300 }, address: remote.address, computer: 'Mac A', unread: true },
+      { run: { id: 's1-new', sessionId: 'sess-1', status: 'failed', finishedAt: 300 }, address: lan.address, computer: 'Mac A', unread: true },
+      { run: { id: 's1-wait', sessionId: 'sess-1', status: 'waiting', finishedAt: 200 }, address: lan.address, computer: 'Mac A', unread: true },
+      { run: { id: 's2-only', sessionId: 'sess-2', status: 'completed', finishedAt: 250 }, address: lan.address, computer: 'Mac A', unread: false },
+      { run: { id: 'other-s1', sessionId: 'sess-1', status: 'completed', finishedAt: 150 }, address: other.address, computer: 'Mac B', unread: true },
+    ],
+  });
+
+  const displayed = state.displayedInboxRuns();
+  assert.deepEqual(
+    displayed.map(({ run, address }) => ({ id: run.id, address })),
+    [
+      { id: 's1-wait', address: lan.address },
+      { id: 's1-new', address: lan.address },
+      { id: 's2-only', address: lan.address },
+      { id: 'other-s1', address: other.address },
+    ],
+  );
+
+  // Dismissing the aggregated latest run of sess-1 on Mac A also dismisses older runs of sess-1 on Mac A,
+  // while keeping its waiting item and sess-1 on Mac B intact.
+  assert.equal(await state.dismissInboxRuns(['s1-new']), true);
+  assert.deepEqual(
+    state.displayedInboxRuns().map(({ run, address }) => ({ id: run.id, address })),
+    [
+      { id: 's1-wait', address: lan.address },
+      { id: 's2-only', address: lan.address },
+      { id: 'other-s1', address: other.address },
+    ],
+  );
+  assert.equal(state.dismissedInboxRuns.has('s1-old'), true);
+  assert.equal(state.dismissedInboxRuns.has('s1-new'), true);
+  assert.equal(state.dismissedInboxRuns.has('other-s1'), false);
 });
 
 test('background inbox polls publish one system notification per new terminal event', async () => {
