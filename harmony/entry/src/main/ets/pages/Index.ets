@@ -16,8 +16,9 @@ import { SakuraScene } from '../components/SakuraPetals';
 import { InkScene } from '../components/InkScene';
 import { SunsetScene } from '../components/SunsetScene';
 import { RunResultView } from '../components/RunResultView';
-import { DiffLine, InboxRun, pushDeviceId, RunEvent, RunFile, RunScreenshot, runStatus } from '../RunResults';
+import { DiffLine, InboxRun, pushDeviceId, RunEvent, RunFile, RunScreenshot, runNotificationId, runNotificationText, runStatus } from '../RunResults';
 import { notificationManager } from '@kit.NotificationKit';
+import { backgroundTaskManager } from '@kit.BackgroundTasksKit';
 import { pushService } from '@kit.PushKit';
 import { KeyboardAvoidMode, window } from '@kit.ArkUI';
 import { inputMethod } from '@kit.IMEKit';
@@ -47,6 +48,7 @@ import { decodePairingBundle, validUsb } from '../PairingCode';
 import { connectionLabel, validCompanion } from '../CompanionCheck';
 import { ComputerGroup, computerGroupId, computerGroups, computerGroupTitle, moveComputerConnection, renameComputerGroup } from '../ComputerGroups';
 import { liveActivity } from '../LiveActivity';
+import { WatchReminderController, watchReminderText } from '../WatchReminders';
 import { SessionShareMeta, formatSessionMarkdown, shareSessionViaSystem } from '../SessionShare';
 import { ScheduleJob, ScheduleRun, ScheduleWatch, RunMessage, scheduleTime, parseScheduleTime, scheduleRunStatus, isCurrentScheduleComputer } from '../ScheduledRuns';
 
@@ -56,7 +58,7 @@ import { ModelOption, BridgeEndpoint, SessionState, SessionRow, ChatMessage, Dra
   AgentInfo, Payload, PendingSend, QueuedSteering, BridgeFailure } from '../model/PiGoTypes';
 import { MAX_IMAGE_ATTACHMENTS, MAX_TOTAL_IMAGE_DRAFTS, MAX_TOTAL_FILE_DRAFTS, USB_ADDRESS, MAX_VOICE_MS, MIN_HOLD_MS,
   RECEIVED_FILE_DIR, RECEIVED_FILE_TTL_S, MAX_DOWNLOAD_BYTES, MAX_INLINE_IMAGE_BYTES, SPLIT_WINDOW_WIDTH,
-  SHORT_WINDOW_HEIGHT, MAX_TEXT_PREVIEW_BYTES, RUN_NOTICE_SETTING, LIVE_VIEW_SETTING } from '../model/PiGoConstants';
+  SHORT_WINDOW_HEIGHT, MAX_TEXT_PREVIEW_BYTES, RUN_NOTICE_SETTING, WATCH_REMINDERS_SETTING, LIVE_VIEW_SETTING } from '../model/PiGoConstants';
 import { SidebarRows } from '../model/SidebarRows';
 import { IncomingShare, MAX_SHARED_DRAFT_BYTES, releaseIncomingShare, sharedDraftSize } from '../IncomingShare';
 import { InboxWidget, WidgetItem, WidgetSnapshot } from '../InboxWidget';
@@ -138,6 +140,11 @@ struct Index {
   private dismissedInboxRuns: Set<string> = new Set<string>();
   private runSyncTimer: number = -1;
   private runSyncing: boolean = false;
+  private backgroundRunNoticesSince: number = 0;
+  private backgroundRunTask: number = -1;
+  private readonly backgroundRunSessions: Set<string> = new Set<string>();
+  private readonly notifiedBackgroundRuns: Set<string> = new Set<string>();
+  private askedForRunNotifications: boolean = false;
   private pushRegistrations: Map<string, string> = new Map<string, string>();
   @State private sessionRuns: RunEvent[] = [];
   @State private sessionRunKey: string = '';
@@ -292,6 +299,11 @@ struct Index {
   @State private themeMotionEnabled: boolean = true;
   @State private modeId: string = 'system';
   @State private runNoticesEnabled: boolean = true;
+  @State private watchRemindersEnabled: boolean = true;
+  @State private watchReminderStatus: string = '';
+  @State private watchReminderTesting: boolean = false;
+  private watchReminderDelivered: string[] = [];
+  private readonly watchReminders: WatchReminderController = new WatchReminderController();
   @State private liveViewsEnabled: boolean = true;
   @State private liveViewStatus: string = '';
   private liveViewSessionKey: string = '';
@@ -418,6 +430,11 @@ struct Index {
       });
     }
     this.restoreSettings();
+    if (context) {
+      this.watchReminders.attach(context as common.UIAbilityContext, (status: string): void => {
+        this.watchReminderStatus = status;
+      }, (id: string): void => { this.rememberWatchReminder(id); });
+    }
     this.restoreChain = this.restore();
     void this.restoreChain.then(() => {
       if (!this.isPaired && this.activeTab === 'tasks') this.openComputers();
@@ -426,6 +443,10 @@ struct Index {
   }
   onPageShow(): void {
     this.visible = true;
+    this.backgroundRunNoticesSince = 0;
+    this.stopBackgroundRunTask();
+    this.backgroundRunSessions.clear();
+    this.notifiedBackgroundRuns.clear();
     this.connection.watchNetwork((): void => { this.onNetworkChange(); });
     void this.restoreChain.then(() => {
       this.queueScheduleSync(true);
@@ -443,7 +464,8 @@ struct Index {
     this.visible = false;
     this.stopReplySpeech();
     this.stopNetworkMonitor();
-    this.stopRunSync();
+    this.startBackgroundRunNotices();
+    this.queueRunSync(0);
     this.stopScheduleSync();
     this.clearRunNotices();
     if (this.backgroundLiveActivity()) {
@@ -461,6 +483,8 @@ struct Index {
     this.replySpeech.dispose();
     if (this.markdownTableReader) this.closeMarkdownTableReader();
     this.visible = false;
+    this.backgroundRunNoticesSince = 0;
+    this.stopBackgroundRunTask();
     this.stopNetworkMonitor();
     this.stopRunSync();
     this.stopScheduleSync();
@@ -682,7 +706,7 @@ struct Index {
 
   private queueRunSync(delay: number): void {
     this.stopRunSync();
-    if (!this.visible) return;
+    if (!this.visible && (!this.backgroundRunNoticesSince || !this.runNoticesEnabled || !this.computers.length)) return;
     this.runSyncTimer = setTimeout(() => { void this.syncRunCenter(); }, delay);
   }
 
@@ -691,8 +715,29 @@ struct Index {
     this.runSyncTimer = -1;
   }
 
+  private startBackgroundRunNotices(): void {
+    if (!this.runNoticesEnabled) return;
+    this.backgroundRunNoticesSince = Date.now();
+    this.backgroundRunSessions.clear();
+    for (const id of this.observedRuns.keys()) this.backgroundRunSessions.add(id);
+    if (this.currentId && (!this.idle || this.queued)) this.backgroundRunSessions.add(this.currentId);
+    if (!this.backgroundRunSessions.size || this.backgroundRunTask !== -1) return;
+    try {
+      this.backgroundRunTask = backgroundTaskManager.requestSuspendDelay('接收正在运行的 Pi Go 任务结果', (): void => {
+        this.stopBackgroundRunTask();
+      }).requestId;
+    } catch { /* The inbox can still sync while the process remains active. */ }
+  }
+
+  private stopBackgroundRunTask(): void {
+    if (this.backgroundRunTask === -1) return;
+    const task = this.backgroundRunTask;
+    this.backgroundRunTask = -1;
+    try { backgroundTaskManager.cancelSuspendDelay(task); } catch {}
+  }
+
   private async syncRunCenter(): Promise<void> {
-    if (!this.visible || this.runSyncing) return;
+    if ((!this.visible && (!this.backgroundRunNoticesSince || !this.runNoticesEnabled)) || this.runSyncing) return;
     this.runSyncing = true;
     const computers = this.computers.filter((item: Companion): boolean => validCompanion(item));
     const session = this.currentId;
@@ -700,7 +745,8 @@ struct Index {
     const endpoint = this.connection.endpoint();
     try {
       const inbox = Promise.all(computers.map((computer: Companion): Promise<boolean> => this.syncRunInbox(computer)));
-      const results = session && this.isPaired && this.reachable ? this.syncRunResults(endpoint, session, key) : undefined;
+      const results = this.visible && session && this.isPaired && this.reachable ?
+        this.syncRunResults(endpoint, session, key) : undefined;
       const synced = await inbox;
       await results;
       if (this.visible) {
@@ -720,17 +766,76 @@ struct Index {
     const endpoint = this.scheduleEndpoint(computer);
     try {
       const result = await this.request('/runs/inbox', undefined, endpoint);
-      if (!this.visible || !this.computers.some((item: Companion): boolean =>
+      if (!this.computers.some((item: Companion): boolean =>
         item.address === computer.address && item.token === computer.token)) return false;
+      if (!this.visible) {
+        if (this.runNoticesEnabled && this.backgroundRunNoticesSince) {
+          for (const run of result.runEvents ?? []) await this.publishBackgroundRunNotice(run);
+        }
+        return true;
+      }
       const rows = (result.runEvents ?? []).filter((run: RunEvent): boolean =>
         run.status === 'waiting' || !this.dismissedInboxRuns.has(run.id)).map((run: RunEvent): InboxRun => ({
         run: run, address: computer.address, computer: this.scheduleComputerName(computer),
         unread: run.status === 'waiting' || !this.runRead.includes(run.id)
       }));
       this.inboxRuns = this.inboxRuns.filter((row: InboxRun): boolean => row.address !== computer.address).concat(rows);
+      for (const row of rows) {
+        if (row.unread) {
+          this.queueWatchReminder(`inbox:${row.run.id}`, runStatus(row.run.status), row.computer,
+            row.run.title ?? '', row.run.finishedAt);
+        }
+      }
       await this.syncPushRegistration(computer, result.pushAvailable === true).catch((): void => {});
       return true;
     } catch { return false; }
+  }
+
+  private async publishBackgroundRunNotice(run: RunEvent): Promise<void> {
+    if (this.visible || !this.runNoticesEnabled || !this.backgroundRunNoticesSince ||
+      !(run.finishedAt >= this.backgroundRunNoticesSince) || !run.id || this.notifiedBackgroundRuns.has(run.id) ||
+      !['completed', 'failed', 'stopped'].includes(run.status)) return;
+    const since = this.backgroundRunNoticesSince;
+    this.notifiedBackgroundRuns.add(run.id);
+    try {
+      const enabled = await notificationManager.isNotificationEnabled();
+      if (!enabled || this.backgroundRunNoticesSince !== since || !this.runNoticesEnabled) {
+        if (this.backgroundRunNoticesSince === since) this.notifiedBackgroundRuns.delete(run.id);
+        return;
+      }
+      const messageId = runNotificationId(run.id);
+      const title = run.status === 'completed' ? 'OK' : runStatus(run.status);
+      await notificationManager.publish({
+        label: messageId,
+        appMessageId: messageId,
+        notificationSlotType: notificationManager.SlotType.SERVICE_INFORMATION,
+        content: {
+          notificationContentType: notificationManager.ContentType.NOTIFICATION_CONTENT_BASIC_TEXT,
+          normal: { title: title, text: runNotificationText(run.title ?? '') }
+        }
+      });
+      if (this.backgroundRunNoticesSince === since && this.backgroundRunSessions.delete(run.sessionId) &&
+        !this.backgroundRunSessions.size) this.stopBackgroundRunTask();
+    } catch {
+      if (this.backgroundRunNoticesSince === since) this.notifiedBackgroundRuns.delete(run.id);
+    }
+  }
+
+  private queueWatchReminder(id: string, status: string, computer: string, title: string, finishedAt: number): void {
+    const now = Date.now();
+    if (!this.watchRemindersEnabled || finishedAt <= 0 || finishedAt < now - 5 * 60 * 1000 ||
+      finishedAt > now + 5 * 60 * 1000) return;
+    this.watchReminders.notify({
+      id: id,
+      title: `Pi Go · ${status}`,
+      text: watchReminderText(status, computer, title)
+    });
+  }
+
+  private rememberWatchReminder(id: string): void {
+    this.watchReminderDelivered = [id].concat(this.watchReminderDelivered.filter((value: string): boolean => value !== id))
+      .slice(0, 240);
+    void this.saveSetting('watch_reminder_delivered', JSON.stringify(this.watchReminderDelivered)).catch(() => {});
   }
 
   private async syncRunResults(endpoint: BridgeEndpoint, session: string, key: string): Promise<void> {
@@ -1052,6 +1157,12 @@ struct Index {
     this.scheduleMessages = old.filter((message: RunMessage): boolean => message.address !== computer.address &&
       !incoming.some((item: RunMessage): boolean => item.key === message.key)).concat(incoming)
       .sort((left: RunMessage, right: RunMessage): number => (right.run.finishedAt ?? 0) - (left.run.finishedAt ?? 0));
+    for (const message of incoming) {
+      if (message.unread && !message.dismissed) {
+        this.queueWatchReminder(`schedule:${message.key}`, scheduleRunStatus(message.run.status), message.computer,
+          message.run.name, message.run.finishedAt ?? message.run.scheduledAt);
+      }
+    }
     const active = (result.activeRuns ?? []).map((run: ScheduleRun): RunMessage => ({
       key: `${source}:${run.id}`, source: source, address: computer.address, computer: name, run: run, unread: false
     }));
@@ -4012,6 +4123,10 @@ struct Index {
 
   private trackDispatchedLiveRun(revision: number): void {
     if (this.liveRevision === revision && this.idle) this.idle = false;
+    if (this.visible && this.runNoticesEnabled && !this.askedForRunNotifications) {
+      this.askedForRunNotifications = true;
+      void this.requestRunNotificationPermission();
+    }
     if (!this.visible || !this.liveViewsEnabled || (this.idle && !this.queued)) return;
     this.liveViewSessionKey = this.draftKey(this.currentId);
     this.liveViewRunId = this.runId;
@@ -4564,6 +4679,15 @@ struct Index {
       this.themeMotionEnabled = settings.getSync(THEME_MOTION_SETTING, true) !== false;
       this.modeId = appearanceMode(settings.getSync('appearance_mode', 'system') as string).id;
       this.runNoticesEnabled = settings.getSync(RUN_NOTICE_SETTING, true) !== false;
+      this.watchRemindersEnabled = settings.getSync(WATCH_REMINDERS_SETTING, true) !== false;
+      try {
+        const delivered = JSON.parse(settings.getSync('watch_reminder_delivered', '[]') as string) as string[];
+        if (Array.isArray(delivered)) {
+          this.watchReminderDelivered = delivered.filter((id: string): boolean => typeof id === 'string').slice(0, 240);
+        }
+      } catch { /* Ignore an invalid watch delivery history. */ }
+      this.watchReminders.restore(this.watchReminderDelivered);
+      this.watchReminders.setEnabled(this.watchRemindersEnabled);
       this.liveViewsEnabled = settings.getSync(LIVE_VIEW_SETTING, true) !== false;
       const scheduleWatches = settings.getSync('schedule_watches', '[]') as string;
       this.scheduleWatches = JSON.parse(scheduleWatches) as ScheduleWatch[];
@@ -4597,6 +4721,38 @@ struct Index {
       if (this.runNoticesEnabled === enabled) {
         this.getUIContext().getPromptAction().showToast({ message: '未能保存通知设置' });
       }
+    }
+    if (enabled) void this.requestRunNotificationPermission();
+  }
+
+  private async requestRunNotificationPermission(): Promise<void> {
+    try {
+      const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      if (context && !(await notificationManager.isNotificationEnabled())) {
+        await notificationManager.requestEnableNotification(context);
+      }
+    } catch { /* System notification permissions can also be enabled in Settings. */ }
+  }
+
+  private async setWatchRemindersEnabled(enabled: boolean): Promise<void> {
+    this.watchRemindersEnabled = enabled;
+    this.watchReminders.setEnabled(enabled);
+    try {
+      await this.saveSetting(WATCH_REMINDERS_SETTING, enabled);
+    } catch {
+      if (this.watchRemindersEnabled === enabled) {
+        this.getUIContext().getPromptAction().showToast({ message: '未能保存手表提醒设置' });
+      }
+    }
+  }
+
+  private async testWatchReminder(): Promise<void> {
+    if (this.watchReminderTesting || !this.watchRemindersEnabled) return;
+    this.watchReminderTesting = true;
+    try {
+      await this.watchReminders.test();
+    } finally {
+      this.watchReminderTesting = false;
     }
   }
 
@@ -5022,6 +5178,11 @@ struct Index {
       restoreCloudComputer: (computer: CloudComputer): void => this.restoreCloudComputer(computer),
       restoringComputer: this.restoringComputer,
       runNoticesEnabled: this.runNoticesEnabled,
+      watchRemindersEnabled: this.watchRemindersEnabled,
+      watchReminderStatus: this.watchReminderStatus,
+      watchReminderTesting: this.watchReminderTesting,
+      setWatchRemindersEnabled: (enabled: boolean): Promise<void> => this.setWatchRemindersEnabled(enabled),
+      testWatchReminder: (): Promise<void> => this.testWatchReminder(),
       saveComputerName: (id: string): void => this.saveComputerName(id),
       scanPairingBundle: (): Promise<void> => this.scanPairingBundle(),
       scheduleCloudSync: (delay?: number): void => this.scheduleCloudSync(delay),

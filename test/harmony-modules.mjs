@@ -46,6 +46,14 @@ const systemMocks = new Map([
     }
   };`],
   ['@kit.AbilityKit', 'export const common = {};'],
+  ['@kit.BasicServicesKit', 'export class BusinessError extends Error {} export const pasteboard = {};'],
+  ['@kit.WearEngine', `export const wearEngine = new Proxy({}, {
+    get(_target, key) {
+      const api = globalThis.pigoTestWearEngine;
+      const member = api[key];
+      return typeof member === 'function' ? member.bind(api) : member;
+    }
+  });`],
   ['@kit.ShareKit', `export const systemShare = {
     SelectionMode: { SINGLE: 0, BATCH: 1 },
     SharePreviewMode: { DEFAULT: 0, DETAIL: 1 },

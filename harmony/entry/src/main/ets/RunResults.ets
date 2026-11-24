@@ -52,8 +52,22 @@ export function runStatus(status: string): string {
 }
 
 export function pushDeviceId(token: string): string {
+  return sha256Hex('pi-go-push:' + token);
+}
+
+export function runNotificationId(runId: string): string {
+  return sha256Hex(runId).slice(0, 32);
+}
+
+export function runNotificationText(title: string): string {
+  const chars = Array.from(title.replace(/\s+/g, ' ').trim());
+  if (chars.length > 64) return `${chars.slice(0, 63).join('')}…`;
+  return chars.join('') || '未命名任务';
+}
+
+function sha256Hex(value: string): string {
   const hash = cryptoFramework.createMd('SHA256');
-  hash.updateSync({ data: new util.TextEncoder().encodeInto('pi-go-push:' + token) });
+  hash.updateSync({ data: new util.TextEncoder().encodeInto(value) });
   return Array.from(hash.digestSync().data, (byte: number): string => byte.toString(16).padStart(2, '0')).join('');
 }
 

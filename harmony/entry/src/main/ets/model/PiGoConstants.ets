@@ -16,4 +16,5 @@ export const SHORT_WINDOW_HEIGHT = 480;
 export const MAX_DOWNLOAD_ERROR_BYTES = 4096;
 export const MAX_TEXT_PREVIEW_BYTES = 128 * 1024;
 export const RUN_NOTICE_SETTING = 'run_completion_notices';
+export const WATCH_REMINDERS_SETTING = 'watch_reminders_enabled';
 export const LIVE_VIEW_SETTING = 'agent_live_view';

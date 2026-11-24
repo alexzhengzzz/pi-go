@@ -10,6 +10,7 @@ import { CloudComputer } from '../AccountSync';
 import { validUsb } from '../PairingCode';
 import { connectionLabel } from '../CompanionCheck';
 import { ComputerGroup, computerGroups, computerGroupTitle } from '../ComputerGroups';
+import { watchReminderStatusText } from '../WatchReminders';
 
 @Extend(Button)
 function chatAction() {
@@ -65,6 +66,11 @@ export struct SettingsView {
   @Require restoreCloudComputer: (computer: CloudComputer) => void = unboundAction;
   @Prop restoringComputer?: CloudComputer;
   @Prop runNoticesEnabled: boolean;
+  @Prop watchRemindersEnabled: boolean;
+  @Prop watchReminderStatus: string;
+  @Prop watchReminderTesting: boolean;
+  @Require setWatchRemindersEnabled: (enabled: boolean) => Promise<void> = unboundAction;
+  @Require testWatchReminder: () => Promise<void> = unboundAction;
   @Require saveComputerName: (id: string) => void = unboundAction;
   @Require scanPairingBundle: () => Promise<void> = unboundAction;
   @Require scheduleCloudSync: (delay?: number) => void = unboundAction;
@@ -633,15 +639,34 @@ export struct SettingsView {
   }
   @Builder
   runNoticeSettings() {
-    Row({ space: 12 }) {
-      Column({ space: 4 }) {
-        Text('运行结束通知').fontSize(16).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
-        Text('任务结束时在应用顶部显示横幅').fontSize(13).fontColor($r('app.color.pigo_muted'))
-      }.layoutWeight(1).alignItems(HorizontalAlign.Start)
-      Toggle({ type: ToggleType.Switch, isOn: this.runNoticesEnabled })
-        .id('run-notice-setting').selectedColor(this.accent).accessibilityText('运行结束通知')
-        .onChange((enabled: boolean) => { void this.setRunNoticesEnabled(enabled); })
-    }.width('100%').padding(14).attributeModifier(themedCardSurface(this.darkMode, this.themeId))
+    Column({ space: 12 }) {
+      Row({ space: 12 }) {
+        Column({ space: 4 }) {
+          Text('运行结束通知').fontSize(16).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
+          Text('应用内显示横幅，退到后台后显示手机通知').fontSize(13).fontColor($r('app.color.pigo_muted'))
+        }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+        Toggle({ type: ToggleType.Switch, isOn: this.runNoticesEnabled })
+          .id('run-notice-setting').selectedColor(this.accent).accessibilityText('运行结束通知')
+          .onChange((enabled: boolean) => { void this.setRunNoticesEnabled(enabled); })
+      }.width('100%').padding(14).attributeModifier(themedCardSurface(this.darkMode, this.themeId))
+      Column({ space: 10 }) {
+        Row({ space: 12 }) {
+          Column({ space: 4 }) {
+            Text('手表提醒').fontSize(16).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
+            Text(watchReminderStatusText(this.watchRemindersEnabled ? this.watchReminderStatus : ''))
+              .fontSize(13).fontColor($r('app.color.pigo_muted'))
+          }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+          Toggle({ type: ToggleType.Switch, isOn: this.watchRemindersEnabled })
+            .id('watch-reminders-setting').selectedColor(this.accent).accessibilityText('手表提醒')
+            .onChange((enabled: boolean) => { void this.setWatchRemindersEnabled(enabled); })
+        }.width('100%')
+        if (this.watchRemindersEnabled) {
+          Button(this.watchReminderTesting ? '正在发送…' : '发送测试提醒').chatAction().id('watch-reminders-test')
+            .width('100%').height(38).enabled(!this.watchReminderTesting)
+            .onClick(() => { void this.testWatchReminder(); })
+        }
+      }.width('100%').padding(14).attributeModifier(themedCardSurface(this.darkMode, this.themeId))
+    }.width('100%')
   }
   @Builder
   liveViewSettings() {

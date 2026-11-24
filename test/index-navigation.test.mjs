@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { stripTypeScriptTypes } from 'node:module';
 import { test } from 'node:test';
 import './harmony-modules.mjs';
@@ -11,7 +11,8 @@ const { BridgeFailure } = await import('../harmony/entry/src/main/ets/model/PiGo
 const { ChatState } = await import('../harmony/entry/src/main/ets/model/ChatState.ets');
 const { ConnectionManager } = await import('../harmony/entry/src/main/ets/model/ConnectionManager.ets');
 const { SessionStore, workspaceName } = await import('../harmony/entry/src/main/ets/model/SessionStore.ets');
-const { SPLIT_WINDOW_WIDTH, RUN_NOTICE_SETTING, LIVE_VIEW_SETTING } = await import('../harmony/entry/src/main/ets/model/PiGoConstants.ets');
+const { SPLIT_WINDOW_WIDTH, RUN_NOTICE_SETTING, WATCH_REMINDERS_SETTING, LIVE_VIEW_SETTING } = await import('../harmony/entry/src/main/ets/model/PiGoConstants.ets');
+const { watchReminderText } = await import('../harmony/entry/src/main/ets/WatchReminders.ets');
 
 // These cases cover page orchestration across the imported stores and ArkUI callbacks.
 const page = pageSource();
@@ -21,6 +22,7 @@ function method(name) {
   const end = page.indexOf('\n  }', start) + 4;
   return page.slice(start, end);
 }
+const { runNotificationText, runStatus } = await import('../harmony/entry/src/main/ets/RunResults.ets');
 const methods = ['setDrawer', 'loadSessions', 'applyCatalog', 'requestAction', 'positionTranscript', 'poll', 'loadSessionStatus', 'applyRunningStatus', 'backgroundRunning', 'backgroundActive', 'sessionState', 'sessionRunning'];
 methods.push('toggleSpace', 'updateSidebarRows', 'revealLibraryAnchor',
   'appendSessionPage', 'setWorkspacePage', 'loadWorkspacePage', 'resetCatalog');
@@ -33,13 +35,22 @@ methods.push('workspaceName', 'openNewSpace', 'closeNewSpace', 'createWorkspaceT
 methods.push('dockedSessions', 'sessionPaneWidth', 'compactSessionPane', 'onWindowWidthChange');
 methods.push('chatTitle', 'updateCachedSessionTitle', 'observeSessionRun', 'observeRun', 'advanceRunNotice', 'clearRunNotices');
 methods.push('restoreSettings', 'saveSetting', 'setRunNoticesEnabled', 'setLiveViewsEnabled');
-methods.push('dismissInboxRuns', 'syncRunInbox', 'deleteScheduleRuns', 'removeScheduleMessage', 'scheduleFailure');
+methods.push('dismissInboxRuns', 'syncRunInbox', 'publishBackgroundRunNotice', 'queueWatchReminder', 'rememberWatchReminder',
+  'deleteScheduleRuns', 'removeScheduleMessage', 'scheduleFailure');
 methods.push('trackDispatchedLiveRun', 'backgroundLiveActivity', 'syncLiveActivity', 'canSwitchNetwork', 'tryPublicConnection');
 const liveViewCalls = [];
 const liveActivity = { sync: snapshot => liveViewCalls.push(snapshot) };
+const phoneNotifications = [];
+const notificationManager = {
+  SlotType: { SERVICE_INFORMATION: 2 },
+  ContentType: { NOTIFICATION_CONTENT_BASIC_TEXT: 0 },
+  isNotificationEnabled: async () => true,
+  publish: async request => { phoneNotifications.push(request); },
+};
 const Page = new Function('Curve', 'BridgeFailure', 'validUsb', 'Edge', '$r', 'DialogAlignment',
   'openSettings', 'themeStyle', 'appearanceMode', 'liveActivity', 'util', 'SPLIT_WINDOW_WIDTH',
-  'RUN_NOTICE_SETTING', 'LIVE_VIEW_SETTING', 'THEME_MOTION_SETTING', 'workspaceName', 'computerGroupId', 'connectionLabel', 'validCompanion',
+  'RUN_NOTICE_SETTING', 'WATCH_REMINDERS_SETTING', 'LIVE_VIEW_SETTING', 'THEME_MOTION_SETTING', 'workspaceName', 'computerGroupId', 'connectionLabel', 'validCompanion',
+  'watchReminderText', 'runStatus', 'runNotificationId', 'runNotificationText', 'notificationManager',
   stripTypeScriptTypes(`class Harness {\n${methods.map(method).join('\n')}\n}`) + '; return Harness;')(
   { EaseOut: 0 },
   BridgeFailure,
@@ -52,7 +63,8 @@ const Page = new Function('Curve', 'BridgeFailure', 'validUsb', 'Edge', '$r', 'D
   (id) => ({ id }),
   liveActivity,
   { generateRandomUUID: randomUUID },
-  SPLIT_WINDOW_WIDTH, RUN_NOTICE_SETTING, LIVE_VIEW_SETTING, 'theme_motion_enabled', workspaceName, computerGroupId, connectionLabel, validCompanion
+  SPLIT_WINDOW_WIDTH, RUN_NOTICE_SETTING, WATCH_REMINDERS_SETTING, LIVE_VIEW_SETTING, 'theme_motion_enabled', workspaceName, computerGroupId, connectionLabel, validCompanion,
+  watchReminderText, runStatus, id => createHash('sha256').update(id).digest('hex').slice(0, 32), runNotificationText, notificationManager
 );
 function fixture() {
   const state = new Page();
@@ -60,7 +72,8 @@ function fixture() {
     sidebarRows: new SidebarRows(), chatState: new ChatState(), connection: new ConnectionManager(),
     sessionStore: new SessionStore(),
     resetVoice: () => {}, resetCommands: () => {}, syncCommandPalette: () => {},
-    queueRunSync: () => {}, tryPublicConnection: async () => {},
+    queueRunSync: () => {}, queueWatchReminder: () => {}, requestRunNotificationPermission: async () => {},
+    watchReminders: { restore: () => {}, setEnabled: () => {} }, tryPublicConnection: async () => {},
     fileDirectories: new Map(),
     syncMode: 'legacy', busy: false, sessionLoading: false, epoch: 1, reachable: true,
     runningSessionIds: [], runningSessions: [], sessionStatusAt: 0, currentId: '', idle: true, queued: false,
@@ -115,6 +128,62 @@ test('inbox cleanup survives restart and polling while keeping pending and new r
   await restarted.syncRunInbox(computer);
   assert.deepEqual(restarted.inboxRuns.map(({ run }) => run.id), ['pending', 'kept', 'new']);
   assert.equal(restarted.inboxRuns[0].unread, true);
+});
+
+test('background inbox polls publish one system notification per new terminal event', async () => {
+  const computer = { address: 'https://desktop', token: 'token', computerName: '工作 Mac' };
+  const since = Date.now();
+  const events = [
+    { id: 'old', status: 'completed', finishedAt: since - 1 },
+    { id: 'waiting', status: 'waiting', finishedAt: since },
+    { id: 'run-1', status: 'completed', finishedAt: since, title: '修复\n通知同步', cwd: '/private/dev/pi-go' },
+    { id: 'run-2', status: 'failed', finishedAt: since + 1, title: '生成报表', cwd: '/private/dev/dashboard/' },
+  ];
+  const state = fixture();
+  Object.assign(state, {
+    computers: [computer], inboxRuns: [], visible: false, backgroundRunNoticesSince: since,
+    notifiedBackgroundRuns: new Set(), backgroundRunSessions: new Set(), runRead: [], dismissedInboxRuns: new Set(),
+    scheduleEndpoint: item => item, scheduleComputerName: () => 'Desktop', syncPushRegistration: async () => {},
+    request: async () => ({ runEvents: events }),
+  });
+  phoneNotifications.length = 0;
+  await Promise.all([state.syncRunInbox(computer), state.syncRunInbox(computer)]);
+  assert.deepEqual(phoneNotifications.map(request => request.content.normal), [
+    { title: 'OK', text: '修复 通知同步' },
+    { title: '运行失败', text: '生成报表' },
+  ]);
+  assert.equal(new Set(phoneNotifications.map(request => request.appMessageId)).size, 2);
+  state.visible = true;
+  events.push({ id: 'foreground', status: 'completed', finishedAt: since + 2 });
+  await state.syncRunInbox(computer);
+  assert.equal(phoneNotifications.length, 2);
+});
+
+test('notification text shortens long titles without splitting Unicode characters', () => {
+  assert.equal(runNotificationText('🚀'.repeat(70)), `${'🚀'.repeat(63)}…`);
+  assert.equal(runNotificationText(' '), '未命名任务');
+});
+
+test('watch reminders accept only recent events and persist delivery ids', async () => {
+  const state = fixture();
+  const reminders = [];
+  const writes = [];
+  Object.assign(state, {
+    queueWatchReminder: Page.prototype.queueWatchReminder,
+    watchRemindersEnabled: true,
+    watchReminderDelivered: [],
+    watchReminders: { notify: reminder => reminders.push(reminder) },
+    saveSetting: async (key, value) => writes.push([key, value]),
+  });
+  state.queueWatchReminder('inbox:new', '已完成', 'Mac', 'Build Pi Go', Date.now());
+  state.queueWatchReminder('inbox:old', '已完成', 'Mac', 'Old run', Date.now() - 6 * 60 * 1000);
+  assert.equal(reminders.length, 1);
+  assert.deepEqual(reminders[0], {
+    id: 'inbox:new', title: 'Pi Go · 已完成', text: '已完成 · Mac\nBuild Pi Go'
+  });
+  await state.rememberWatchReminder('inbox:new');
+  assert.deepEqual(state.watchReminderDelivered, ['inbox:new']);
+  assert.deepEqual(writes, [['watch_reminder_delivered', '["inbox:new"]']]);
 });
 
 test('bulk history deletion removes successes and retains records the computer refused to delete', async () => {
