@@ -348,6 +348,7 @@ export class SessionActions {
         refs.push({ token: uploaded.token, kind: item.kind });
       }
       if (refs.length) this.session.status = '附件已上传，正在发送…';
+      if (mode === 'send') this.streamSync.beginOptimisticLiveRun();
       const liveRevision = this.session.liveRevision;
       const result = await this.host.request('/prompt', { id: id, text: text, requestId: pending.requestId, mode: mode,
         runId: runId, attachments: refs.length ? refs : undefined });
@@ -355,9 +356,11 @@ export class SessionActions {
       if (result.dispatched !== true) throw new Error('dispatch_unconfirmed');
       this.finishSend(key, pending);
       if (mode === 'send') {
-        if (result.handled !== true) this.streamSync.trackDispatchedLiveRun(liveRevision);
+        if (result.handled === true) this.streamSync.cancelOptimisticLiveRun();
+        else this.streamSync.trackDispatchedLiveRun(liveRevision);
       } else this.session.status = '引导请求已交给 Pi。';
     } catch (error) {
+      if (mode === 'send') this.streamSync.cancelOptimisticLiveRun();
       if (epoch !== this.session.epoch) return;
       if (error instanceof BridgeFailure && error.status === 401) this.host.leaveComputer(true);
       else if (error instanceof BridgeFailure && ['session_busy', 'session_not_streaming', 'session_changed',

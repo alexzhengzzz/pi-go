@@ -27,6 +27,7 @@ export struct ChatComposer {
   @Param @Require commandRows: CommandRow[];
   @Param @Require commandsLoading: boolean;
   @Param @Require currentId: string;
+  @Param sendTarget: string = '';
   @Param @Require currentLevel: string;
   @Param @Require currentModel?: ModelOption;
   @Event dismissKeyboard: () => void = unboundAction;
@@ -115,7 +116,7 @@ export struct ChatComposer {
           .enabled(!!this.currentId && this.reachable && !this.hasPendingSend && !this.busy && !this.openingSession)
           .onTouch((event: TouchEvent) => { this.holdTouch(event); })
       } else {
-        TextArea({ placeholder: !this.reachable ? '设备离线' : this.windowWidth < 360 ? '输入消息' : '输入消息，/ 唤起命令',
+        TextArea({ placeholder: !this.reachable ? '设备离线' : this.sendTarget ? `发送到 ${this.sendTarget}` : this.windowWidth < 360 ? '输入消息' : '输入消息，/ 唤起命令',
           text: this.draft })
           .id('draft').width('100%').constraintSize({ minHeight: 42, maxHeight: 108 }).onFocus(() => { this.armTranscriptFollow(); })
           .fontSize(16).fontColor($r('app.color.pigo_text')).placeholderColor($r('app.color.pigo_muted')).backgroundColor(Color.Transparent)

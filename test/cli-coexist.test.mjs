@@ -107,8 +107,13 @@ test('phone joins the resident CLI session: one engine, two clients, steering wo
     headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ticket: pairing.code }) });
   const { token } = await paired.json();
 
-  const directory = await phone('/sessions');
-  const listed = directory.data.sessions.find((row) => row.id === sessionId);
+  let listed;
+  for (let attempt = 0; attempt < 50; attempt++) {
+    const directory = await phone('/sessions');
+    listed = directory.data.sessions.find((row) => row.id === sessionId);
+    if (listed?.active) break;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
   assert.ok(listed, 'the CLI session must appear in the phone directory');
   assert.equal(listed.active, true, 'the resident CLI session shows as active');
 

@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
-import { once } from "node:events";
+import { EventEmitter, once } from "node:events";
 import { mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, truncate, utimes, writeFile, symlink, link } from "node:fs/promises";
-import { createServer as createHttpServer } from "node:http";
+import { createServer as createHttpServer, get as httpGet } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { checkServerIdentity } from "node:tls";
 import { createHash, randomBytes, X509Certificate } from "node:crypto";
@@ -22,6 +22,8 @@ import { listFiles, previewFile, saveFile, openWorkspaceDownload, maxTextBytes, 
 import { SessionMetadata } from "../host/bridge/session-metadata.mjs";
 import { generatedSessionTitle, sessionAttachmentMarker, sessionPromptText, sessionTitlePreview } from "../host/bridge/message-view.mjs";
 import { validPromptImage, stageAttachment, stagedAttachment, stagingDir, maxFileBytes } from "../host/bridge/attachments.mjs";
+
+import { createWorkerServer } from "../host/agents/worker-core.mjs";
 
 const project = fileURLToPath(new URL("../", import.meta.url));
 const provider = fileURLToPath(new URL("./offline-provider.ts", import.meta.url));
@@ -241,13 +243,24 @@ test("shared bridge /events forwards worker frames, follows selection and ends o
   const workers = [];
   const spawnWorker = async (id, cwd, stallSession = false) => {
     const clients = new Set();
+    const actions = [];
     const cursor = { sessionId: id, streamId: `stream-${id}`, runId: null, seq: 0 };
     let historyRequested;
     let releaseHistory;
     const historyWaiting = new Promise(resolve => { historyRequested = resolve; });
     const holdHistory = new Promise(resolve => { releaseHistory = resolve; });
-    const server = createHttpServer((request, response) => {
+    const server = createHttpServer(async (request, response) => {
       const route = `${request.method} ${(request.url ?? "").split("?")[0]}`;
+      if (route === "POST /prompt" || route === "POST /abort") {
+        const params = new URL(request.url, "http://worker").searchParams;
+        assert.equal(params.get("_pigoSession"), id);
+        assert.equal(params.get("_pigoCwd"), cwd);
+        const input = JSON.parse(await buffer(request));
+        actions.push({ route, input });
+        response.writeHead(202, { "Content-Type": "application/json" });
+        response.end(JSON.stringify({ dispatched: true }));
+        return;
+      }
       if (route === "GET /session") {
         if (stallSession) return;
         response.writeHead(200, { "Content-Type": "application/json" });
@@ -289,7 +302,7 @@ test("shared bridge /events forwards worker frames, follows selection and ends o
       server.listen(socket, () => { server.off("error", reject); resolve(); });
     });
     const record = {
-      server, socket, id, cwd, clients, historyWaiting, releaseHistory, cursor,
+      server, socket, id, cwd, clients, actions, historyWaiting, releaseHistory, cursor,
       emit: (data) => {
         const frame = `data: ${JSON.stringify({ sessionId: id, ...data })}\n\n`;
         for (const client of clients) client.write(frame);
@@ -333,9 +346,10 @@ test("shared bridge /events forwards worker frames, follows selection and ends o
     method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(data),
     signal,
   });
-  const feed = events(await fetch(`${url}/events`, { headers }));
-  const ready = await feed.next();
-  assert.equal(ready.value.type, "ready");
+  const feed = events(await fetch(`${url}/events`, { headers, signal: AbortSignal.timeout(12000) }));
+  let ready = await feed.next();
+  while (ready.value?.type === "bridge/status") ready = await feed.next();
+  assert.equal(ready.value?.type, "ready");
   assert.equal(ready.value.session.id, "session-alpha");
   alpha.emit({ type: "message/delta", text: "hello", seq: 1 });
   const delta = await feed.next();
@@ -345,9 +359,16 @@ test("shared bridge /events forwards worker frames, follows selection and ends o
   assert.equal((await feed.next()).value.tool.name, "bash");
   const sequenced = events(await fetch(`${url}/events?sync=2`, { headers, signal: AbortSignal.timeout(5000) }));
   assert.deepEqual((await sequenced.next()).value.cursor, alpha.cursor);
+  const pane = new URLSearchParams({ pane: alpha.id, paneCwd: alpha.cwd });
+  const split = events(await fetch(`${url}/events?sync=2&${pane}`, { headers, signal: AbortSignal.timeout(5000) }));
+  assert.deepEqual((await split.next()).value.cursor, alpha.cursor);
   const oldHistory = fetch(`${url}/history?id=session-alpha`, { headers, signal: AbortSignal.timeout(5000) });
   await alpha.historyWaiting;
   const beta = await spawnWorker("session-beta", join(ipc, "project-b"));
+  const detached = await post("/session/open", { id: beta.id, history: true });
+  assert.equal(detached.status, 200);
+  assert.equal((await detached.json()).session.id, beta.id);
+  assert.equal((await (await fetch(`${url}/session`, { headers })).json()).session.id, alpha.id);
   const slow = await spawnWorker("session-slow", join(ipc, "project-slow"), true);
   const opened = await post("/open", { id: "session-beta", history: true }, AbortSignal.timeout(2000));
   slow.server.closeAllConnections();
@@ -358,6 +379,20 @@ test("shared bridge /events forwards worker frames, follows selection and ends o
   alpha.releaseHistory();
   assert.equal((await oldHistory).status, 409);
   assert.equal((await sequenced.next()).done, true);
+  const snapshot = await fetch(`${url}/session/snapshot?${pane}`, { headers });
+  assert.equal(snapshot.status, 200);
+  assert.deepEqual((await snapshot.json()).cursor, alpha.cursor);
+  const wrongPane = new URLSearchParams({ pane: alpha.id, paneCwd: beta.cwd });
+  assert.equal((await fetch(`${url}/session/snapshot?${wrongPane}`, { headers })).status, 409);
+  const prompt = { id: alpha.id, text: "Deliver this to alpha", requestId: "alpha-prompt" };
+  assert.equal((await post(`/prompt?${pane}`, { ...prompt, id: beta.id })).status, 409);
+  assert.equal((await post(`/prompt?${pane}`, prompt)).status, 202);
+  assert.equal((await post(`/abort?${pane}`, { id: alpha.id })).status, 202);
+  assert.deepEqual(alpha.actions, [{ route: "POST /prompt", input: prompt }, { route: "POST /abort", input: { id: alpha.id } }]);
+  assert.deepEqual(beta.actions, []);
+  alpha.emit({ type: "message/delta", text: "alpha still streaming", seq: 2 });
+  assert.equal((await split.next()).value.text, "alpha still streaming");
+  await split.return();
   const next = events(await fetch(`${url}/events?sync=2`, { headers, signal: AbortSignal.timeout(5000) }));
   assert.deepEqual((await next.next()).value.cursor, beta.cursor);
   const state = await (await fetch(`${url}/session/snapshot`, { headers })).json();
@@ -381,7 +416,7 @@ test("shared bridge /events forwards worker frames, follows selection and ends o
 function start(agentDir, cwd, env = {}, tools = false, skills = false) {
   const child = spawn(pi, ["--offline", "--mode", "rpc", ...(tools ? [] : ["--no-tools"]),
     "--no-mcp", "--no-approve", ...(skills ? [] : ["--no-skills"]), "--no-context-files", "-e", provider,
-    "--provider", "pi-go-test", "--model", "fixture"], { cwd, env: { ...process.env, ...env, PI_CODING_AGENT_DIR: agentDir, PIGO_TEST_COMMANDS: "1" } });
+    "--provider", "pi-go-test", "--model", "fixture"], { cwd, env: { ...process.env, ...env, PI_CODING_AGENT_DIR: agentDir, PIGO_STATE_DIR: env.PIGO_STATE_DIR ?? join(agentDir, "..", "state"), PIGO_TEST_COMMANDS: "1" } });
   const exit = once(child, "exit");
   const messages = [];
   let stderr = "";
@@ -416,7 +451,8 @@ async function pair(runtime, useCode = false, command = "/pi-go") {
   assert.equal((await stat(path)).mode & 0o777, 0o600);
   const { url, ticket, code } = JSON.parse(await readFile(path, "utf8"));
   assert.match(code, /^\d{8}$/);
-  const request = (route, options) => fetch(`${url}${route}`, { signal: AbortSignal.timeout(5000), ...options });
+  const request = (route, options) => fetch(`${url}${route}`, { signal: AbortSignal.timeout(5000), ...options })
+    .catch((cause) => { throw new TypeError(`${options?.method ?? "GET"} ${route} failed`, { cause }); });
   const post = (route, data, headers = {}) => request(route, {
     method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(data),
   });
@@ -449,6 +485,130 @@ async function* events(response) {
     }
   }
 }
+
+test("Pi and generic worker sockets implement the same chat, cursor and receipt contract", { timeout: 15000 }, async (context) => {
+  const root = await realpath(await mkdtemp("/tmp/pigo-contract-"));
+  const cwd = join(root, "project");
+  const agent = join(root, "agent");
+  const ipc = join(root, "ipc");
+  await Promise.all([cwd, agent, ipc].map((path) => mkdir(path, { mode: 0o700 })));
+  const runtime = spawn(pi, ["--offline", "--mode", "rpc", "--no-tools", "--no-skills",
+    "--no-mcp", "--no-context-files", "-e", join(project, "host/bridge/phase0.ts"),
+    "-e", provider, "--provider", "pi-go-test", "--model", "fixture"],
+    { cwd, env: { ...process.env, PI_CODING_AGENT_DIR: agent, PIGO_IPC_DIR: ipc, PIGO_STATE_DIR: join(root, "state") } });
+  const exit = once(runtime, "exit");
+  context.after(async () => {
+    runtime.kill();
+    await exit;
+    await rm(root, { recursive: true, force: true });
+  });
+  const eventsFromPi = createInterface({ input: runtime.stdout });
+  const settled = new Promise((resolve) => {
+    eventsFromPi.on("line", (line) => {
+      if (JSON.parse(line).type === "agent_settled") resolve();
+    });
+  });
+  const send = (id, message) => new Promise((resolve, reject) => {
+    const onLine = (line) => {
+      const event = JSON.parse(line);
+      if (event.type !== "response" || event.id !== id) return;
+      eventsFromPi.off("line", onLine);
+      runtime.off("exit", onExit);
+      if (event.success) resolve();
+      else reject(new Error(event.error));
+    };
+    const onExit = () => reject(new Error("Pi exited during the contract test"));
+    eventsFromPi.on("line", onLine);
+    runtime.once("exit", onExit);
+    runtime.stdin.write(JSON.stringify({ id, type: "prompt", message }) + "\n");
+  });
+  await send("seed", "Earlier turn");
+  await settled;
+  await send("share", "/pi-go-share desktop-host");
+  const piSocket = join(ipc, (await readdir(ipc)).find((name) => /^w-.*\.sock$/.test(name)));
+
+  const driver = new EventEmitter();
+  const rows = [
+    { id: "seed", role: "user", text: "Earlier turn" },
+    { id: "seed-reply", role: "assistant", text: "fixture delta" },
+  ];
+  let idle = true;
+  Object.assign(driver, {
+    agent: "fixture",
+    state: () => ({ id: "fixture", cwd, idle, queued: false, acceptsImage: true }),
+    historyLeaf: () => rows.at(-1)?.id,
+    entries: () => rows,
+    prompt({ text }) {
+      idle = false;
+      driver.emit("turn_start");
+      rows.push({ id: "user", role: "user", text });
+      driver.emit("delta", "fixture delta");
+    },
+    abort() {
+      idle = true;
+      rows.push({ id: "assistant", role: "assistant", text: "fixture delta" });
+      driver.emit("message_final", "aborted");
+      driver.emit("turn_end", { aborted: true });
+    },
+  });
+  const core = createWorkerServer(driver);
+  const genericSocket = join(ipc, "generic.sock");
+  core.worker.listen(genericSocket);
+  await once(core.worker, "listening");
+  context.after(() => core.stop());
+
+  for (const [name, socket] of [["Pi", piSocket], ["generic", genericSocket]]) {
+    await context.test(name, async () => {
+      const get = (route) => localRequest(socket, "GET", route);
+      const post = (route, input) => localRequest(socket, "POST", route, input);
+      const { data: { session } } = await get("/session");
+      const { id } = session;
+      const input = { id, requestId: "contract-send", text: "Pi Go fixture: long answer" };
+      const response = await new Promise((resolve, reject) => {
+        httpGet({ socketPath: socket, path: "/events?sync=2", signal: AbortSignal.timeout(8000) }, resolve)
+          .on("error", reject);
+      });
+      const feed = events(new Response(response, { status: response.statusCode }));
+      try {
+        const ready = (await feed.next()).value;
+        assert.equal(ready.type, "ready");
+        assert.equal(ready.cursor.sessionId, id);
+        assert.equal(ready.cursor.runId, null);
+        assert.equal((await get("/chat?_pigoSession=old&_pigoCwd=" + encodeURIComponent(cwd))).status, 409);
+        assert.equal((await post("/prompt", { ...input, id: "old" })).status, 409);
+        assert.equal((await post("/prompt", input)).status, 202);
+        assert.deepEqual((await post("/prompt", input)).data, { error: "duplicate_request" });
+        assert.deepEqual((await post("/receipt", { id, requestId: input.requestId })).data,
+          { dispatched: true, requestId: input.requestId });
+        let delta;
+        do { delta = (await feed.next()).value; } while (delta.type !== "message/delta");
+        assert.ok(delta.cursor.runId);
+        assert.ok(delta.cursor.seq > ready.cursor.seq);
+        assert.equal(delta.text, "fixture delta");
+        const { data: snapshot } = await get("/session/snapshot?history=1");
+        assert.equal(snapshot.cursor.runId, delta.cursor.runId);
+        assert.equal(snapshot.cursor.streamId, delta.cursor.streamId);
+        assert.equal(snapshot.liveText, delta.text);
+        assert.equal((await post("/abort", { id })).status, 202);
+        let settled;
+        do { settled = (await feed.next()).value; } while (settled.type !== "session/status" || !settled.idle);
+        assert.equal(settled.cursor.runId, delta.cursor.runId);
+        const { data: page } = await get(`/history?id=${id}&sync=2&limit=1`);
+        assert.equal(page.messages.length, 1);
+        assert.equal(page.cursor.runId, null);
+        assert.equal(page.cursor.streamId, delta.cursor.streamId);
+        assert.equal(page.historyCursor, page.messages[0].id);
+        const { data: earlier } = await get(`/history?id=${id}&limit=60&before=${page.historyCursor}`);
+        assert.equal(earlier.messages[0].text, "Earlier turn");
+        assert.equal([...earlier.messages, ...page.messages].filter(({ text }) => text === input.text).length, 1);
+        assert.deepEqual((await get(`/history?id=${id}&before=stale`)).data, { error: "history_changed" });
+      } finally {
+        response.destroy();
+        await feed.return();
+      }
+    });
+  }
+});
 
 test("shared desktop sessions generate one title and keep previews on failure", { timeout: 25000 }, async (context) => {
   const root = await mkdtemp("/private/tmp/pigo-title-");
@@ -805,7 +965,19 @@ test("shared bridge selects native runtimes without replacing their sessions", {
   assert.equal((await (await bridge.get("/session")).json()).session.id, sessionA.sessionId);
   await runtimeB.rpc("prompt", { message: "/pi-go-share" });
   await runtimeB.wait((event) => event.method === "notify" && event.message === "Pi Go session shared");
-  const listed = await (await bridge.get("/sessions")).json();
+  // Registry notifications are asynchronous across the Pi and broker processes.
+  const waitForBridge = async (route, predicate) => {
+    let data;
+    for (let attempt = 0; attempt < 50; attempt++) {
+      data = await (await bridge.get(route)).json();
+      if (predicate(data)) return data;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    assert.fail(`${route} did not converge: ${JSON.stringify(data)}`);
+  };
+  const waitForSession = (predicate) => waitForBridge("/session", ({ session }) => session && predicate(session));
+  const listed = await waitForBridge("/sessions", ({ sessions }) =>
+    sessions.some(({ id, active }) => id === sessionB.sessionId && active));
   assert.equal(listed.current.id, sessionA.sessionId);
   assert.deepEqual((await (await bridge.get("/sessions/status")).json()).runningSessionIds, []);
   assert.deepEqual(new Set(listed.sessions.filter(({ active }) => active).map(({ id }) => id)), new Set([sessionA.sessionId, sessionB.sessionId]));
@@ -827,7 +999,7 @@ test("shared bridge selects native runtimes without replacing their sessions", {
   assert.equal((await bridge.post("/open", { id: sessionB.sessionId })).status, 200);
   assert.equal((await bridge.post("/abort", { id: sessionB.sessionId })).status, 202);
   await runtimeB.wait((event) => event.type === "agent_settled", since);
-  const settled = await (await bridge.get("/sessions/status")).json();
+  const settled = await waitForBridge("/sessions/status", ({ runningSessionIds }) => runningSessionIds.length === 0);
   assert.deepEqual(settled.runningSessionIds, []);
   assert.deepEqual(new Set(settled.idleSessionIds), new Set([sessionA.sessionId, sessionB.sessionId]));
   const [{ messages: messagesA }, { messages: messagesB }] = await Promise.all([runtimeA.rpc("get_messages"), runtimeB.rpc("get_messages")]);
@@ -899,7 +1071,7 @@ test("shared bridge selects native runtimes without replacing their sessions", {
   assert.deepEqual(await (await bridge.post("/prompt", { ...imagePrompt, image: "not-jpeg" })).json(), { error: "invalid_image" });
   assert.equal((await bridge.post("/prompt", { ...imagePrompt, image: "A".repeat(800000) })).status, 413);
   await runtimeB.rpc("set_model", { provider: "pi-go-test", modelId: "text-only" });
-  assert.equal((await (await bridge.get("/session")).json()).session.acceptsImage, false);
+  await waitForSession(({ acceptsImage }) => acceptsImage === false);
   assert.deepEqual(await (await bridge.post("/prompt", imagePrompt)).json(), { error: "image_not_supported" });
   await runtimeB.rpc("set_model", { provider: "pi-go-test", modelId: "fixture" });
   const imageTurn = runtimeB.messages.length;
@@ -1019,11 +1191,11 @@ test("shared bridge selects native runtimes without replacing their sessions", {
   const switched = await (await bridge.post("/model", { id: sessionB.sessionId, provider: "pi-go-test", modelId: "text-only", thinkingLevel: "high" })).json();
   assert.equal(switched.current.id, "text-only");
   assert.equal(switched.current.thinkingLevel, "off");
-  assert.equal((await (await bridge.get("/session")).json()).session.acceptsImage, false);
+  await waitForSession(({ acceptsImage }) => acceptsImage === false);
   const backToFixture = await (await bridge.post("/model", { id: sessionB.sessionId, provider: "pi-go-test", modelId: "fixture" })).json();
   assert.equal(backToFixture.current.id, "fixture");
   assert.equal(backToFixture.current.thinkingLevel, "off");
-  assert.equal((await (await bridge.get("/session")).json()).session.model.id, "fixture");
+  await waitForSession(({ model }) => model?.id === "fixture");
   const busyTurn = runtimeB.messages.length;
   await runtimeB.rpc("prompt", { message: "Pi Go fixture: long answer" });
   await runtimeB.wait((event) => event.type === "message_update", busyTurn);
@@ -1033,7 +1205,7 @@ test("shared bridge selects native runtimes without replacing their sessions", {
   assert.deepEqual(await (await bridge.post("/rename", { id: sessionB.sessionId, name: " padded " })).json(), { error: "invalid_name" });
   assert.equal((await bridge.post("/rename", { id: sessionA.sessionId, name: "Wrong session" })).status, 409);
   assert.equal((await bridge.post("/rename", { id: sessionB.sessionId, name: "Renamed from the phone" })).status, 200);
-  assert.equal((await (await bridge.get("/session")).json()).session.name, "Renamed from the phone");
+  await waitForSession(({ name }) => name === "Renamed from the phone");
   const search = await (await bridge.get("/sessions?limit=2")).json();
   assert.equal(search.total, 3);
   assert.equal(search.sessions.length, 2);
@@ -1142,15 +1314,14 @@ test("shared bridge selects native runtimes without replacing their sessions", {
   await duplicate.rpc("switch_session", { sessionPath: sessionB.sessionFile });
   await duplicate.rpc("prompt", { message: "/pi-go-share" });
   await duplicate.wait((event) => event.method === "notify" && event.message === "Pi Go session shared");
-  const occupied = await (await bridge.get("/sessions")).json();
-  assert.equal(occupied.sessions.find(({ id }) => id === sessionB.sessionId)?.occupied, true);
+  await waitForBridge("/sessions", ({ sessions }) => sessions.some(({ id, occupied }) => id === sessionB.sessionId && occupied));
   assert.deepEqual(await (await bridge.post("/open", { id: sessionB.sessionId })).json(), { error: "session_occupied" });
   assert.equal((await bridge.post("/prompt", { ...input, requestId: "occupied" })).status, 409);
   duplicate.child.stdin.end();
   await duplicate.exit;
   runtimeB.child.stdin.end();
   await runtimeB.exit;
-  assert.equal((await (await bridge.get("/chat")).json()).state, "session_closed");
+  await waitForBridge("/chat", ({ state }) => state === "session_closed");
   assert.equal((await bridge.post("/prompt", input)).status, 409);
   assert.equal((await bridge.post("/open", { id: sessionA.sessionId })).status, 200);
   const hosted = start(agent, first, env);
@@ -1181,12 +1352,12 @@ test("shared bridge selects native runtimes without replacing their sessions", {
   }).listen(join(ipc, "host-42.sock"));
   context.after(() => promisify(host.close.bind(host))());
   await once(host, "listening");
-  assert.equal((await (await bridge.get("/sessions")).json()).desktopHandoff, true);
+  await waitForBridge("/sessions", ({ desktopHandoff }) => desktopHandoff === true);
   assert.equal((await bridge.post("/new", { cwd: "/not-shared" })).status, 403);
   const restored = await bridge.post("/open", { id: historic.sessionId, cwd: "/ignored-phone-path" });
   assert.equal(restored.status, 200, await restored.clone().text());
   assert.equal((await restored.json()).session.id, historic.sessionId);
-  assert.deepEqual(calls[0], { route: "/open", cwd: listed.current.cwd, id: historic.sessionId });
+  assert.deepEqual(calls[0], { route: "/open", cwd: listed.current.cwd, id: historic.sessionId, agent: "pi" });
   const created = await bridge.post("/new", { cwd: listed.current.cwd });
   assert.equal(created.status, 200, await created.clone().text());
   assert.notEqual((await created.json()).session.id, historic.sessionId);
@@ -1199,16 +1370,15 @@ test("shared bridge selects native runtimes without replacing their sessions", {
   await hosted.exit;
   runtimeA.child.stdin.end();
   await runtimeA.exit;
-  const empty = await bridge.get("/chat");
-  assert.equal(empty.status, 200);
-  assert.equal((await empty.json()).state, "session_closed");
+  await waitForBridge("/chat", ({ state }) => state === "session_closed");
   const closedList = await (await bridge.get("/sessions")).json();
   assert.deepEqual(closedList.projects, [listed.current.cwd]);
   assert.equal(closedList.sessions.find(({ id }) => id === historic.sessionId)?.active, false);
   profile = "b".repeat(64);
-  assert.deepEqual((await (await bridge.get("/sessions")).json()).projects, []);
+  await waitForBridge("/sessions", ({ projects }) => projects.length === 0);
   assert.equal((await bridge.post("/open", { id: historic.sessionId })).status, 409);
   profile = authorizedProfile;
+  await waitForBridge("/sessions", ({ projects }) => projects.includes(listed.current.cwd));
   const admin = join(ipc, `bridge-${port}.sock`);
   assert.equal((await localRequest(admin, "POST", "/revoke-project", { cwd: listed.current.cwd })).status, 200);
   assert.deepEqual((await (await bridge.get("/sessions")).json()).projects, []);

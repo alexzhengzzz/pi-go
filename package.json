@@ -15,6 +15,7 @@
     "host/agents/registry.mjs",
     "host/agents/worker-core.mjs",
     "host/agents/agent-worker.mjs",
+    "host/agents/pi/driver.ts",
     "host/agents/codex/catalog.mjs",
     "host/agents/codex/driver.mjs",
     "host/agents/agy/catalog.mjs",

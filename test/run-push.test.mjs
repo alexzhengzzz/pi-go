@@ -47,4 +47,12 @@ test('Push Kit signs requests and deduplicates a retried event across paired tra
   assert.equal(body.pushOptions.ttl, 120);
   assert.equal(bridgeA.register('bearer-a', { enabled: false })[0], 200);
   assert.equal(bridgeA.subscription('bearer-a'), undefined);
+
+  const failing = new RunPush(join(directory, 'pair-err.json'), {
+    account,
+    fetch: async () => ({ ok: true, status: 200, json: async () => ({ code: '80200001', msg: 'Authentication Error' }) })
+  });
+  assert.equal(failing.register('bearer-e', register)[0], 200);
+  await failing.deliver([{ ...event, id: 'f'.repeat(32), finishedAt: Date.now() }], 'bearer-e', () => true);
+  assert.equal(failing.lastError, '80200001: Authentication Error');
 });

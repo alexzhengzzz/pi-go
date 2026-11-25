@@ -54,7 +54,7 @@ export class WatchReminderController {
     this.now = now;
   }
 
-  attach(context: common.UIAbilityContext, statusCallback: (status: string) => void,
+  attach(context: common.UIAbilityContext, statusCallback: ((status: string) => void) | undefined,
     deliveredCallback: (id: string) => void): void {
     this.context = context;
     this.statusCallback = statusCallback;

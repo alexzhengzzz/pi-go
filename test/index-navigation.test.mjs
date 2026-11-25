@@ -1253,9 +1253,17 @@ test('live activity follows a phone-dispatched run and clears when it becomes id
   state.syncLiveActivity();
   assert.equal(liveViewCalls.at(-1), undefined);
   state.trackDispatchedLiveRun(state.liveRevision);
-  assert.deepEqual(liveViewCalls.at(-1), {
+  assert.deepEqual({
+    sessionId: liveViewCalls.at(-1).sessionId,
+    address: liveViewCalls.at(-1).address,
+    state: liveViewCalls.at(-1).state,
+    foreground: liveViewCalls.at(-1).foreground
+  }, {
     sessionId: 'one', address: 'http://127.0.0.1:18977', state: '运行中', foreground: true
   });
+  assert.ok(liveViewCalls.at(-1).title);
+  assert.ok(liveViewCalls.at(-1).detailLabel);
+  assert.ok(liveViewCalls.at(-1).detailText);
   state.interaction = { id: 'approval' };
   state.syncLiveActivity();
   assert.equal(liveViewCalls.at(-1).state, '等待处理');

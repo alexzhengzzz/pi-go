@@ -484,12 +484,13 @@ export class WorkspaceFileController {
     return load;
   }
 
-  loadHistoryImage(sessionId: string, messageId: string, index: number, toolId: string): Promise<string> {
-    if (!sessionId || sessionId !== this.host.currentId()) return Promise.reject(new Error('session_changed'));
+  loadHistoryImage(sessionId: string, messageId: string, index: number, toolId: string,
+    paneCwd?: string, paneRequest?: (path: string) => Promise<BridgeReply>): Promise<string> {
+    if (!sessionId || (!paneRequest && sessionId !== this.host.currentId())) return Promise.reject(new Error('session_changed'));
     const identity = JSON.stringify([sessionId, messageId, index, toolId]);
-    return this.cacheChatImage(this.host.workspaceCwd(), identity, HISTORY_IMAGE_EXTENSIONS, async (local: string): Promise<string> => {
+    return this.cacheChatImage(paneCwd ?? this.host.workspaceCwd(), identity, HISTORY_IMAGE_EXTENSIONS, async (local: string): Promise<string> => {
       const tool = toolId ? `&tool=${encodeURIComponent(toolId)}` : '';
-      const reply = await this.host.request(`/message-image?id=${encodeURIComponent(sessionId)}&message=${encodeURIComponent(messageId)}&index=${index}${tool}`);
+      const reply = await (paneRequest ?? this.host.request)(`/message-image?id=${encodeURIComponent(sessionId)}&message=${encodeURIComponent(messageId)}&index=${index}${tool}`);
       if (!reply.image?.data) throw new Error('image_not_found');
       const extension = `.${reply.image.mimeType.slice('image/'.length)}`;
       if (!HISTORY_IMAGE_EXTENSIONS.includes(extension)) throw new Error('unsupported_image');

@@ -61,9 +61,6 @@ export class RunCenterState {
   @Trace reviewError: string = '';
   @Trace runNotice?: RunNotice = undefined;
   @Trace runNoticesEnabled: boolean = true;
-  @Trace watchRemindersEnabled: boolean = true;
-  @Trace watchReminderStatus: string = '';
-  @Trace watchReminderTesting: boolean = false;
 }
 
 export class RunCenterController {
@@ -79,6 +76,7 @@ export class RunCenterController {
   private backgroundRunNoticesSince: number = 0;
   private backgroundRunTask: number = -1;
   private readonly backgroundRunSessions: Set<string> = new Set<string>();
+  private readonly seenBackgroundRuns: Set<string> = new Set<string>();
   private readonly notifiedBackgroundRuns: Set<string> = new Set<string>();
   private askedForRunNotifications: boolean = false;
   private pushRegistrations: Map<string, string> = new Map<string, string>();
@@ -86,6 +84,7 @@ export class RunCenterController {
   private readonly observedRuns: Map<string, string> = new Map<string, string>();
   private pendingRunNotices: RunNotice[] = [];
   private runNoticeTimer: number = -1;
+  private watchRemindersEnabled: boolean = true;
   private watchReminderDelivered: string[] = [];
   private readonly watchReminders: WatchReminderController = new WatchReminderController();
 
@@ -96,15 +95,14 @@ export class RunCenterController {
   }
 
   attachWatch(context: common.UIAbilityContext): void {
-    this.watchReminders.attach(context, (status: string): void => {
-      this.state.watchReminderStatus = status;
-    }, (id: string): void => { this.rememberWatchReminder(id); });
+    this.watchReminders.attach(context, undefined, (id: string): void => { this.rememberWatchReminder(id); });
   }
 
   resume(): void {
     this.backgroundRunNoticesSince = 0;
     this.stopBackgroundRunTask();
     this.backgroundRunSessions.clear();
+    this.seenBackgroundRuns.clear();
     this.notifiedBackgroundRuns.clear();
   }
 
@@ -158,7 +156,7 @@ export class RunCenterController {
       }
     } catch { /* Ignore an invalid dismissal list. */ }
     this.state.runNoticesEnabled = settings.getSync(RUN_NOTICE_SETTING, true) !== false;
-    this.state.watchRemindersEnabled = settings.getSync(WATCH_REMINDERS_SETTING, true) !== false;
+    this.watchRemindersEnabled = settings.getSync(WATCH_REMINDERS_SETTING, true) !== false;
     try {
       const delivered = JSON.parse(settings.getSync('watch_reminder_delivered', '[]') as string) as string[];
       if (Array.isArray(delivered)) {
@@ -166,7 +164,7 @@ export class RunCenterController {
       }
     } catch { /* Ignore an invalid watch delivery history. */ }
     this.watchReminders.restore(this.watchReminderDelivered);
-    this.watchReminders.setEnabled(this.state.watchRemindersEnabled);
+    this.watchReminders.setEnabled(this.watchRemindersEnabled);
   }
 
   queueRunSync(delay: number): void {
@@ -184,6 +182,10 @@ export class RunCenterController {
     if (!this.state.runNoticesEnabled) return;
     this.backgroundRunNoticesSince = Date.now();
     this.backgroundRunSessions.clear();
+    this.seenBackgroundRuns.clear();
+    for (const row of this.state.inboxRuns) {
+      if (row.run.id) this.seenBackgroundRuns.add(row.run.id);
+    }
     for (const id of this.observedRuns.keys()) this.backgroundRunSessions.add(id);
     if (this.host.currentId() && (!this.host.idle() || this.host.queued())) this.backgroundRunSessions.add(this.host.currentId());
     if (!this.backgroundRunSessions.size || this.backgroundRunTask !== -1) return;
@@ -251,14 +253,15 @@ export class RunCenterController {
             row.run.title ?? '', row.run.finishedAt);
         }
       }
-      await this.syncPushRegistration(computer, result.pushAvailable === true).catch((): void => {});
+      await this.syncPushRegistration(computer, result.pushAvailable === true, result.pushError).catch((): void => {});
       return true;
     } catch { return false; }
   }
 
   private async publishBackgroundRunNotice(run: RunEvent): Promise<void> {
     if (this.host.visible() || !this.state.runNoticesEnabled || !this.backgroundRunNoticesSince ||
-      !(run.finishedAt >= this.backgroundRunNoticesSince) || !run.id || this.notifiedBackgroundRuns.has(run.id) ||
+      !run.id || this.seenBackgroundRuns.has(run.id) || this.notifiedBackgroundRuns.has(run.id) ||
+      !(run.finishedAt >= this.backgroundRunNoticesSince) ||
       !['completed', 'failed', 'stopped'].includes(run.status)) return;
     const since = this.backgroundRunNoticesSince;
     this.notifiedBackgroundRuns.add(run.id);
@@ -279,16 +282,19 @@ export class RunCenterController {
           normal: { title: title, text: runNotificationText(run.title ?? '') }
         }
       });
-      if (this.backgroundRunNoticesSince === since && this.backgroundRunSessions.delete(run.sessionId) &&
-        !this.backgroundRunSessions.size) this.stopBackgroundRunTask();
-    } catch {
+      if (this.backgroundRunNoticesSince === since &&
+        this.backgroundRunSessions.delete(run.sessionId) && !this.backgroundRunSessions.size) {
+        this.stopBackgroundRunTask();
+      }
+    } catch (error) {
+      console.warn(`[PiGoNotify] publish failed: ${(error as Error)?.message ?? 'unknown'}`);
       if (this.backgroundRunNoticesSince === since) this.notifiedBackgroundRuns.delete(run.id);
     }
   }
 
   queueWatchReminder(id: string, status: string, computer: string, title: string, finishedAt: number): void {
     const now = Date.now();
-    if (!this.state.watchRemindersEnabled || finishedAt <= 0 || finishedAt < now - 5 * 60 * 1000 ||
+    if (!this.watchRemindersEnabled || finishedAt <= 0 || finishedAt < now - 5 * 60 * 1000 ||
       finishedAt > now + 5 * 60 * 1000) return;
     this.watchReminders.notify({
       id: id,
@@ -381,7 +387,7 @@ export class RunCenterController {
     }
   }
 
-  private async syncPushRegistration(computer: Companion, available: boolean): Promise<void> {
+  private async syncPushRegistration(computer: Companion, available: boolean, pushError?: string): Promise<void> {
     const endpoint = this.host.scheduleEndpoint(computer);
     if (!available) {
       this.pushRegistrations.delete(computer.address);
@@ -389,7 +395,12 @@ export class RunCenterController {
       return;
     }
     const registered = this.state.pushEnabled ? computer.token + ':' + this.pushToken : computer.token;
-    if (this.pushRegistrations.get(computer.address) === registered) return;
+    if (this.pushRegistrations.get(computer.address) === registered) {
+      if (this.state.pushEnabled && computer.address === this.host.base()) {
+        this.state.pushStatus = pushError ? `Push Kit 发送失败（${pushError}）` : '当前电脑已注册后台通知';
+      }
+      return;
+    }
     if (this.state.pushEnabled && !this.pushToken) {
       if (!this.pushTokenRequest && Date.now() >= this.nextPushTokenAttempt) {
         this.nextPushTokenAttempt = Date.now() + 60_000;
@@ -409,7 +420,10 @@ export class RunCenterController {
     if (!enabled || response.pushAvailable === true) {
       this.pushRegistrations.set(computer.address, enabled ? computer.token + ':' + this.pushToken : computer.token);
     }
-    if (computer.address === this.host.base() && enabled) this.state.pushStatus = response.pushAvailable ? '当前电脑已注册后台通知' : '这台电脑尚未配置 Push Kit';
+    if (computer.address === this.host.base() && enabled) {
+      this.state.pushStatus = !response.pushAvailable ? '这台电脑尚未配置 Push Kit' :
+        pushError ? `Push Kit 发送失败（${pushError}）` : '当前电脑已注册后台通知';
+    }
   }
 
   async setPushEnabled(enabled: boolean): Promise<void> {
@@ -575,27 +589,5 @@ export class RunCenterController {
         await notificationManager.requestEnableNotification(context);
       }
     } catch { /* System notification permissions can also be enabled in Settings. */ }
-  }
-
-  async setWatchRemindersEnabled(enabled: boolean): Promise<void> {
-    this.state.watchRemindersEnabled = enabled;
-    this.watchReminders.setEnabled(enabled);
-    try {
-      await this.host.saveSetting(WATCH_REMINDERS_SETTING, enabled);
-    } catch {
-      if (this.state.watchRemindersEnabled === enabled) {
-        this.host.getUIContext().getPromptAction().showToast({ message: '未能保存手表提醒设置' });
-      }
-    }
-  }
-
-  async testWatchReminder(): Promise<void> {
-    if (this.state.watchReminderTesting || !this.state.watchRemindersEnabled) return;
-    this.state.watchReminderTesting = true;
-    try {
-      await this.watchReminders.test();
-    } finally {
-      this.state.watchReminderTesting = false;
-    }
   }
 }

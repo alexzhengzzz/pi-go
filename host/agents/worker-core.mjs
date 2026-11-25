@@ -1,8 +1,8 @@
-// Shared HTTP + SSE worker core for non-Pi agents (Codex CLI, ACP/agy, etc.).
+// Shared HTTP + SSE worker core for Pi, Codex CLI and ACP agents.
 //
 // Listens on a `w-<pid>-<hex>.sock` Unix socket and registers itself via
 // `registerSocket()`, speaking the exact private worker socket protocol that
-// `host/bridge/broker.mjs` expects from `phase0.ts`.
+// `host/bridge/broker.mjs` expects from each session.
 //
 // In addition to the standard routes (/session, /session/snapshot, /chat,
 // /history, /tool-detail, /message-image, /message-text, /sessions, /models,
@@ -38,7 +38,7 @@ const allowedRoutes = new Set([
   'POST /rename', 'POST /fork', 'POST /regenerate', 'POST /answer', 'POST /shutdown',
 ]);
 
-async function readJsonBody(request, limit = maxBody) {
+export async function readJsonBody(request, limit = maxBody) {
   if (request.headers['content-type'] !== 'application/json') throw new Error('invalid_content_type');
   if (Number(request.headers['content-length']) > limit) throw new Error('oversized_body');
   const chunks = [];
@@ -67,23 +67,29 @@ async function readRawBody(request, limit) {
   return bytes;
 }
 
+function* newestFirst(entries) {
+  for (let i = entries.length - 1; i >= 0; i -= 1) yield entries[i];
+}
+
 function paginateEntries(entries, liveTools, before, limit) {
   const messages = [];
   let historyCursor;
   let waitingForCursor = Boolean(before);
-  for (let i = entries.length - 1; i >= 0; i -= 1) {
-    const entry = entries[i];
+  const seenCalls = new Set();
+  for (const entry of entries) {
     const atCursor = waitingForCursor && entry.id === before;
     const include = !waitingForCursor || atCursor;
-    if (!include) continue;
     const text = typeof entry.text === 'string' ? entry.text : '';
     const thinking = entry.role === 'assistant' && typeof entry.thinking === 'string' ? entry.thinking : '';
     const images = Array.isArray(entry.images) ? entry.images : [];
     const imageCount = images.length || (typeof entry.imageCount === 'number' ? entry.imageCount : 0);
     const entryTools = Array.isArray(entry.tools) ? entry.tools.map((tool) => {
-      const live = liveTools.get(tool.id);
-      return live ? live.summary : tool.summary;
+      const live = liveTools.get(tool.summary.id);
+      const summary = live && !tool.result && !seenCalls.has(tool.summary.id) ? live.summary : tool.summary;
+      seenCalls.add(tool.summary.id);
+      return summary;
     }) : [];
+    if (!include) continue;
     if (!text && !imageCount && !thinking && !entryTools.length) {
       if (atCursor) return undefined;
       continue;
@@ -148,7 +154,7 @@ export function createWorkerServer(driver, {
       idle: Boolean(base.idle) && !currentRunId,
       runId: currentRunId,
       queued,
-      interactions: 'worker',
+      interactions: driver.interactions ?? 'worker',
       capabilities: driver.capabilities,
       permission: driver.permission,
     };
@@ -195,6 +201,32 @@ export function createWorkerServer(driver, {
     }, 4000);
     pingTimer.unref();
   };
+
+  function resetSession({ notify = true } = {}) {
+    for (const stream of sequencedStreams) stream.destroy();
+    streamId = randomBytes(16).toString('hex');
+    syncSeq = 0;
+    baseline = undefined;
+    baselineLeaf = null;
+    runId = driver.isStreaming?.() ? randomBytes(16).toString('hex') : undefined;
+    lastStopReason = undefined;
+    promptError = undefined;
+    activePrompt = undefined;
+    liveText = '';
+    liveSeq = 0;
+    liveThinking = '';
+    liveThinkSeq = 0;
+    toolLog.clear();
+    requests.clear();
+    followUpQueue.length = 0;
+    if (notify) emit('session/changed', { session: status() });
+  }
+
+  driver.on('prompt_unconfirmed', (requestId) => {
+    promptError = 'unconfirmed';
+    activePrompt = undefined;
+    emit('prompt/unconfirmed', { requestId });
+  });
 
   driver.on('turn_start', (info = {}) => {
     runId = info.runId || randomBytes(16).toString('hex');
@@ -276,9 +308,13 @@ export function createWorkerServer(driver, {
     const current = status();
     if (settledRunId && (worker.listening || scheduled) && current) {
       try {
-        const entries = await driver.entries();
+        const binding = streamId;
+        const source = driver.historyEntries?.() ?? driver.entries();
+        const entries = driver.historyEntries ? source : newestFirst(await source);
+        if (binding !== streamId || settledRunId !== runId) return;
         const recent = paginateEntries(entries, toolLog, null, 60);
-        const messages = recent?.messages ?? [];
+        const ids = driver.runMessageIds?.(baselineLeaf);
+        const messages = (recent?.messages ?? []).filter((message) => !ids || ids.has(message.id));
         const anchor = [...messages].reverse().find((message) =>
           message.role === 'assistant' && (message.text || message.imageCount)) ?? messages.at(-1);
         const screenshots = Array.from(toolLog.values()).flatMap(({ summary, result }) => {
@@ -337,7 +373,7 @@ export function createWorkerServer(driver, {
     liveThinkSeq = 0;
     toolLog.clear();
     activePrompt = undefined;
-    emit('session/status', { idle: true, aborted, queued: followUpQueue.length > 0 }, settledRunId);
+    emit('session/status', { idle: true, aborted, queued: status()?.queued ?? false }, settledRunId);
     if (!aborted && followUpQueue.length > 0 && !closing) {
       const next = followUpQueue.shift();
       emit('queue/status', { runId: status()?.runId, queued: followUpQueue.length > 0 });
@@ -356,15 +392,20 @@ export function createWorkerServer(driver, {
     emit('interaction/requested', { interaction });
   });
 
-  const handle = async (request, response) => {
+  const handle = async (request, response, { local = false } = {}) => {
     const fail = (code, error) => reply(response, code, { error });
     try {
       if (request.headers.origin !== undefined) return fail(403, 'invalid_source');
       const path = (request.url ?? '').split('?')[0];
       const route = `${request.method} ${path}`;
-      if (!allowedRoutes.has(route)) return fail(404, 'not_found');
+      const open = local && route === 'POST /open' && driver.open;
+      if (!open && !allowedRoutes.has(route)) return fail(404, 'not_found');
+      if ((status()?.interactions === 'host' || local) &&
+          ['GET /pending', 'POST /answer', 'POST /shutdown'].includes(route)) return fail(404, 'not_found');
+      if (local && route === 'POST /fork') return fail(404, 'not_found');
+      const binding = streamId;
 
-      const targetParams = request.url?.includes('_pigoSession=')
+      const targetParams = !local && request.url?.includes('_pigoSession=')
         ? new URL(request.url, 'http://pi-go').searchParams : undefined;
       const targetId = targetParams?.get('_pigoSession');
       const targetCwd = targetParams?.get('_pigoCwd');
@@ -410,7 +451,7 @@ export function createWorkerServer(driver, {
       if (!currentStatus) return fail(409, 'session_unavailable');
 
       if (route === 'GET /session') {
-        return reply(response, 200, { session: currentStatus, historyDirectory: driver.historyDirectory });
+        return reply(response, 200, { session: currentStatus, historyDirectory: local ? undefined : driver.historyDirectory });
       }
 
       if (route === 'GET /pending') {
@@ -425,6 +466,14 @@ export function createWorkerServer(driver, {
         }
         registration.publish();
         return reply(response, 200, { answered: true });
+      }
+
+      if (open) {
+        const input = await readJsonBody(request);
+        if (binding !== streamId) return fail(409, 'session_changed');
+        const result = await driver.open(input.id);
+        if (result?.error) return fail(result.status ?? 409, result.error);
+        return reply(response, 200, { session: status() });
       }
 
       const snapshot = route === 'GET /session/snapshot';
@@ -454,7 +503,9 @@ export function createWorkerServer(driver, {
         const parameters = new URL(request.url ?? '/', 'http://pi-go').searchParams;
         if (parameters.get('id') !== status()?.id) return fail(409, 'session_changed');
         const messageId = parameters.get('message');
-        const entries = await driver.entries();
+        const source = driver.entries();
+        const entries = Array.isArray(source) ? source : await source;
+        if (binding !== streamId || !status()) return fail(409, 'session_changed');
         const entry = entries.find((row) => row.id === messageId);
         if (!entry || entry.role !== 'assistant') return fail(404, 'message_not_found');
         const rawOffset = parameters.get('offset') ?? '0';
@@ -472,8 +523,10 @@ export function createWorkerServer(driver, {
         if (!snapshotHistory && route !== 'GET /chat' && parameters.get('id') !== status()?.id) {
           return fail(409, 'session_changed');
         }
-        const entries = await driver.entries();
         if (snapshotHistory || route === 'GET /chat' || route === 'GET /history') {
+          const source = driver.historyEntries?.() ?? driver.entries();
+          const entries = driver.historyEntries ? source : newestFirst(Array.isArray(source) ? source : await source);
+          if (binding !== streamId || !status()) return fail(409, 'session_changed');
           const limit = route === 'GET /history' ? Math.min(60, Math.max(1, Math.floor(Number(parameters.get('limit')) || 60))) : 60;
           const history = paginateEntries(entries, toolLog, parameters.get('before'), limit);
           if (!history) return fail(409, 'history_changed');
@@ -492,6 +545,9 @@ export function createWorkerServer(driver, {
             promptError,
           });
         }
+        const source = driver.entries();
+        const entries = Array.isArray(source) ? source : await source;
+        if (binding !== streamId || !status()) return fail(409, 'session_changed');
         const imageIndex = parameters.get('index');
         const toolId = parameters.get('tool');
         if (route === 'GET /message-image') {
@@ -548,8 +604,8 @@ export function createWorkerServer(driver, {
 
       if (route === 'POST /model') {
         const input = await readJsonBody(request);
-        if (input.id !== status()?.id) return fail(409, 'session_changed');
-        if (!status()?.idle || status()?.queued) return fail(409, 'session_busy');
+        if (binding !== streamId || input.id !== status()?.id) return fail(409, 'session_changed');
+        if (!driver.validateModelBeforeBusy && (!status()?.idle || status()?.queued)) return fail(409, 'session_busy');
         const applied = await driver.setModel({
           provider: input.provider,
           modelId: input.modelId,
@@ -562,7 +618,7 @@ export function createWorkerServer(driver, {
 
       if (route === 'POST /fork' || route === 'POST /regenerate') {
         const input = await readJsonBody(request);
-        if (input.id !== status()?.id) return fail(409, 'session_changed');
+        if (binding !== streamId || input.id !== status()?.id) return fail(409, 'session_changed');
         if (!status()?.idle || status()?.queued) return fail(409, 'session_busy');
         if (route === 'POST /regenerate') {
           if (!driver.regenerate) return fail(409, 'regenerate_failed');
@@ -573,12 +629,12 @@ export function createWorkerServer(driver, {
         if (!driver.fork) return fail(409, 'session_not_persisted');
         const res = await driver.fork(input.messageId);
         if (res?.error) return fail(res.status ?? 409, res.error);
-        return reply(response, 200, { id: res.id, agent: driver.agent });
+        return reply(response, 200, { id: res.id, agent: driver.agent === 'pi' ? undefined : driver.agent });
       }
 
       if (route === 'POST /rename') {
         const input = await readJsonBody(request);
-        if (input.id !== status()?.id) return fail(409, 'session_changed');
+        if (binding !== streamId || input.id !== status()?.id) return fail(409, 'session_changed');
         if (typeof input.name !== 'string' || !input.name.trim() || input.name.length > 200 ||
           input.name.trim() !== input.name || /[\r\n\0]/.test(input.name)) return fail(400, 'invalid_name');
         const ok = await driver.rename(input.name);
@@ -607,7 +663,7 @@ export function createWorkerServer(driver, {
 
       if (route === 'POST /prompt' || route === 'POST /abort' || route === 'POST /receipt') {
         const input = await readJsonBody(request, route === 'POST /prompt' ? maxPromptBody : maxBody);
-        if (input.id !== status()?.id) return fail(409, 'session_changed');
+        if (binding !== streamId || input.id !== status()?.id) return fail(409, 'session_changed');
         if (route === 'POST /abort') {
           followUpQueue.length = 0;
           await driver.abort();
@@ -632,6 +688,7 @@ export function createWorkerServer(driver, {
         const commandText = input.text.trimStart().startsWith('/') ? input.text.trimStart() : undefined;
         const commandName = commandText !== undefined ? (commandText.slice(1).split(/\s/, 1)[0] ?? '') : undefined;
         const commands = commandName ? ((await driver.listCommands?.()) ?? []) : [];
+        if (binding !== streamId || input.id !== status()?.id) return fail(409, 'session_changed');
         const command = commandName !== undefined && commandName !== '' && /^[\w:.-]{1,80}$/.test(commandName)
           ? commands.find((row) => row.name === commandName) : undefined;
         if (commandName !== undefined && commandName !== '' && !command) return fail(400, 'unknown_command');
@@ -656,8 +713,8 @@ export function createWorkerServer(driver, {
         }
         if (hasImage) {
           const bytes = Buffer.from(input.image, 'base64');
-          const staged = stageAttachment(current.cwd, 'prompt.jpg', bytes);
-          stagedImages.unshift({ name: staged.name, path: staged.path, bytes });
+          const staged = driver.stageInlineImage === false ? { name: 'prompt.jpg' } : stageAttachment(current.cwd, 'prompt.jpg', bytes);
+          stagedImages.unshift({ ...staged, bytes });
         }
         for (const staged of stagedImages) {
           const bytes = staged.bytes ?? readFileSync(staged.path);
@@ -681,7 +738,40 @@ export function createWorkerServer(driver, {
           files: stagedFiles,
           mode,
           runId,
+          requestId: input.requestId,
         };
+
+        if (driver.dispatchAfterReply?.(command)) {
+          let sent = false;
+          const dispatch = () => {
+            if (sent || binding !== streamId || closing) return;
+            sent = true;
+            driver.prompt(payload);
+          };
+          response.once('finish', dispatch);
+          setTimeout(dispatch, 250).unref();
+          return reply(response, 202, { dispatched: true, requestId: input.requestId, handled: true });
+        }
+        if (driver.nativeQueue) {
+          try {
+            driver.prompt(payload);
+          } catch {
+            requests.delete(input.requestId);
+            activePrompt = undefined;
+            return fail(409, 'session_busy');
+          }
+          if (mode !== 'send') {
+            const queuedRun = runId;
+            emit('queue/status', { runId: queuedRun, queued: true });
+            setTimeout(() => {
+              const current = status();
+              if (current && binding === streamId && queuedRun === runId) {
+                emit('queue/status', { runId: current.runId, queued: current.queued });
+              }
+            }, 250).unref();
+          }
+          return reply(response, 202, { dispatched: true, requestId: input.requestId });
+        }
 
         if (mode === 'followUp') {
           followUpQueue.push(payload);
@@ -728,7 +818,7 @@ export function createWorkerServer(driver, {
   };
 
   const options = { requestTimeout: 10000, headersTimeout: 5000, connectionsCheckingInterval: 1000 };
-  const worker = createServer(options, handle);
+  const worker = createServer(options, (request, response) => handle(request, response));
   const registration = registerSocket(worker, () => ({
     session: status(),
     historyDirectory: driver.historyDirectory,
@@ -736,27 +826,35 @@ export function createWorkerServer(driver, {
   worker.maxConnections = 12;
   worker.setTimeout(10000, (socket) => socket.destroy());
   let socketPath;
+  let listening;
 
   async function listen() {
+    if (listening) return listening;
+    if (worker.listening) return socketPath;
     socketPath = workerSocket();
-    await new Promise((resolvePromise, reject) => {
+    listening = new Promise((resolvePromise, reject) => {
       worker.once('error', reject);
-      worker.listen(socketPath, () => { worker.off('error', reject); resolvePromise(); });
+      worker.listen(socketPath, () => { worker.off('error', reject); resolvePromise(socketPath); });
     });
-    return socketPath;
+    try { return await listening; }
+    finally { listening = undefined; }
+  }
+
+  function unlisten() {
+    registration.withdraw();
+    worker.close();
+    worker.closeAllConnections();
   }
 
   async function stopServer() {
     if (closing) return;
     closing = true;
     stopPing();
-    registration.withdraw();
     for (const stream of streams) stream.destroy();
-    worker.close();
-    worker.closeAllConnections();
+    unlisten();
     await driver.stop?.();
     await onShutdown?.();
   }
 
-  return { worker, listen, stop: stopServer, status, get socketPath() { return socketPath; } };
+  return { worker, listen, unlisten, stop: stopServer, status, handle, resetSession, publish: registration.publish, get socketPath() { return socketPath; } };
 }

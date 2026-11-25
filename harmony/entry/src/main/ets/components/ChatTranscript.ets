@@ -41,6 +41,7 @@ export struct ChatTranscript {
   @Event copyText: (value: string) => Promise<void> = unboundAction;
   @Param @Require replyActionsEnabled: boolean;
   @Param speakingReply: string = '';
+  @Param replySpeechEnabled: boolean = true;
   @Event toggleReplySpeech: (message: ChatMessage) => void = unboundAction;
   @Event forkReply: (messageId: string) => void = unboundAction;
   @Event regenerateReply: (messageId: string) => void = unboundAction;
@@ -579,7 +580,7 @@ export struct ChatTranscript {
           backgroundColor: $r('app.color.pigo_control'),
           borderRadius: 10
         })
-      if (message.text) {
+      if (message.text && this.replySpeechEnabled) {
         Blank()
         Button({ type: ButtonType.Normal }) {
           if (this.speakingReply === message.id) {

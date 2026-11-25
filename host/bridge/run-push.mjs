@@ -69,6 +69,7 @@ export class RunPush {
     this.path = pairingPath + '.push';
     this.marks = join(stateDirectory(), 'push-delivery');
     this.lastPrune = 0;
+    this.lastError = '';
   }
 
   subscription(bearer) {
@@ -79,6 +80,7 @@ export class RunPush {
   register(bearer, input) {
     if (!input || typeof input.enabled !== 'boolean') return [400, { error: 'invalid_push_registration' }];
     if (!input.enabled) {
+      this.lastError = '';
       if (this.subscription(bearer)) this.clear();
       return [200, { pushAvailable: Boolean(this.account) }];
     }
@@ -87,6 +89,7 @@ export class RunPush {
     if (!this.account) return [200, { pushAvailable: false }];
     const old = this.subscription(bearer);
     if (old?.token !== input.token || old.device !== input.device) {
+      this.lastError = '';
       writePrivate(this.path, { token: input.token, device: input.device, bearer, since: this.now() });
     }
     return [200, { pushAvailable: true }];
@@ -133,9 +136,20 @@ export class RunPush {
         headers: { Authorization: authorization(this.account), 'Content-Type': 'application/json', 'push-type': '0' },
         body: JSON.stringify(pushMessage(event, subscription, this.account.test))
       });
-      const outcome = await response.json();
-      if (response.ok && outcome.code === '80000000') writePrivate(path, { delivered: true });
-    } catch { /* Recent events remain eligible on the next poll. */ }
+      const outcome = await response.json().catch(() => ({}));
+      if (response.ok && outcome?.code === '80000000') {
+        this.lastError = '';
+        writePrivate(path, { delivered: true });
+      } else {
+        const code = typeof outcome?.code === 'string' && outcome.code ? outcome.code : `http_${response.status}`;
+        const detail = typeof outcome?.msg === 'string' && outcome.msg ? `: ${outcome.msg}` : '';
+        this.lastError = `${code}${detail}`.slice(0, 120);
+        console.warn(`[PiGoPush] send failed: status=${response.status} code=${code}${detail}`);
+      }
+    } catch (error) {
+      this.lastError = error?.name === 'TimeoutError' ? 'timeout' : 'network_error';
+      console.warn(`[PiGoPush] send error: ${error?.message ?? 'unknown'}`);
+    }
     finally { try { unlinkSync(lock); } catch {} }
   }
 

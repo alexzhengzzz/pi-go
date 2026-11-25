@@ -229,6 +229,7 @@ export interface WorkspaceRow {
 export interface BridgeReply {
   runEvents?: RunEvent[];
   pushAvailable?: boolean;
+  pushError?: string;
   source?: string;
   watching?: boolean;
   jobs?: ScheduleJob[];

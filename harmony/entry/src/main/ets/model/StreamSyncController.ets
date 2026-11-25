@@ -5,12 +5,14 @@ import type { ChatState } from './ChatState';
 import type { ConnectionManager } from './ConnectionManager';
 import type { PiGoClient } from './PiGoClient';
 import { BridgeFailure } from './PiGoTypes';
-import type { BridgeReply, ChatMessage, DraftAttachment, LiveTool, ModelOption, Payload, PendingInteraction, PendingSend,
+import type { BridgeEndpoint, BridgeReply, ChatMessage, DraftAttachment, LiveTool, ModelOption, Payload, PendingInteraction, PendingSend,
   QueuedSteering, SessionState, StreamFrame } from './PiGoTypes';
 
 export interface StreamSyncHost {
   session: SessionViewState;
   connection: () => ConnectionManager;
+  streamEndpoint?: () => BridgeEndpoint;
+  streamPath?: (path: string) => string;
   chatState: () => ChatState;
   client: () => PiGoClient;
   isPaired: () => boolean;
@@ -87,6 +89,7 @@ export class SessionViewState {
   @Trace transcriptFollow: boolean = true;
   liveViewSessionKey: string = '';
   liveViewRunId: string = '';
+  liveViewPendingUntil: number = 0;
   epoch: number = 0;
   @Trace currentModel?: ModelOption = undefined;
   @Trace currentLevel: string = 'off';
@@ -105,6 +108,7 @@ export class StreamSyncController {
   private streamGen: number = 0;
   private streamAlive: boolean = false;
   private polling: boolean = false;
+  private lastLiveDetailSync: number = 0;
 
   private readonly host: StreamSyncHost;
   private readonly session: SessionViewState;
@@ -226,9 +230,13 @@ export class StreamSyncController {
     if (req) req.destroy();
   }
 
+  private streamEndpoint(): BridgeEndpoint {
+    return this.host.streamEndpoint?.() ?? this.host.connection().endpoint();
+  }
+
   private scheduleStream(delay: number): void {
     this.host.connection().cancelRetry();
-    if (!this.host.isPaired() || (!this.host.visible() && !this.backgroundLiveActivity()) || !this.host.base() || !this.host.connection().endpoint().token) return;
+    if (!this.host.isPaired() || (!this.host.visible() && !this.backgroundLiveActivity()) || !this.host.base() || !this.streamEndpoint().token) return;
     this.host.connection().scheduleRetry(delay, (): void => { this.startStream(); });
   }
 
@@ -248,11 +256,11 @@ export class StreamSyncController {
   }
 
   startStream(): void {
-    if (!this.host.isPaired() || (!this.host.visible() && !this.backgroundLiveActivity()) || !this.host.base() || !this.host.connection().endpoint().token || this.streamReq ||
+    if (!this.host.isPaired() || (!this.host.visible() && !this.backgroundLiveActivity()) || !this.host.base() || !this.streamEndpoint().token || this.streamReq ||
         this.session.syncMode === 'probe' || (this.session.syncMode === 'sequenced' && this.session.openingSession)) return;
     const gen = ++this.streamGen;
     const path = this.session.syncMode === 'sequenced' ? '/events?sync=2' : '/events';
-    this.streamReq = this.host.client().openEvents(this.host.connection().endpoint(), path, {
+    this.streamReq = this.host.client().openEvents(this.streamEndpoint(), this.host.streamPath?.(path) ?? path, {
       current: (): boolean => gen === this.streamGen,
       ready: (): void => { this.streamAlive = true; },
       frame: (payload: string): void => { this.handleFrame(payload); },
@@ -286,17 +294,24 @@ export class StreamSyncController {
     }
     if (frame.type === 'message/delta') {
       if (typeof frame.text === 'string' && frame.text && (frame.cursor !== undefined || frame.seq === undefined || frame.seq > this.session.liveSeq)) {
+        const hadText = !!this.session.liveText;
         this.host.chatState().appendDelta(frame.text, false);
         if (frame.seq !== undefined) this.session.liveSeq = frame.seq;
         this.queueStreamPaint();
+        if (!hadText || Date.now() - this.lastLiveDetailSync >= 3500) {
+          this.lastLiveDetailSync = Date.now();
+          this.syncLiveActivity();
+        }
       }
       return;
     }
     if (frame.type === 'message/thinking') {
       if (typeof frame.text === 'string' && frame.text && (frame.cursor !== undefined || frame.seq === undefined || frame.seq > this.session.liveThinkSeq)) {
+        const hadThinking = !!this.session.liveThinking;
         this.host.chatState().appendDelta(frame.text, true);
         if (frame.seq !== undefined) this.session.liveThinkSeq = frame.seq;
         this.queueStreamPaint();
+        if (!hadThinking) this.syncLiveActivity();
       }
       return;
     }
@@ -316,6 +331,7 @@ export class StreamSyncController {
           this.schedule(150);
         }
         this.session.pendingBottom = true;
+        this.syncLiveActivity();
       }
       return;
     }
@@ -330,6 +346,7 @@ export class StreamSyncController {
     if (frame.type === 'session/status') {
       this.session.liveRevision += 1;
       if (frame.idle === true) {
+        this.session.liveViewPendingUntil = 0;
         this.session.idle = true;
         this.session.queued = frame.queued ?? false;
         this.host.observeRun(this.session.currentId, this.host.chatTitle(), this.session.queued, frame.aborted === true);
@@ -343,6 +360,7 @@ export class StreamSyncController {
         }
         this.schedule(150);
       } else if (frame.idle === false) {
+        this.session.liveViewPendingUntil = 0;
         this.host.observeRun(this.session.currentId, this.host.chatTitle(), true);
         this.flushStreamDeltas(false);
         this.session.idle = false;
@@ -651,27 +669,87 @@ export class StreamSyncController {
     } finally { this.session.busy = false; }
   }
 
+  private hasLiveViewGrace(): boolean {
+    return this.session.liveViewPendingUntil > Date.now();
+  }
+
   backgroundLiveActivity(): boolean {
     return this.host.liveViewsEnabled() && this.host.isPaired() && !!this.session.currentId &&
-      this.session.liveViewSessionKey === this.draftKey(this.session.currentId) && (!this.session.idle || this.session.queued);
+      this.session.liveViewSessionKey === this.draftKey(this.session.currentId) &&
+      (!this.session.idle || this.session.queued || this.hasLiveViewGrace());
+  }
+
+  private liveActivityDetails(state: string): LiveActivitySnapshot {
+    const title = this.session.sessionName || this.host.chatTitle() || this.session.project || 'Agent 任务';
+    const agent = this.session.currentAgent === 'codex' ? 'Codex' :
+      this.session.currentAgent === 'agy' ? 'Antigravity' : 'Pi';
+    const tools = this.session.liveTools;
+    const runningTool = tools.find((item: LiveTool): boolean => item.state === 'run' || item.state === 'unknown');
+    const lastTool = tools.length ? tools[tools.length - 1] : undefined;
+    const doneTools = tools.filter((item: LiveTool): boolean => item.state === 'ok' || item.state === 'fail').length;
+    const prefix = this.session.project ? `${this.session.project} · ${agent}` : agent;
+    let summary = `${prefix} · 正在执行任务`;
+    let detailLabel = '当前进展';
+    let detailText = state;
+    if (state === '重新连接中') {
+      summary = `${prefix} · 连接暂时中断`;
+      detailLabel = '连接状态';
+      detailText = '正在重新连接电脑…';
+    } else if (this.session.interaction) {
+      summary = `${prefix} · 需要你确认后继续`;
+      detailLabel = '等待你的处理';
+      detailText = this.session.interaction.title || this.session.interaction.message || '点按返回会话处理';
+    } else if (state === '排队中') {
+      summary = `${prefix} · 已发送到电脑`;
+      detailLabel = '任务队列';
+      detailText = '排队中，等待 Agent 开始执行';
+    } else if (runningTool) {
+      summary = doneTools > 0 ? `${prefix} · 已完成 ${doneTools} 步工具调用` : `${prefix} · 正在调用工具`;
+      detailLabel = `正在执行 · ${runningTool.name}`;
+      detailText = runningTool.detail ? `${runningTool.name} · ${runningTool.detail}` : `正在运行 ${runningTool.name}`;
+    } else if (this.session.liveText.trim()) {
+      const lines = this.session.liveText.trim().split('\n').map((line: string): string => line.trim()).filter((line: string): boolean => !!line);
+      const snippet = lines.length ? lines[lines.length - 1] : this.session.liveText.trim();
+      summary = doneTools > 0 ? `${prefix} · 已完成 ${doneTools} 步，正在输出` : `${prefix} · 正在生成回复`;
+      detailLabel = '正在回复';
+      detailText = snippet;
+    } else if (this.session.liveThinking.trim()) {
+      summary = doneTools > 0 ? `${prefix} · 已完成 ${doneTools} 步，继续推理` : `${prefix} · 模型思考中`;
+      detailLabel = '正在思考';
+      detailText = '正在分析问题并规划下一步…';
+    } else if (lastTool) {
+      summary = `${prefix} · 已完成 ${doneTools} 步工具调用`;
+      detailLabel = '最近步骤';
+      detailText = lastTool.detail ? `${lastTool.name} · ${lastTool.detail}` : lastTool.name;
+    }
+    return {
+      sessionId: this.session.currentId,
+      address: this.host.base(),
+      state: state,
+      foreground: this.host.visible(),
+      title: title,
+      summary: summary,
+      detailLabel: detailLabel,
+      detailText: detailText
+    };
   }
 
   syncLiveActivity(): void {
+    if (!this.session.idle && this.session.runId) this.session.liveViewPendingUntil = 0;
+    const grace = this.hasLiveViewGrace();
     if (this.session.liveViewSessionKey && (!this.host.isPaired() || this.session.liveViewSessionKey !== this.draftKey(this.session.currentId) ||
-      (this.session.idle && !this.session.queued) || (this.session.liveViewRunId && this.session.runId && this.session.liveViewRunId !== this.session.runId))) {
+      (this.session.idle && !this.session.queued && !grace) ||
+      (this.session.liveViewRunId && this.session.runId && this.session.liveViewRunId !== this.session.runId))) {
       this.session.liveViewSessionKey = '';
       this.session.liveViewRunId = '';
+      this.session.liveViewPendingUntil = 0;
     }
     const active = this.backgroundLiveActivity();
     if (active) {
       if (this.session.runId) this.session.liveViewRunId = this.session.runId;
-      const state = !this.session.reachable ? '重新连接中' : this.session.interaction ? '等待处理' : this.session.queued ? '排队中' : '运行中';
-      this.host.publishLiveActivity({
-        sessionId: this.session.currentId,
-        address: this.host.base(),
-        state: state,
-        foreground: this.host.visible()
-      });
+      const state = !this.session.reachable ? '重新连接中' : this.session.interaction ? '等待处理' :
+        (this.session.queued || (this.session.idle && grace)) ? '排队中' : '运行中';
+      this.host.publishLiveActivity(this.liveActivityDetails(state));
     } else this.host.publishLiveActivity(undefined);
     if (!this.host.visible() && !active) {
       this.cancelSchedule();
@@ -724,12 +802,33 @@ export class StreamSyncController {
     }
   }
 
+  beginOptimisticLiveRun(): void {
+    if (!this.host.visible() || !this.host.liveViewsEnabled() || !this.host.isPaired() || !this.session.currentId) return;
+    this.session.liveViewSessionKey = this.draftKey(this.session.currentId);
+    this.session.liveViewRunId = '';
+    this.session.liveViewPendingUntil = Date.now() + 8000;
+    this.syncLiveActivity();
+  }
+
+  cancelOptimisticLiveRun(): void {
+    if (!this.session.liveViewPendingUntil) return;
+    this.session.liveViewPendingUntil = 0;
+    if (this.session.idle && !this.session.queued) {
+      this.session.liveViewSessionKey = '';
+      this.session.liveViewRunId = '';
+    }
+    this.syncLiveActivity();
+  }
+
   trackDispatchedLiveRun(revision: number): void {
     if (this.session.liveRevision === revision && this.session.idle) this.session.idle = false;
     this.host.requestPermissionAfterDispatch();
-    if (!this.host.visible() || !this.host.liveViewsEnabled() || (this.session.idle && !this.session.queued)) return;
-    this.session.liveViewSessionKey = this.draftKey(this.session.currentId);
+    if (!this.host.liveViewsEnabled() || (this.session.idle && !this.session.queued)) return;
+    const key = this.draftKey(this.session.currentId);
+    if (!this.host.visible() && this.session.liveViewSessionKey !== key) return;
+    this.session.liveViewSessionKey = key;
     this.session.liveViewRunId = this.session.runId;
+    if (!this.session.runId) this.session.liveViewPendingUntil = Date.now() + 8000;
     this.syncLiveActivity();
   }
 }

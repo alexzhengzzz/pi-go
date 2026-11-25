@@ -13,14 +13,20 @@ interface LiveDelta {
 }
 
 export class ChatState {
-  readonly drafts: Map<string, string> = new Map<string, string>();
-  readonly unconfirmed: Map<string, PendingSend> = new Map<string, PendingSend>();
-  readonly draftAttachments: Map<string, DraftAttachment[]> = new Map<string, DraftAttachment[]>();
+  readonly drafts: Map<string, string>;
+  readonly unconfirmed: Map<string, PendingSend>;
+  readonly draftAttachments: Map<string, DraftAttachment[]>;
   readonly chatCache: Map<string, BridgeReply> = new Map<string, BridgeReply>();
   readonly sync: SessionSync<StreamFrame> = new SessionSync<StreamFrame>();
   private pendingLiveText: string = '';
   private pendingLiveThinking: string = '';
   private deltaPaintTimer: number = -1;
+
+  constructor(sharedDrafts?: ChatState) {
+    this.drafts = sharedDrafts?.drafts ?? new Map<string, string>();
+    this.unconfirmed = sharedDrafts?.unconfirmed ?? new Map<string, PendingSend>();
+    this.draftAttachments = sharedDrafts?.draftAttachments ?? new Map<string, DraftAttachment[]>();
+  }
 
   mergeTranscript(messages: ChatMessage[], historyCursor: string | undefined, incoming: ChatMessage[], cursor?: string): Transcript {
     const overlap = incoming.length ? messages.findIndex((message: ChatMessage): boolean => message.id === incoming[0].id) : -1;

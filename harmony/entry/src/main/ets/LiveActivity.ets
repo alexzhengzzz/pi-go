@@ -7,11 +7,22 @@ export interface LiveActivitySnapshot {
   address: string;
   state: string;
   foreground: boolean;
+  title?: string;
+  summary?: string;
+  detailLabel?: string;
+  detailText?: string;
 }
 
 const LIVE_VIEW_ID: number = 18977;
 const WANT_REQUEST_CODE: number = 18978;
 const RETRY_INTERVAL_MS: number = 30000;
+
+function clipLiveText(value: string | undefined, maxChars: number, fallback: string): string {
+  const cleaned = (value ?? '').replace(/\s+/g, ' ').trim();
+  if (!cleaned) return fallback;
+  const chars = Array.from(cleaned);
+  return chars.length > maxChars ? `${chars.slice(0, maxChars - 1).join('')}…` : cleaned;
+}
 
 /**
  * Owns the single local live view used by the selected Agent run.
@@ -26,6 +37,7 @@ export class LiveActivityController {
   private dismissedKey: string = '';
   private activeSnapshot?: LiveActivitySnapshot = undefined;
   private lastSignature: string = '';
+  private startedAt: number = 0;
   private sequence: number = 0;
   private retryAfter: number = 0;
   private clickKey: string = '';
@@ -75,7 +87,7 @@ export class LiveActivityController {
     if (!this.context || Date.now() < this.retryAfter) return;
     const key = `${snapshot.address}|${snapshot.sessionId}`;
     if (this.dismissedKey === key) return;
-    const signature = snapshot.state;
+    const signature = `${snapshot.state}|${snapshot.title ?? ''}|${snapshot.summary ?? ''}|${snapshot.detailLabel ?? ''}|${snapshot.detailText ?? ''}`;
     if (this.started && this.activeKey === key && this.lastSignature === signature) return;
     if (this.started && this.activeKey !== key) await this.stopCurrent();
     if (this.started && this.activeKey !== key) return;
@@ -89,10 +101,12 @@ export class LiveActivityController {
     revision: number): Promise<void> {
     try {
       if (!await liveViewManager.isLiveViewEnabled()) {
+        console.warn('[PiGoLiveView] disabled in system settings');
         this.reportError(1003500004);
         this.deferRetry();
         return;
       }
+      this.startedAt = Date.now();
       const view = await this.buildView(snapshot, 1, false);
       if (revision !== this.revision) return;
       const result = await liveViewManager.startLiveView(view);
@@ -102,6 +116,7 @@ export class LiveActivityController {
         this.deferRetry();
         return;
       }
+      console.info(`[PiGoLiveView] started state=${snapshot.state}`);
       if (this.statusCallback) this.statusCallback('');
       this.started = true;
       this.activeKey = key;
@@ -116,7 +131,7 @@ export class LiveActivityController {
         await this.adoptCurrent(snapshot, key, signature);
         return;
       }
-      console.warn(`[PiGoLiveView] start failed, code=${code ?? 'unknown'}`);
+      console.warn(`[PiGoLiveView] start failed, code=${code ?? 'unknown'} msg=${(error as BusinessError).message ?? ''}`);
       this.reportError(code);
       this.deferRetry();
     }
@@ -157,7 +172,7 @@ export class LiveActivityController {
       this.retryAfter = 0;
     } catch (error) {
       const code = (error as BusinessError).code;
-      console.warn(`[PiGoLiveView] update failed, code=${code ?? 'unknown'}`);
+      console.warn(`[PiGoLiveView] update failed, code=${code ?? 'unknown'} msg=${(error as BusinessError).message ?? ''}`);
       if (code === 1003500009 || code === 1003500010) {
         this.dismissedKey = this.activeKey;
         this.clearCurrent();
@@ -192,6 +207,7 @@ export class LiveActivityController {
     this.activeKey = '';
     this.activeSnapshot = undefined;
     this.lastSignature = '';
+    this.startedAt = 0;
   }
 
   private deferRetry(): void {
@@ -201,10 +217,24 @@ export class LiveActivityController {
   private async buildView(snapshot: LiveActivitySnapshot, sequence: number,
     stopping: boolean): Promise<liveViewManager.LiveView> {
     const state = stopping ? '已结束' : snapshot.state;
+    const waiting = !stopping && state === '等待处理';
+    const accent = waiting ? '#FFD97706' : '#FF356B5F';
     const clickAction = await this.getClickAction(snapshot);
+    const title = clipLiveText(snapshot.title, 48, 'Agent 任务');
+    const summary = clipLiveText(snapshot.summary, 80, waiting ? '点按返回会话处理' : '点按查看任务进展');
+    const detailLabel = stopping ? '任务状态' : clipLiveText(snapshot.detailLabel, 24, waiting ? '等待你的处理' : '当前进展');
+    const detailText = stopping ? '本轮任务已结束' :
+      clipLiveText(snapshot.detailText, 64, waiting ? '点按返回会话确认或回复' : state);
+    const pickupLayout: liveViewManager.PickupLayout = {
+      layoutType: liveViewManager.LayoutType.LAYOUT_TYPE_PICKUP,
+      title: detailLabel,
+      content: detailText,
+      underlineColor: accent,
+      descPic: 'pigo.png'
+    };
     const primary: liveViewManager.PrimaryData = {
-      title: 'Agent 任务',
-      content: [{ text: state === '等待处理' ? '点按返回会话处理' : '点按查看任务' }],
+      title: title,
+      content: [{ text: summary }],
       keepTime: 0,
       aliveTime: 28800,
       clickAction: clickAction,
@@ -212,15 +242,18 @@ export class LiveActivityController {
         type: liveViewManager.ExtensionType.EXTENSION_TYPE_COMMON_TEXT,
         text: state
       },
-      layoutData: { layoutType: liveViewManager.LayoutType.LAYOUT_TYPE_DEFAULT }
+      layoutData: pickupLayout
     };
-    const capsule: liveViewManager.TextCapsule = {
-      type: liveViewManager.CapsuleType.CAPSULE_TYPE_TEXT,
+    const elapsed = this.startedAt > 0 ? Math.max(0, Date.now() - this.startedAt) : 0;
+    const capsule: liveViewManager.TimerCapsule = {
+      type: liveViewManager.CapsuleType.CAPSULE_TYPE_TIMER,
       status: stopping ? -1 : 1,
       icon: 'pigo.png',
-      backgroundColor: '#FF356B5F',
-      title: 'Pi Go',
-      content: state,
+      backgroundColor: accent,
+      content: state === '重新连接中' ? '重连中' : state,
+      time: elapsed,
+      isCountdown: false,
+      isPaused: stopping || waiting || state === '重新连接中',
       isContentDisplayed: true,
       isTailIconDisplayed: false
     };

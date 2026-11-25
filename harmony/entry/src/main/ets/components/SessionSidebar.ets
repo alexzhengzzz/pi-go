@@ -2,7 +2,7 @@ import { glassCardSurface, glassDrawerSurface, immersiveSurface } from '../Immer
 import { headerSymbol } from './HeaderSymbol';
 import { unboundAction } from './ComponentAction';
 import { SIDEBAR_VIEWS, workspaceName } from '../model/SessionStore';
-import { SessionRow, SidebarRow, PendingInteraction, RunningRow, WorkspaceRow, Payload } from '../model/PiGoTypes';
+import { SessionRow, SidebarRow, PendingInteraction, RunningRow, WorkspaceRow } from '../model/PiGoTypes';
 import { SHORT_WINDOW_HEIGHT } from '../model/PiGoConstants';
 import { SidebarRows } from '../model/SidebarRows';
 
@@ -19,14 +19,17 @@ function chatAction() {
 export struct SessionSidebar {
   @Param @Require darkMode: boolean;
   @Local private refreshing: boolean = false;
-  @Param @Require activeTab: string;
-  @Event $activeTab: (value: string) => void = unboundAction;
   @Param @Require base: string;
   @Param @Require busy: boolean;
   @Param @Require canCreateWorkspace: boolean;
   @Event confirmCloseSpace: (path: string, epoch: number) => void = unboundAction;
   @Event openNewSession: (path?: string) => void = unboundAction;
   @Param @Require currentId: string;
+  @Param splitSessionId: string = '';
+  @Param choosingSplitSession: boolean = false;
+  @Event openSession: (session: SessionRow) => void = unboundAction;
+  @Event openInSplit: (session: SessionRow) => void = unboundAction;
+  @Event openInSystemSplit: (session: SessionRow) => void = unboundAction;
   @Param @Require expandedSpaces: string[];
   @Param @Require hostAvailable: boolean;
   @Param @Require idle: boolean;
@@ -43,7 +46,6 @@ export struct SessionSidebar {
   @Param @Require queued: boolean;
   @Param @Require reachable: boolean;
   @Event refreshSessions: () => Promise<void> = unboundAction;
-  @Event requestAction: (path: string, input?: Payload) => Promise<boolean> = unboundAction;
   @Event revealLibraryAnchor: () => void = unboundAction;
   @Param @Require runningSessionIds: string[];
   @Param @Require runningSessions: RunningRow[];
@@ -55,10 +57,6 @@ export struct SessionSidebar {
   @Param @Require sessionView: string;
   @Param @Require sessions: SessionRow[];
   @Event setDrawer: (open: boolean) => void = unboundAction;
-  @Param @Require showFiles: boolean;
-  @Event $showFiles: (value: boolean) => void = unboundAction;
-  @Param @Require showSettings: boolean;
-  @Event $showSettings: (value: boolean) => void = unboundAction;
   @Param @Require sidebarRows: SidebarRows = new SidebarRows();
   @Param @Require statusBarHeight: number;
   @Event swipeDrawer: (event: GestureEvent) => void = unboundAction;
@@ -253,6 +251,9 @@ export struct SessionSidebar {
           if (session.id === this.openingSessionId) {
             Text('正在打开…').id('session-opening').fontSize(11).fontColor(this.accent).maxLines(1)
               .margin({ left: this.compactSessionPane ? 0 : 8, top: this.compactSessionPane ? 2 : 0 })
+          } else if (session.id === this.splitSessionId) {
+            Text('分屏').fontSize(11).fontColor(this.accent)
+              .margin({ left: this.compactSessionPane ? 0 : 8, top: this.compactSessionPane ? 2 : 0 })
           } else if (this.sessionRunning(session.id)) {
             Row({ space: 4 }) {
               Text('').width(6).height(6).borderRadius(3)
@@ -264,16 +265,15 @@ export struct SessionSidebar {
           }
         }.width('100%').height('100%')
       }.id(`session-${session.id}`).layoutWeight(1)
-        .height(this.compactSessionPane && (session.id === this.openingSessionId || this.sessionRunning(session.id)) ? 54 : 46)
+        .height(this.compactSessionPane && (session.id === this.openingSessionId || session.id === this.splitSessionId || this.sessionRunning(session.id)) ? 54 : 46)
         .padding({ left: this.compactSessionPane ? (nested ? 16 : 6) : (nested ? 40 : 12), right: 2 })
         .backgroundColor(Color.Transparent).enabled(!this.busy && (this.reachable || session.id === this.currentId))
         .accessibilitySelected(session.id === this.currentId)
         .onClick(() => {
           if (this.openingSession) return;
-          this.$activeTab('tasks'); this.$showSettings(false); this.$showFiles(false);
-          if (session.id === this.currentId) this.setDrawer(false);
-          else void this.requestAction('/open', { id: session.id, agent: session.agent });
+          this.openSession(session);
         })
+        .bindContextMenu(this.sessionContextMenu(session), ResponseType.LongPress, { placement: Placement.BottomLeft })
       Button({ type: ButtonType.Normal }) {
         Image($r('app.media.ic_more')).width(16).height(16).fillColor($r('app.color.pigo_muted'))
       }.id(`session-more-${session.id}`).width(this.compactSessionPane ? 36 : 32).height(40).padding(0)
@@ -360,8 +360,24 @@ export struct SessionSidebar {
       this.refreshing = false;
     }
   }
+  @Builder
+  sessionContextMenu(session: SessionRow) {
+    Menu() {
+      MenuItem({ content: '在分屏中打开' }).id('open-session-split')
+        .enabled(this.reachable && !this.busy && !this.openingSession)
+        .onClick(() => { this.openInSplit(session); })
+      MenuItem({ content: '在系统分屏中打开' }).id('open-session-system-split')
+        .enabled(this.reachable && !this.busy && !this.openingSession)
+        .onClick(() => { this.openInSystemSplit(session); })
+    }
+  }
+
   private sessionMoreOptions(session: SessionRow): MenuElement[] {
     const options: MenuElement[] = [
+      { value: '在分屏中打开', enabled: this.reachable && !this.busy && !this.openingSession,
+        action: () => { this.openInSplit(session); } },
+      { value: '在系统分屏中打开', enabled: this.reachable && !this.busy && !this.openingSession,
+        action: () => { this.openInSystemSplit(session); } },
       { value: '分享会话', action: () => { void this.shareSession(session); } }
     ];
     if (this.reachable) {

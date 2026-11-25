@@ -23,7 +23,7 @@ export class PiGoClient {
     const pin = endpoint.pin;
     const remoteCatalog = path.startsWith('/sessions?') && ca !== undefined && pin !== undefined &&
       validSecureAddress(address, ca, pin, true);
-    const slowRequest = path === '/open' || path === '/new' || path === '/fork' || path === '/create-workspace' || path === '/close-workspace';
+    const slowRequest = path === '/open' || path === '/session/open' || path === '/new' || path === '/fork' || path === '/create-workspace' || path === '/close-workspace';
     const headers: Record<string, string> = {};
     if (token) headers['Authorization'] = `Bearer ${token}`;
     if (input) headers['Content-Type'] = 'application/json';
@@ -126,7 +126,7 @@ export class PiGoClient {
     }
   }
 
-  async uploadAttachment(endpoint: BridgeEndpoint, kind: string, name: string, bytes: Uint8Array): Promise<UploadedAttachment> {
+  async uploadAttachment(endpoint: BridgeEndpoint, kind: string, name: string, bytes: Uint8Array, pane: string = ''): Promise<UploadedAttachment> {
     const req = http.createHttp();
     const headers: Record<string, string> = { 'Authorization': `Bearer ${endpoint.token}`, 'Content-Type': 'application/octet-stream' };
     try {
@@ -145,7 +145,7 @@ export class PiGoClient {
         opts.certificatePinning = { hashAlgorithm: 'SHA-256', publicKeyHash: endpoint.pin };
       }
       opts.extraData = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
-      const response = await req.request(`${endpoint.address}/upload?kind=${encodeURIComponent(kind)}&name=${encodeURIComponent(name)}`, opts);
+      const response = await req.request(`${endpoint.address}/upload?kind=${encodeURIComponent(kind)}&name=${encodeURIComponent(name)}${pane}`, opts);
       const reply = JSON.parse(response.result as string) as BridgeReply;
       if (response.responseCode < 200 || response.responseCode >= 300) {
         throw new BridgeFailure(response.responseCode, reply.error ?? 'request_failed');

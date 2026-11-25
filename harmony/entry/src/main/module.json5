@@ -27,6 +27,7 @@
       "name": "EntryAbility",
       "srcEntry": "./ets/EntryAbility.ets",
       "launchType": "singleton",
+      "supportWindowMode": ["fullscreen", "split", "floating"],
       "label": "$string:app_name",
       "icon": "$media:pigo",
       "startWindowIcon": "$media:pigo_launch",
@@ -43,6 +44,16 @@
           ]
         }
       ]
+    }, {
+      "name": "ConversationAbility",
+      "srcEntry": "./ets/ConversationAbility.ets",
+      "startWindowIcon": "$media:pigo_launch",
+      "startWindowBackground": "$color:launch_background",
+      "launchType": "standard",
+      "label": "$string:app_name",
+      "icon": "$media:pigo",
+      "supportWindowMode": ["fullscreen", "split", "floating"],
+      "exported": false
     }],
     "extensionAbilities": [{
       "name": "InboxFormAbility",

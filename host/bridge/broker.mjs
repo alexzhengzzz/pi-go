@@ -123,7 +123,7 @@ async function pumpEvents(client, authorization) {
   try {
     while (!client.closed && matches(authorization, bearer)) {
       const live = registry.workers();
-      const current = selectionFor(live);
+      const current = client.target ? paneWorker(live, client.target) : selectionFor(live);
       if (!current) {
         client.session = undefined;
         if (!client.response.write(`data: ${JSON.stringify({ type: 'bridge/status', state: selected ? 'session_closed' : 'no_session_selected' })}\n\n`)) client.response.destroy();
@@ -133,10 +133,11 @@ async function pumpEvents(client, authorization) {
       }
       client.session = current.session.id;
       const version = selectionVersion;
+      const changed = () => !client.target && version !== selectionVersion;
       let finish;
       const done = new Promise((resolve) => { finish = resolve; });
       const tick = setInterval(() => {
-        if (client.closed || !matches(authorization, bearer) || version !== selectionVersion) client.upstream?.destroy();
+        if (client.closed || !matches(authorization, bearer) || changed()) client.upstream?.destroy();
         else if (!client.sequenced && !client.response.write(': keepalive\n\n')) client.response.destroy();
       }, 4000);
       const path = workerPath(client.sequenced ? '/events?sync=2' : '/events', current.session, true);
@@ -144,7 +145,7 @@ async function pumpEvents(client, authorization) {
         if (res.statusCode !== 200) { res.resume(); finish(); return; }
         res.setEncoding('utf8');
         res.on('data', (chunk) => {
-          if (client.sequenced && (version !== selectionVersion || !matches(authorization, bearer))) upstream.destroy();
+          if (client.sequenced && (changed() || !matches(authorization, bearer))) upstream.destroy();
           else if (!client.response.write(chunk)) client.response.destroy();
         });
         res.on('end', finish);
@@ -226,8 +227,21 @@ function select(worker) {
   chosen = true;
   selected = { socket: worker.socket, id: worker.session.id, cwd: worker.session.cwd };
   selectionVersion += 1;
-  for (const client of streams) if (client.sequenced || client.session !== selected.id) client.upstream?.destroy();
+  for (const client of streams) {
+    if (!client.target && (client.sequenced || client.session !== selected.id)) client.upstream?.destroy();
+  }
 }
+
+function paneWorker(live, target) {
+  const workers = live.filter(({ session }) => session.id === target.id);
+  return workers.length === 1 && workers[0].session.cwd === target.cwd ? workers[0] : undefined;
+}
+
+const paneRoutes = new Set([
+  'GET /session/snapshot', 'GET /chat', 'GET /history', 'GET /events', 'GET /tool-detail',
+  'GET /message-image', 'GET /message-text', 'POST /upload', 'POST /prompt', 'POST /abort',
+  'POST /answer', 'POST /receipt', 'POST /regenerate'
+]);
 
 function selectionFor(live) {
   if (!chosen && live.length === 1) select(live[0]);
@@ -421,15 +435,16 @@ async function pollRunPush() {
   finally { pollingPush = false; }
 }
 
-async function replyOpen(request, response, worker, includeHistory) {
-  select(worker);
+async function replyOpen(request, response, worker, includeHistory, selectTarget = true) {
+  if (selectTarget) select(worker);
+  else metadata.visit(worker.session);
   const opened = { session: worker.session };
   if (!includeHistory) return reply(response, 200, opened);
   const version = selectionVersion;
   const path = workerPath('/session/snapshot?history=1', worker.session, true);
   const snapshot = await localRequest(worker.socket, 'GET', path, undefined, 2500).catch(() => undefined);
   if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
-  if (version !== selectionVersion) return error(response, 409, 'session_changed');
+  if (selectTarget && version !== selectionVersion) return error(response, 409, 'session_changed');
   const chat = snapshot?.data;
   // Older workers may return only the live snapshot. The client can then fetch history separately.
   if (snapshot?.status !== 200 || !Array.isArray(chat.messages) || !chat.cursor) return reply(response, 200, opened);
@@ -437,11 +452,11 @@ async function replyOpen(request, response, worker, includeHistory) {
       chat.cursor.sessionId !== worker.session.id) return error(response, 409, 'session_changed');
   chat.interaction = await pendingInteraction(worker);
   if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
-  if (version !== selectionVersion) return error(response, 409, 'session_changed');
+  if (selectTarget && version !== selectionVersion) return error(response, 409, 'session_changed');
   return reply(response, 200, chat);
 }
 
-async function nativeHandoff(request, response, route, cwd, id, context, hasLiveProject, includeHistory = false, fork, agent) {
+async function nativeHandoff(request, response, route, cwd, id, context, hasLiveProject, includeHistory = false, fork, agent, selectTarget = true) {
   if (handoffPending) return error(response, 409, 'desktop_busy');
   handoffPending = true;
   try {
@@ -488,7 +503,7 @@ async function nativeHandoff(request, response, route, cwd, id, context, hasLive
     const available = registry.workers().filter(isTarget);
     if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
     if (available.length !== 1) return error(response, 409, available.length ? 'session_occupied' : 'desktop_share_failed');
-    return await replyOpen(request, response, available[0], includeHistory);
+    return await replyOpen(request, response, available[0], includeHistory, selectTarget);
   } finally { handoffPending = false; }
 }
 
@@ -551,20 +566,27 @@ const publicHandler = async (request, response) => {
       }
       if (route === 'GET /runs/inbox') {
         return reply(response, 200, { runEvents: rows.slice(0, 80).map(({ files, checks, screenshots, ...row }) => row),
-          pushAvailable: Boolean(runPush.account) });
+          pushAvailable: Boolean(runPush.account), ...(runPush.lastError ? { pushError: runPush.lastError } : {}) });
       }
       return reply(response, 200, { runEvents: rows.slice(0, 50) });
     }
     if (route === 'POST /schedules/sync' || route === 'POST /schedules/update') {
       return await scheduleRequest(request, response, path);
     }
-    if (!['GET /session', 'GET /session/snapshot', 'GET /chat', 'GET /history', 'GET /tool-detail', 'GET /message-image', 'GET /message-text', 'GET /sessions', 'GET /sessions/status', 'GET /models', 'GET /commands', 'GET /events', 'GET /files/download', 'POST /open', 'POST /new', 'POST /fork', 'POST /regenerate', 'POST /prompt', 'POST /upload', 'POST /abort', 'POST /answer', 'POST /receipt', 'POST /model', 'POST /rename', 'POST /session-meta', 'POST /create-workspace', 'POST /close-workspace', 'POST /files/list', 'POST /files/read', 'POST /files/save'].includes(route)) return error(response, 404, 'not_found');
+    if (!['GET /session', 'GET /session/snapshot', 'GET /chat', 'GET /history', 'GET /tool-detail', 'GET /message-image', 'GET /message-text', 'GET /sessions', 'GET /sessions/status', 'GET /models', 'GET /commands', 'GET /events', 'GET /files/download', 'POST /open', 'POST /session/open', 'POST /new', 'POST /fork', 'POST /regenerate', 'POST /prompt', 'POST /upload', 'POST /abort', 'POST /answer', 'POST /receipt', 'POST /model', 'POST /rename', 'POST /session-meta', 'POST /create-workspace', 'POST /close-workspace', 'POST /files/list', 'POST /files/read', 'POST /files/save'].includes(route)) return error(response, 404, 'not_found');
+    const paneParams = new URL(request.url ?? '/', 'http://pi-go').searchParams;
+    const paneId = paneParams.get('pane');
+    const paneCwd = paneParams.get('paneCwd');
+    const target = paneId && paneCwd ? { id: paneId, cwd: paneCwd } : undefined;
+    if ((paneId !== null || paneCwd !== null) && (!target || !paneRoutes.has(route))) {
+      return error(response, 400, 'invalid_target');
+    }
     if (route === 'GET /events') {
       if (streams.size >= 4) return error(response, 429, 'too_many_streams');
       request.socket.setTimeout(0);
       response.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', 'Connection': 'keep-alive' });
       const sequenced = new URL(request.url ?? '/', 'http://pi-go').searchParams.get('sync') === '2';
-      const client = { response, sequenced, closed: false, session: undefined, upstream: undefined };
+      const client = { response, sequenced, target, closed: false, session: undefined, upstream: undefined };
       streams.add(client);
       response.on('close', () => { client.closed = true; streams.delete(client); client.upstream?.destroy(); });
       void pumpEvents(client, request.headers.authorization);
@@ -615,7 +637,7 @@ const publicHandler = async (request, response) => {
       if ((kind !== 'image' && kind !== 'file') || !name) return error(response, 400, 'invalid_attachment');
       const live = registry.workers();
       if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
-      const current = selectionFor(live);
+      const current = target ? paneWorker(live, target) : selectionFor(live);
       if (!current) return error(response, 409, 'session_unavailable');
       if (live.filter(({ session }) => session.id === current.session.id).length !== 1) return error(response, 409, 'session_occupied');
       const bytes = await rawBody(request, kind === 'image' ? maxImageBytes : maxFileBytes);
@@ -640,13 +662,15 @@ const publicHandler = async (request, response) => {
       if (!result) return error(response, 409, 'desktop_handoff_unconfirmed');
       return reply(response, result.status, result.data);
     }
-    if (route === 'POST /open' && typeof input.id === 'string') {
+    const openingSession = route === 'POST /open' || route === 'POST /session/open';
+    if (openingSession && typeof input.id === 'string') {
       // A just-shared target may still be arriving via the directory watcher.
       await registry.waitForWorker(({ session }) => session.id === input.id, 250);
     }
     const live = registry.workers();
     if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
-    const current = selectionFor(live);
+    const detached = route === 'POST /session/open';
+    const current = target ? paneWorker(live, target) : detached ? undefined : selectionFor(live);
     if (path.startsWith('/files/')) {
       const context = await hostContext();
       if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
@@ -760,7 +784,7 @@ const publicHandler = async (request, response) => {
       return reply(response, 200, { ...catalogInfo, sessions: filtered.slice(start, start + limit),
         total: filtered.length, nextCursor: start + limit < filtered.length ? start + limit : undefined });
     }
-    if (route === 'POST /open') {
+    if (openingSession) {
       if (handoffPending) return error(response, 409, 'desktop_busy');
       if (typeof input.id !== 'string') return error(response, 400, 'invalid_session');
       const includeHistory = input.history === true;
@@ -770,10 +794,10 @@ const publicHandler = async (request, response) => {
         const row = native ?? (await catalog(live, context.socket, context.granted, false)).find(({ id }) => id === input.id);
         if (!row) return error(response, 409, 'desktop_handoff_required');
         return await nativeHandoff(request, response, '/open', row.cwd, row.id, context,
-          live.some(({ session }) => session.cwd === row.cwd), includeHistory, undefined, input.agent ?? row.agent);
+          live.some(({ session }) => session.cwd === row.cwd), includeHistory, undefined, input.agent ?? row.agent, !detached);
       }
       if (targets.length !== 1) return error(response, 409, 'session_occupied');
-      return await replyOpen(request, response, targets[0], includeHistory);
+      return await replyOpen(request, response, targets[0], includeHistory, !detached);
     }
     if (route === 'POST /new') {
       const context = await hostContext();
@@ -805,6 +829,7 @@ const publicHandler = async (request, response) => {
     }
     const snapshot = route === 'GET /session/snapshot';
     if (!current) {
+      if (target) return error(response, 409, 'session_unavailable');
       if (selected && (snapshot || route === 'GET /chat')) {
         const target = selected;
         const hosts = registry.hosts();
@@ -850,7 +875,7 @@ const publicHandler = async (request, response) => {
       isImage ? 8000 : undefined, isImage ? maxHistoryImageBase64 + 1024 : undefined).catch(() => undefined);
     if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
     if (!result) return error(response, 409, 'session_unavailable');
-    if (scopedRead && version !== selectionVersion) return error(response, 409, 'session_changed');
+    if (scopedRead && !target && version !== selectionVersion) return error(response, 409, 'session_changed');
     if ((snapshot || route === 'GET /chat' || (remote && route === 'GET /models')) && result.status === 200 &&
         (result.data.session?.id !== current.session.id || ((snapshot || remote) && result.data.session?.cwd !== current.session.cwd))) {
       return error(response, 409, 'session_changed');
@@ -859,7 +884,7 @@ const publicHandler = async (request, response) => {
       result.data.interaction = await pendingInteraction(current);
       if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
     }
-    if (scopedRead && version !== selectionVersion) return error(response, 409, 'session_changed');
+    if (scopedRead && !target && version !== selectionVersion) return error(response, 409, 'session_changed');
     return reply(response, result.status, result.data);
   } catch (cause) {
     if (!response.headersSent) {
