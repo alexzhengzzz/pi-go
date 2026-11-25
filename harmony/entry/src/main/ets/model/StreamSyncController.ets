@@ -107,6 +107,7 @@ export class StreamSyncController {
   private streamReq?: http.HttpRequest = undefined;
   private streamGen: number = 0;
   private streamAlive: boolean = false;
+  private streamFailures: number = 0;
   private polling: boolean = false;
   private lastLiveDetailSync: number = 0;
 
@@ -227,6 +228,7 @@ export class StreamSyncController {
     const req = this.streamReq;
     this.streamReq = undefined;
     this.streamAlive = false;
+    this.streamFailures = 0;
     if (req) req.destroy();
   }
 
@@ -252,7 +254,14 @@ export class StreamSyncController {
     this.streamReq = undefined;
     this.streamAlive = false;
     if (req) req.destroy();
-    this.scheduleStream(delay);
+    let retryDelay = delay;
+    if (delay >= 2000) {
+      const attempt = this.streamFailures;
+      this.streamFailures = Math.min(this.streamFailures + 1, 5);
+      const backedOff = delay >= 8000 ? delay : Math.min(15000, Math.round(delay * Math.pow(1.6, attempt)));
+      retryDelay = Math.round(backedOff * (0.85 + Math.random() * 0.3));
+    }
+    this.scheduleStream(retryDelay);
   }
 
   startStream(): void {
@@ -262,7 +271,7 @@ export class StreamSyncController {
     const path = this.session.syncMode === 'sequenced' ? '/events?sync=2' : '/events';
     this.streamReq = this.host.client().openEvents(this.streamEndpoint(), this.host.streamPath?.(path) ?? path, {
       current: (): boolean => gen === this.streamGen,
-      ready: (): void => { this.streamAlive = true; },
+      ready: (): void => { this.streamAlive = true; this.streamFailures = 0; },
       frame: (payload: string): void => { this.handleFrame(payload); },
       closed: (delay: number): void => { this.streamDown(gen, delay); },
       revoked: (): void => { this.host.leaveComputer(true); }
@@ -519,7 +528,7 @@ export class StreamSyncController {
         this.syncLiveActivity();
         const delay = !this.session.reachable ? 1500 :
           this.session.syncMode === 'sequenced' && this.host.chatState().sync.needsSnapshot() ? 150 :
-          this.streamAlive ? (this.session.idle ? 3000 : 1200) :
+          this.streamAlive ? (this.session.syncMode === 'sequenced' ? (this.session.idle ? 20000 : 6000) : (this.session.idle ? 3000 : 1200)) :
           this.session.idle ? 1500 : 650;
         this.schedule(delay);
       }
@@ -680,47 +689,52 @@ export class StreamSyncController {
   }
 
   private liveActivityDetails(state: string): LiveActivitySnapshot {
-    const title = this.session.sessionName || this.host.chatTitle() || this.session.project || 'Agent 任务';
-    const agent = this.session.currentAgent === 'codex' ? 'Codex' :
-      this.session.currentAgent === 'agy' ? 'Antigravity' : 'Pi';
+    const sessionTitle = this.session.sessionName || this.host.chatTitle() || '当前会话';
     const tools = this.session.liveTools;
     const runningTool = tools.find((item: LiveTool): boolean => item.state === 'run' || item.state === 'unknown');
     const lastTool = tools.length ? tools[tools.length - 1] : undefined;
     const doneTools = tools.filter((item: LiveTool): boolean => item.state === 'ok' || item.state === 'fail').length;
-    const prefix = this.session.project ? `${this.session.project} · ${agent}` : agent;
-    let summary = `${prefix} · 正在执行任务`;
-    let detailLabel = '当前进展';
-    let detailText = state;
+    let title = '运行中';
+    let summary = sessionTitle;
+    let badge = state === '重新连接中' ? '重连中' : state;
+    let progress = 35;
     if (state === '重新连接中') {
-      summary = `${prefix} · 连接暂时中断`;
-      detailLabel = '连接状态';
-      detailText = '正在重新连接电脑…';
+      title = '正在重新连接电脑';
+      summary = `${sessionTitle} · 网络恢复后继续同步`;
+      badge = '重连中';
+      progress = 40;
     } else if (this.session.interaction) {
-      summary = `${prefix} · 需要你确认后继续`;
-      detailLabel = '等待你的处理';
-      detailText = this.session.interaction.title || this.session.interaction.message || '点按返回会话处理';
+      title = this.session.interaction.title || '需要你确认后继续';
+      summary = this.session.interaction.message || `${sessionTitle} · 点按返回会话处理`;
+      badge = '待处理';
+      progress = 65;
     } else if (state === '排队中') {
-      summary = `${prefix} · 已发送到电脑`;
-      detailLabel = '任务队列';
-      detailText = '排队中，等待 Agent 开始执行';
+      title = '任务已派发，等待开始';
+      summary = sessionTitle;
+      badge = '排队中';
+      progress = 15;
     } else if (runningTool) {
-      summary = doneTools > 0 ? `${prefix} · 已完成 ${doneTools} 步工具调用` : `${prefix} · 正在调用工具`;
-      detailLabel = `正在执行 · ${runningTool.name}`;
-      detailText = runningTool.detail ? `${runningTool.name} · ${runningTool.detail}` : `正在运行 ${runningTool.name}`;
+      title = `正在执行 ${runningTool.name}`;
+      summary = runningTool.detail || sessionTitle;
+      badge = `第 ${doneTools + 1} 步`;
+      progress = Math.min(82, 35 + doneTools * 12);
     } else if (this.session.liveText.trim()) {
       const lines = this.session.liveText.trim().split('\n').map((line: string): string => line.trim()).filter((line: string): boolean => !!line);
       const snippet = lines.length ? lines[lines.length - 1] : this.session.liveText.trim();
-      summary = doneTools > 0 ? `${prefix} · 已完成 ${doneTools} 步，正在输出` : `${prefix} · 正在生成回复`;
-      detailLabel = '正在回复';
-      detailText = snippet;
+      title = '正在生成回复';
+      summary = snippet;
+      badge = doneTools > 0 ? `第 ${doneTools} 步` : '输出中';
+      progress = 88;
     } else if (this.session.liveThinking.trim()) {
-      summary = doneTools > 0 ? `${prefix} · 已完成 ${doneTools} 步，继续推理` : `${prefix} · 模型思考中`;
-      detailLabel = '正在思考';
-      detailText = '正在分析问题并规划下一步…';
+      title = '正在思考推理';
+      summary = sessionTitle;
+      badge = doneTools > 0 ? `第 ${doneTools} 步` : '思考中';
+      progress = Math.min(75, 30 + doneTools * 10);
     } else if (lastTool) {
-      summary = `${prefix} · 已完成 ${doneTools} 步工具调用`;
-      detailLabel = '最近步骤';
-      detailText = lastTool.detail ? `${lastTool.name} · ${lastTool.detail}` : lastTool.name;
+      title = `已完成 ${lastTool.name}`;
+      summary = lastTool.detail || sessionTitle;
+      badge = `第 ${doneTools} 步`;
+      progress = Math.min(80, 35 + doneTools * 12);
     }
     return {
       sessionId: this.session.currentId,
@@ -729,8 +743,8 @@ export class StreamSyncController {
       foreground: this.host.visible(),
       title: title,
       summary: summary,
-      detailLabel: detailLabel,
-      detailText: detailText
+      badge: badge,
+      progress: progress
     };
   }
 

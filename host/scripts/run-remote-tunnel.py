@@ -8,6 +8,7 @@ import time
 
 RELAY = """
 import asyncio
+import socket
 import sys
 from collections import OrderedDict
 
@@ -15,11 +16,24 @@ peers = {}
 budgets = OrderedDict()
 connections = 0
 
+def tune(writer):
+    sock = writer.get_extra_info('socket')
+    if sock is None:
+        return
+    try:
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    except OSError:
+        pass
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+    except OSError:
+        pass
+
 def admit(ip):
     now = asyncio.get_running_loop().time()
-    tokens, updated = budgets.pop(ip, (24, now))
-    tokens = min(24, tokens + 6 * (now - updated))
-    accepted = tokens >= 1 and peers.get(ip, 0) < 8 and connections < 24
+    tokens, updated = budgets.pop(ip, (36, now))
+    tokens = min(36, tokens + 10 * (now - updated))
+    accepted = tokens >= 1 and peers.get(ip, 0) < 16 and connections < 32
     budgets[ip] = (tokens - 1 if accepted else tokens, now)
     if len(budgets) > 2048:
         budgets.popitem(last=False)
@@ -36,12 +50,14 @@ async def forward(reader, client, relay_port):
     if not admit(ip):
         client.close()
         return
+    tune(client)
     connections += 1
     peers[ip] = peers.get(ip, 0) + 1
     upstream = None
     try:
         source, upstream = await asyncio.wait_for(
             asyncio.open_connection('127.0.0.1', relay_port), 5)
+        tune(upstream)
         paths = [asyncio.create_task(pipe(reader, upstream)),
                  asyncio.create_task(pipe(source, client))]
         _, pending = await asyncio.wait(paths, return_when=asyncio.FIRST_COMPLETED)
@@ -95,7 +111,8 @@ def main():
     command = shlex.join(['python3', '-u', '-c', RELAY, str(args.public_port), str(args.relay_port)])
     ssh = subprocess.Popen([
         '/usr/bin/ssh', '-T', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes',
-        '-o', 'ConnectTimeout=10', '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=2',
+        '-o', 'ConnectTimeout=10', '-o', 'ServerAliveInterval=10', '-o', 'ServerAliveCountMax=2',
+        '-o', 'TCPKeepAlive=yes', '-o', 'IPQoS=lowdelay',
         '-o', 'ExitOnForwardFailure=yes',
         '-R', f'127.0.0.1:{args.relay_port}:127.0.0.1:{args.broker_port}',
         '--', args.ssh_host, command,

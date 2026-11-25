@@ -1262,8 +1262,8 @@ test('live activity follows a phone-dispatched run and clears when it becomes id
     sessionId: 'one', address: 'http://127.0.0.1:18977', state: '运行中', foreground: true
   });
   assert.ok(liveViewCalls.at(-1).title);
-  assert.ok(liveViewCalls.at(-1).detailLabel);
-  assert.ok(liveViewCalls.at(-1).detailText);
+  assert.ok(liveViewCalls.at(-1).badge);
+  assert.ok(liveViewCalls.at(-1).progress > 0);
   state.interaction = { id: 'approval' };
   state.syncLiveActivity();
   assert.equal(liveViewCalls.at(-1).state, '等待处理');

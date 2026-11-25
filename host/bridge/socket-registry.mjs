@@ -228,6 +228,15 @@ export function createSocketRegistry({ shouldShare = () => false } = {}) {
     });
   }
 
+  async function refreshSocket(socket) {
+    if (stopped || typeof socket !== 'string' || dirname(socket) !== directory) return;
+    const kind = socketKind(basename(socket));
+    if (!kind) return;
+    const identity = socketStat(socket);
+    if (!identity) { forget(socket); return; }
+    await refresh(socket, kind, identity);
+  }
+
   return {
     start() {
       watchDirectory();
@@ -247,6 +256,8 @@ export function createSocketRegistry({ shouldShare = () => false } = {}) {
     enableSharing() {
       for (const entry of entries.values()) if (entry.kind === 'gui' && entry.data) void share(entry);
     },
+    refreshSocket,
+    sweep,
     waitForWorker,
     forget,
   };

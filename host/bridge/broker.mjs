@@ -5,6 +5,7 @@ import { createServer as createSecureServer } from 'node:https';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { pipeline } from 'node:stream/promises';
+import { gzipSync } from 'node:zlib';
 import { ipcDirectory, localRequest, localUpload } from './local-ipc.mjs';
 import { createSocketRegistry } from './socket-registry.mjs';
 import { newLanIdentity, newPublicIdentity, privateIPv4, publicAddress } from './lan-tls.mjs';
@@ -36,14 +37,28 @@ const adminPath = join(ipcDirectory(), `bridge-${port}.sock`);
 const digest = (text) => createHash('sha256').update(text).digest();
 const matches = (text, expected) => typeof text === 'string' && expected !== undefined && timingSafeEqual(digest(text), expected);
 const reply = (response, status, value) => {
+  const payload = JSON.stringify(value);
+  const acceptEncoding = response.req?.headers?.['accept-encoding'];
+  if (typeof acceptEncoding === 'string' && acceptEncoding.includes('gzip') && payload.length >= 1024) {
+    const compressed = gzipSync(payload);
+    response.writeHead(status, {
+      'Content-Type': 'application/json',
+      'Cache-Control': 'no-store',
+      'Content-Encoding': 'gzip',
+      'Vary': 'Accept-Encoding',
+      'Content-Length': compressed.length,
+    });
+    response.end(compressed);
+    return;
+  }
   response.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-  response.end(JSON.stringify(value));
+  response.end(payload);
 };
 const error = (response, status, code) => reply(response, status, { error: code });
 const options = { requestTimeout: 5000, headersTimeout: 5000, connectionsCheckingInterval: 1000 };
 // Phone uploads can carry one 8 MiB file, so the public listener gets a longer
 // request budget; header/keepalive limits and maxConnections still apply.
-const publicOptions = { ...options, requestTimeout: 60000, ...(remote ? { maxHeaderSize: 8192, keepAliveTimeout: 2500 } : {}) };
+const publicOptions = { ...options, requestTimeout: 60000, ...(remote ? { maxHeaderSize: 8192, keepAliveTimeout: 25000 } : {}) };
 let bearer = sameIdentity && saved?.bearer ? Buffer.from(saved.bearer, 'hex') : undefined;
 let lastSeen;
 let computerAccess = remote || (saved?.computerAccess ?? false);
@@ -135,10 +150,14 @@ async function pumpEvents(client, authorization) {
       const version = selectionVersion;
       const changed = () => !client.target && version !== selectionVersion;
       let finish;
+      let lastWriteAt = Date.now();
       const done = new Promise((resolve) => { finish = resolve; });
       const tick = setInterval(() => {
         if (client.closed || !matches(authorization, bearer) || changed()) client.upstream?.destroy();
-        else if (!client.sequenced && !client.response.write(': keepalive\n\n')) client.response.destroy();
+        else if (!client.sequenced || Date.now() - lastWriteAt >= 10000) {
+          if (!client.response.write(': keepalive\n\n')) client.response.destroy();
+          else lastWriteAt = Date.now();
+        }
       }, 4000);
       const path = workerPath(client.sequenced ? '/events?sync=2' : '/events', current.session, true);
       const upstream = ipcRequest({ socketPath: current.socket, path, method: 'GET', agent: false }, (res) => {
@@ -147,6 +166,7 @@ async function pumpEvents(client, authorization) {
         res.on('data', (chunk) => {
           if (client.sequenced && (changed() || !matches(authorization, bearer))) upstream.destroy();
           else if (!client.response.write(chunk)) client.response.destroy();
+          else lastWriteAt = Date.now();
         });
         res.on('end', finish);
         res.on('close', finish);
@@ -442,7 +462,10 @@ async function replyOpen(request, response, worker, includeHistory, selectTarget
   if (!includeHistory) return reply(response, 200, opened);
   const version = selectionVersion;
   const path = workerPath('/session/snapshot?history=1', worker.session, true);
-  const snapshot = await localRequest(worker.socket, 'GET', path, undefined, 2500).catch(() => undefined);
+  const [snapshot, interaction] = await Promise.all([
+    localRequest(worker.socket, 'GET', path, undefined, 2500).catch(() => undefined),
+    pendingInteraction(worker).catch(() => undefined),
+  ]);
   if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
   if (selectTarget && version !== selectionVersion) return error(response, 409, 'session_changed');
   const chat = snapshot?.data;
@@ -450,9 +473,7 @@ async function replyOpen(request, response, worker, includeHistory, selectTarget
   if (snapshot?.status !== 200 || !Array.isArray(chat.messages) || !chat.cursor) return reply(response, 200, opened);
   if (chat.session?.id !== worker.session.id || chat.session.cwd !== worker.session.cwd ||
       chat.cursor.sessionId !== worker.session.id) return error(response, 409, 'session_changed');
-  chat.interaction = await pendingInteraction(worker);
-  if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
-  if (selectTarget && version !== selectionVersion) return error(response, 409, 'session_changed');
+  chat.interaction = interaction;
   return reply(response, 200, chat);
 }
 
@@ -499,6 +520,9 @@ async function nativeHandoff(request, response, route, cwd, id, context, hasLive
           session.id === result.data.id && realpathSync(session.cwd) === expected;
       } catch { return false; }
     };
+    if (typeof result.data.socket === 'string') {
+      await registry.refreshSocket(result.data.socket);
+    }
     await registry.waitForWorker(isTarget, 2500);
     const available = registry.workers().filter(isTarget);
     if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
@@ -663,10 +687,6 @@ const publicHandler = async (request, response) => {
       return reply(response, result.status, result.data);
     }
     const openingSession = route === 'POST /open' || route === 'POST /session/open';
-    if (openingSession && typeof input.id === 'string') {
-      // A just-shared target may still be arriving via the directory watcher.
-      await registry.waitForWorker(({ session }) => session.id === input.id, 250);
-    }
     const live = registry.workers();
     if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
     const detached = route === 'POST /session/open';
@@ -788,13 +808,20 @@ const publicHandler = async (request, response) => {
       if (handoffPending) return error(response, 409, 'desktop_busy');
       if (typeof input.id !== 'string') return error(response, 400, 'invalid_session');
       const includeHistory = input.history === true;
-      const targets = live.filter(({ session }) => session.id === input.id);
+      let currentLive = live;
+      let targets = currentLive.filter(({ session }) => session.id === input.id);
+      if (targets.length === 0) {
+        // Fast local sweep catches a just-shared worker without waiting 250ms on cold opens.
+        await registry.sweep();
+        currentLive = registry.workers();
+        targets = currentLive.filter(({ session }) => session.id === input.id);
+      }
       if (targets.length === 0) {
         const [context, native] = await Promise.all([hostContext(), computerAccess ? findComputerSession(input.id, input.agent) : undefined]);
-        const row = native ?? (await catalog(live, context.socket, context.granted, false)).find(({ id }) => id === input.id);
+        const row = native ?? (await catalog(currentLive, context.socket, context.granted, false)).find(({ id }) => id === input.id);
         if (!row) return error(response, 409, 'desktop_handoff_required');
         return await nativeHandoff(request, response, '/open', row.cwd, row.id, context,
-          live.some(({ session }) => session.cwd === row.cwd), includeHistory, undefined, input.agent ?? row.agent, !detached);
+          currentLive.some(({ session }) => session.cwd === row.cwd), includeHistory, undefined, input.agent ?? row.agent, !detached);
       }
       if (targets.length !== 1) return error(response, 409, 'session_occupied');
       return await replyOpen(request, response, targets[0], includeHistory, !detached);
@@ -802,7 +829,7 @@ const publicHandler = async (request, response) => {
     if (route === 'POST /new') {
       const context = await hostContext();
       if (typeof input.cwd !== 'string' || (!live.some(({ session }) => session.cwd === input.cwd) && !context.granted.includes(input.cwd))) return error(response, 403, 'desktop_workspace_unshared');
-      return await nativeHandoff(request, response, '/new', input.cwd, undefined, context, live.some(({ session }) => session.cwd === input.cwd), false, undefined, input.agent);
+      return await nativeHandoff(request, response, '/new', input.cwd, undefined, context, live.some(({ session }) => session.cwd === input.cwd), input.history !== false, undefined, input.agent);
     }
     if (route === 'POST /close-workspace') {
       // The host removes the workspace registration and preserves its files.

@@ -10,6 +10,7 @@ import { agyComputerSessions, findAgySession } from '../agents/agy/catalog.mjs';
 const idPattern = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
 const cache = new Map();
 const pending = new Map();
+const piFileIndex = new Map();
 
 async function inspect(file, targetId, info, cwd, resolvedPaths) {
   const stream = createReadStream(file, { encoding: 'utf8' });
@@ -68,13 +69,22 @@ async function sessionFiles(root, matches, cwd) {
 export async function findComputerSession(id, agent) {
   if (!idPattern.test(id)) return;
   if (!agent || agent === 'pi') {
+    const indexedFile = piFileIndex.get(id);
+    if (indexedFile) {
+      const row = await inspect(indexedFile, id).catch(() => undefined);
+      if (row) return { ...row, agent: 'pi' };
+      piFileIndex.delete(id);
+    }
     const root = await sessionRoot();
     if (root) {
       const filename = `${id}.jsonl`;
       const files = await sessionFiles(root, (name) => name === filename || name.endsWith(`_${filename}`));
       for (const file of files) {
         const row = await inspect(file, id).catch(() => undefined);
-        if (row) return { ...row, agent: 'pi' };
+        if (row) {
+          piFileIndex.set(id, file);
+          return { ...row, agent: 'pi' };
+        }
       }
     }
   }
@@ -124,7 +134,10 @@ async function piComputerSessions(revision, cwd, refresh) {
         const row = prior?.mtime === info.mtimeMs && prior?.size === info.size && prior?.ino === info.ino
           ? prior.row : await inspect(file, undefined, info, cwd, resolvedPaths).catch(() => undefined);
         entries.set(file, { mtime: info.mtimeMs, size: info.size, ino: info.ino, row });
-        if (row) rows.push(row);
+        if (row) {
+          rows.push(row);
+          piFileIndex.set(row.id, file);
+        }
       }
     }));
     rows.sort((a, b) => b.modified.localeCompare(a.modified));

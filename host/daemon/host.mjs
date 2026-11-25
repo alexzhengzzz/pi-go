@@ -152,7 +152,7 @@ export function createDaemonHost({ registry, runtimes, schedules, profile = daem
         throw new Error('desktop_share_failed');
       }
     }
-    return state.sessionId;
+    return { id: state.sessionId, socket: state.socketPath };
   }
 
   async function handle(request, response) {
@@ -409,8 +409,8 @@ export function createDaemonHost({ registry, runtimes, schedules, profile = daem
       }
       if (request.url === '/authorize') return reply(response, 200, { cwd, profile });
       const targetAgent = opening ? (session.agent ?? 'pi') : (requestedAgent ?? 'pi');
-      const sessionId = await handoff(cwd, opening ? input.id : undefined, session?.path, targetAgent);
-      return reply(response, 200, { id: sessionId, agent: targetAgent });
+      const { id: sessionId, socket } = await handoff(cwd, opening ? input.id : undefined, session?.path, targetAgent);
+      return reply(response, 200, { id: sessionId, agent: targetAgent, ...(socket ? { socket } : {}) });
     } catch (error) {
       const known = ['desktop_busy', 'desktop_session_not_ready', 'desktop_share_failed'];
       const code = known.includes(String(error?.message)) ? error.message : 'desktop_handoff_failed';

@@ -9,8 +9,8 @@ export interface LiveActivitySnapshot {
   foreground: boolean;
   title?: string;
   summary?: string;
-  detailLabel?: string;
-  detailText?: string;
+  badge?: string;
+  progress?: number;
 }
 
 const LIVE_VIEW_ID: number = 18977;
@@ -87,7 +87,7 @@ export class LiveActivityController {
     if (!this.context || Date.now() < this.retryAfter) return;
     const key = `${snapshot.address}|${snapshot.sessionId}`;
     if (this.dismissedKey === key) return;
-    const signature = `${snapshot.state}|${snapshot.title ?? ''}|${snapshot.summary ?? ''}|${snapshot.detailLabel ?? ''}|${snapshot.detailText ?? ''}`;
+    const signature = `${snapshot.state}|${snapshot.title ?? ''}|${snapshot.summary ?? ''}|${snapshot.badge ?? ''}|${snapshot.progress ?? 0}`;
     if (this.started && this.activeKey === key && this.lastSignature === signature) return;
     if (this.started && this.activeKey !== key) await this.stopCurrent();
     if (this.started && this.activeKey !== key) return;
@@ -216,33 +216,36 @@ export class LiveActivityController {
 
   private async buildView(snapshot: LiveActivitySnapshot, sequence: number,
     stopping: boolean): Promise<liveViewManager.LiveView> {
-    const state = stopping ? '已结束' : snapshot.state;
+    const state = stopping ? '已完成' : snapshot.state;
     const waiting = !stopping && state === '等待处理';
     const accent = waiting ? '#FFD97706' : '#FF356B5F';
+    const track = waiting ? '#1FD97706' : '#1F356B5F';
     const clickAction = await this.getClickAction(snapshot);
-    const title = clipLiveText(snapshot.title, 48, 'Agent 任务');
-    const summary = clipLiveText(snapshot.summary, 80, waiting ? '点按返回会话处理' : '点按查看任务进展');
-    const detailLabel = stopping ? '任务状态' : clipLiveText(snapshot.detailLabel, 24, waiting ? '等待你的处理' : '当前进展');
-    const detailText = stopping ? '本轮任务已结束' :
-      clipLiveText(snapshot.detailText, 64, waiting ? '点按返回会话确认或回复' : state);
-    const pickupLayout: liveViewManager.PickupLayout = {
-      layoutType: liveViewManager.LayoutType.LAYOUT_TYPE_PICKUP,
-      title: detailLabel,
-      content: detailText,
-      underlineColor: accent,
-      descPic: 'pigo.png'
+    const title = stopping ? '本轮任务已完成' : clipLiveText(snapshot.title, 40, 'Agent 运行中');
+    const summary = clipLiveText(snapshot.summary, 90, waiting ? '点按返回会话处理' : '点按查看任务进展');
+    const badge = stopping ? '已完成' : clipLiveText(snapshot.badge, 12, state === '重新连接中' ? '重连中' : state);
+    const progress = stopping ? 100 : Math.max(5, Math.min(95, Math.round(snapshot.progress ?? 35)));
+    const progressLayout: liveViewManager.ProgressLayout = {
+      layoutType: liveViewManager.LayoutType.LAYOUT_TYPE_PROGRESS,
+      progress: progress,
+      color: accent,
+      backgroundColor: track,
+      indicatorType: liveViewManager.IndicatorType.INDICATOR_TYPE_UNDISPLAYED,
+      indicatorIcon: 'pigo.png',
+      lineType: liveViewManager.LineType.LINE_TYPE_NORMAL_SOLID_LINE,
+      nodeIcons: ['pigo.png', 'pigo.png']
     };
     const primary: liveViewManager.PrimaryData = {
       title: title,
       content: [{ text: summary }],
-      keepTime: 0,
+      keepTime: stopping ? 15 : 0,
       aliveTime: 28800,
       clickAction: clickAction,
       extensionData: {
-        type: liveViewManager.ExtensionType.EXTENSION_TYPE_COMMON_TEXT,
-        text: state
+        type: liveViewManager.ExtensionType.EXTENSION_TYPE_CAPSULE_TEXT,
+        text: badge
       },
-      layoutData: pickupLayout
+      layoutData: progressLayout
     };
     const elapsed = this.startedAt > 0 ? Math.max(0, Date.now() - this.startedAt) : 0;
     const capsule: liveViewManager.TimerCapsule = {

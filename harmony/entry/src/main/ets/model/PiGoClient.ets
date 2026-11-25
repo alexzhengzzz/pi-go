@@ -21,10 +21,10 @@ export class PiGoClient {
     const token = endpoint.token;
     const ca = endpoint.ca;
     const pin = endpoint.pin;
-    const remoteCatalog = path.startsWith('/sessions?') && ca !== undefined && pin !== undefined &&
-      validSecureAddress(address, ca, pin, true);
+    const remoteEndpoint = ca !== undefined && pin !== undefined && validSecureAddress(address, ca, pin, true);
+    const remoteCatalog = path.startsWith('/sessions?') && remoteEndpoint;
     const slowRequest = path === '/open' || path === '/session/open' || path === '/new' || path === '/fork' || path === '/create-workspace' || path === '/close-workspace';
-    const headers: Record<string, string> = {};
+    const headers: Record<string, string> = { 'Accept-Encoding': 'gzip' };
     if (token) headers['Authorization'] = `Bearer ${token}`;
     if (input) headers['Content-Type'] = 'application/json';
     try {
@@ -35,7 +35,7 @@ export class PiGoClient {
         usingCache: false,
         usingProxy: false,
         maxRedirects: 0,
-        connectTimeout: remoteCatalog ? 6000 : 2500,
+        connectTimeout: remoteCatalog ? 6000 : (remoteEndpoint ? 4500 : 2000),
         readTimeout: remoteCatalog || path === '/fork' ? 20000 : (slowRequest ? 16000 : 6500)
       };
       if (ca && pin) {
@@ -159,6 +159,8 @@ export class PiGoClient {
 
   openEvents(endpoint: BridgeEndpoint, path: string, events: BridgeEvents): http.HttpRequest {
     const req = http.createHttp();
+    const remoteEndpoint = endpoint.ca !== undefined && endpoint.pin !== undefined &&
+      validSecureAddress(endpoint.address, endpoint.ca, endpoint.pin, true);
     const headers: Record<string, string> = { 'Authorization': `Bearer ${endpoint.token}`, 'Accept': 'text/event-stream' };
     const opts: http.HttpRequestOptions = {
       method: http.RequestMethod.GET,
@@ -166,7 +168,7 @@ export class PiGoClient {
       usingCache: false,
       usingProxy: false,
       maxRedirects: 0,
-      connectTimeout: 4000,
+      connectTimeout: remoteEndpoint ? 6000 : 3000,
       readTimeout: 30000
     };
     if (endpoint.ca && endpoint.pin) {

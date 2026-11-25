@@ -166,7 +166,8 @@ export class RpcRuntime {
           return state;
         }
       } catch { /* retry: the engine may not be ready yet */ }
-      await new Promise((resolve) => setTimeout(resolve, statePollMs));
+      const delay = attempt < 10 ? 20 : attempt < 25 ? 50 : statePollMs;
+      await new Promise((resolve) => setTimeout(resolve, delay));
     }
     throw new Error(`runtime_not_ready:${JSON.stringify(last ?? null)}`);
   }
@@ -224,6 +225,7 @@ export class AgentWorkerRuntime {
     this.readyEvent = undefined;
     this.exited = false;
     this.exitCode = null;
+    this.readyResolvers = [];
     const args = [agentWorkerScript, '--agent', agent, '--cwd', cwd, ...(sessionId ? ['--session', sessionId] : [])];
     const env = scheduled ? { ...process.env, PIGO_SCHEDULED_RESULTS: '1' } : process.env;
     this.child = spawn(process.execPath, args, { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
@@ -235,6 +237,7 @@ export class AgentWorkerRuntime {
           this.readyEvent = msg;
           this.sessionId = msg.sessionId;
           this.socketPath = msg.socket;
+          this.notifyReady();
         }
       } catch {}
     });
@@ -247,23 +250,39 @@ export class AgentWorkerRuntime {
 
   get pid() { return this.child.pid; }
 
+  notifyReady() {
+    const waiters = this.readyResolvers.splice(0);
+    for (const wake of waiters) wake();
+  }
+
   onExit(code) {
     if (this.exited) return;
     this.exited = true;
     this.exitCode = code;
+    this.notifyReady();
     this.pool.forget(this);
   }
 
   async awaitReady(expectedId) {
-    for (let attempt = 0; attempt < statePollAttempts; attempt += 1) {
-      if (this.exited) throw new Error(`runtime_exited:${this.exitCode}:${this.stderr().slice(-500)}`);
-      if (this.readyEvent) {
-        if (expectedId && this.sessionId !== expectedId) {
-          throw new Error(`runtime_not_ready:${JSON.stringify(this.readyEvent)}`);
-        }
-        return { sessionId: this.sessionId, socketPath: this.socketPath };
+    if (!this.readyEvent && !this.exited) {
+      await new Promise((resolve) => {
+        const timer = setTimeout(() => {
+          this.readyResolvers = this.readyResolvers.filter((fn) => fn !== wake);
+          resolve();
+        }, statePollAttempts * statePollMs);
+        const wake = () => {
+          clearTimeout(timer);
+          resolve();
+        };
+        this.readyResolvers.push(wake);
+      });
+    }
+    if (this.exited) throw new Error(`runtime_exited:${this.exitCode}:${this.stderr().slice(-500)}`);
+    if (this.readyEvent) {
+      if (expectedId && this.sessionId !== expectedId) {
+        throw new Error(`runtime_not_ready:${JSON.stringify(this.readyEvent)}`);
       }
-      await new Promise((resolve) => setTimeout(resolve, statePollMs));
+      return { sessionId: this.sessionId, socketPath: this.socketPath };
     }
     throw new Error('runtime_not_ready:timeout');
   }

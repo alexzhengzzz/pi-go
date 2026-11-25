@@ -281,7 +281,7 @@ struct Index {
     this.connection.watchNetwork((): void => { this.onNetworkChange(); });
     void this.restoreChain.then(() => {
       this.scheduleController.queueScheduleSync(true);
-      this.runCenter.queueRunSync(0);
+      this.runCenter.queueRunSync(450);
       void this.runCenter.consumePushLaunch();
       this.onInboxFormLaunch();
     });
@@ -666,7 +666,7 @@ struct Index {
         this.streamSync.startStream();
         this.streamSync.schedule(0);
       }
-      this.runCenter.queueRunSync(0);
+      this.runCenter.queueRunSync(500);
       this.scheduleController.queueScheduleSync(true);
     }, 400);
   }

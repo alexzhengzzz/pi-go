@@ -358,7 +358,10 @@ export class SessionActions {
       if (mode === 'send') {
         if (result.handled === true) this.streamSync.cancelOptimisticLiveRun();
         else this.streamSync.trackDispatchedLiveRun(liveRevision);
-      } else this.session.status = '引导请求已交给 Pi。';
+      } else {
+        this.session.status = '引导请求已交给 Pi。';
+        this.streamSync.trackDispatchedLiveRun(liveRevision);
+      }
     } catch (error) {
       if (mode === 'send') this.streamSync.cancelOptimisticLiveRun();
       if (epoch !== this.session.epoch) return;
