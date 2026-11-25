@@ -341,6 +341,16 @@ export interface QueuedSteering {
   files: string[];
 }
 
+export interface OptimisticMessage {
+  id: string;
+  sessionKey: string;
+  afterId: string;
+  text: string;
+  imageCount: number;
+  files: string[];
+  sending: boolean;
+}
+
 export class BridgeFailure extends Error {
   status: number;
   constructor(status: number, message: string) {

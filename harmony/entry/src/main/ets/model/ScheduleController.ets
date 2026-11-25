@@ -53,6 +53,7 @@ export class ScheduleState {
   @Trace scheduleListError: string = '';
   @Trace scheduleSaving: boolean = false;
   @Trace scheduleLoading: boolean = false;
+  @Trace scheduleLoaded: boolean = false;
   @Trace scheduleEditing?: ScheduleJob = undefined;
   @Trace scheduleName: string = '';
   @Trace schedulePrompt: string = '';
@@ -447,6 +448,7 @@ export class ScheduleController {
       (left.nextAt ?? Number.MAX_SAFE_INTEGER) - (right.nextAt ?? Number.MAX_SAFE_INTEGER));
     this.state.scheduleZone = result.timezone ?? '';
     this.state.scheduleListError = '';
+    this.state.scheduleLoaded = true;
     this.host.publishWidgets();
   }
 
@@ -456,6 +458,7 @@ export class ScheduleController {
     this.state.scheduleZone = '';
     this.state.scheduleListError = '';
     this.state.scheduleLoading = false;
+    this.state.scheduleLoaded = false;
     this.state.scheduleSaving = false;
     if (this.state.schedulePage === 'editor' || this.state.schedulePage === 'history') this.state.schedulePage = '';
     if (this.schedulePrevious === 'history') this.schedulePrevious = '';

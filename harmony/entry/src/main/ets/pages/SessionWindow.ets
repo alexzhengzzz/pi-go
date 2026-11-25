@@ -170,6 +170,7 @@ struct SessionWindow {
       openingFile: false,
       positionTranscript: (id: string, height: number): void => this.positionTranscript(id, height),
       queuedSteering: this.session.queuedSteering,
+      optimisticMessages: this.session.optimisticMessages,
       reachable: this.session.reachable,
       showChatImage: (source: string): void => { this.previewImage = source; },
       showFullReply: (message: string): Promise<void> => this.model?.stream.showFullReply(message) ?? Promise.resolve(),
@@ -212,7 +213,7 @@ struct SessionWindow {
           .onClick(() => { void this.attachFile(); })
         TextArea({ text: this.session.draft, placeholder: '输入消息' }).id('native-session-draft').layoutWeight(1)
           .fontSize(15).fontColor($r('app.color.pigo_text')).backgroundColor($r('app.color.pigo_control'))
-          .constraintSize({ minHeight: 42, maxHeight: 104 }).enabled(!this.session.busy && !this.session.pendingSend)
+          .constraintSize({ minHeight: 42, maxHeight: 104 }).enabled(!(this.session.pendingSend && !this.session.busy))
           .onChange((value: string): void => { this.model?.setDraft(value); })
         if (!this.session.idle && !this.session.draft.trim() && !this.session.attachments.length) {
           Button('停止').id('native-session-stop').height(42).fontSize(13)

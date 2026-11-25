@@ -11,7 +11,8 @@ import { SakuraGirlHitZone, ThemeBackdrop } from '../components/ThemeBackdrop';
 import { MarkdownTableReaderPage, TextFilePreviewPage, WorkspaceFileEditor } from '../components/FilePreviewPages';
 import { OfflineNotice, RunCompletionBanner, RunningSessionPill, RunningSessionStrip, ScheduledRunBanner,
   SessionSettings } from '../components/SessionOverlays';
-import { AppUiState, appUiState } from '../AppUiState';
+import { AppUiState, windowAppUiState } from '../AppUiState';
+import { entryInstances } from '../EntryInstanceRegistry';
 import { CommandList, CommandState, commandDraft, skillDraft } from '../model/CommandState';
 import { ConnectionManager, PairingRequest } from '../model/ConnectionManager';
 import { ChatState } from '../model/ChatState';
@@ -53,7 +54,7 @@ import { ScheduleJob, RunMessage, scheduleTime, parseScheduleTime, isCurrentSche
 import { ModelOption, BridgeEndpoint, SessionState, SessionRow, ChatMessage, DraftAttachment,
   UploadedAttachment, LiveTool, ToolDetails, CommandRow, ReceivedFilePreview,
   PendingInteraction, RunningRow, WorkspaceRow, BridgeReply,
-  AgentInfo, Payload, QueuedSteering, BridgeFailure } from '../model/PiGoTypes';
+  AgentInfo, OptimisticMessage, Payload, QueuedSteering, BridgeFailure } from '../model/PiGoTypes';
 import { USB_ADDRESS,
   SPLIT_WINDOW_WIDTH,
   SHORT_WINDOW_HEIGHT, LIVE_VIEW_SETTING } from '../model/PiGoConstants';
@@ -80,11 +81,16 @@ interface TranscriptPosition {
 }
 
 const PANE_ACTIONS: string[] = ['/prompt', '/abort', '/answer', '/receipt'];
+const PANE_ROUTES: string[] = [
+  '/session/snapshot', '/chat', '/history', '/tool-detail',
+  '/message-image', '/message-text', '/prompt', '/abort',
+  '/answer', '/receipt', '/regenerate'
+];
 
 @Entry
 @ComponentV2
 struct Index {
-  @Local private appState: AppUiState = appUiState();
+  @Local private appState: AppUiState = windowAppUiState();
   private get darkMode(): boolean { return this.appState.darkMode; }
   get address(): string { return this.appState.address; }
   set address(value: string) { this.appState.address = value; }
@@ -277,6 +283,12 @@ struct Index {
   }
   onPageShow(): void {
     this.visible = true;
+    const context = this.getUIContext().getHostContext();
+    if (context) {
+      liveActivity.attach(context as common.UIAbilityContext, (status: string): void => {
+        this.liveViewStatus = status;
+      });
+    }
     this.runCenter.resume();
     this.connection.watchNetwork((): void => { this.onNetworkChange(); });
     void this.restoreChain.then(() => {
@@ -321,7 +333,12 @@ struct Index {
     this.scheduleController.stopScheduleSync();
     this.streamSync.cancelSchedule();
     this.streamSync.stopStream();
-    liveActivity.sync(undefined);
+    if (entryInstances.count() <= 1) {
+      liveActivity.sync(undefined);
+    } else {
+      const context = this.getUIContext().getHostContext();
+      if (context) liveActivity.detach(context as common.UIAbilityContext);
+    }
     this.voiceComposer.resetVoice();
   }
 
@@ -734,6 +751,10 @@ struct Index {
       isPaired: (): boolean => this.isPaired,
       visible: (): boolean => this.visible,
       base: (): string => this.base,
+      streamPath: (path: string): string =>
+        this.session.currentId && this.session.workspaceCwd
+          ? panePath(path, this.session.currentId, this.session.workspaceCwd)
+          : path,
       liveViewsEnabled: (): boolean => this.liveViewsEnabled,
       selectedTool: (): LiveTool | undefined => this.selectedTool,
       selectedToolMessageId: (): string => this.selectedToolMessageId,
@@ -906,6 +927,7 @@ struct Index {
       return false;
     }
     this.activeTab = 'tasks';
+    this.minePage = '';
     this.session.showSettings = false;
     this.showFiles = false;
     if (id === this.session.currentId) {
@@ -1068,10 +1090,16 @@ struct Index {
     }
   }
 
+  private paneRouteTarget(path: string, input?: Payload): string {
+    if (path.includes('pane=') || !this.session.currentId || !this.session.workspaceCwd) return path;
+    const basePath = path.split('?')[0];
+    if (!PANE_ROUTES.includes(basePath)) return path;
+    if (PANE_ACTIONS.includes(basePath) && input?.id && input.id !== this.session.currentId) return path;
+    return panePath(path, this.session.currentId, this.session.workspaceCwd);
+  }
+
   private async request(path: string, input?: Payload, endpoint?: BridgeEndpoint): Promise<BridgeReply> {
-    if (!endpoint && this.splitOpen && input?.id === this.session.currentId && this.session.workspaceCwd && PANE_ACTIONS.includes(path)) {
-      path = panePath(path, input.id, this.session.workspaceCwd);
-    }
+    if (!endpoint) path = this.paneRouteTarget(path, input);
     return this.client.request(endpoint ?? this.connection.endpoint(), path, input);
   }
 
@@ -1253,6 +1281,7 @@ struct Index {
 
   private forgetDrafts(address: string): void {
     this.session.queuedSteering = this.session.queuedSteering.filter((item: QueuedSteering): boolean => !item.sessionKey.startsWith(`${address}|`));
+    this.session.optimisticMessages = this.session.optimisticMessages.filter((item: OptimisticMessage): boolean => !item.sessionKey.startsWith(`${address}|`));
     this.chatState.forgetDrafts(address);
   }
 
@@ -1680,8 +1709,9 @@ struct Index {
         this.sakuraBurstSeq += 1;
       },
       uploadAttachment: (kind: string, name: string, bytes: Uint8Array): Promise<UploadedAttachment> =>
-        this.client.uploadAttachment(this.connection.endpoint(), kind, name, bytes, this.splitOpen
-          ? '&' + paneQuery(this.session.currentId, this.session.workspaceCwd) : '')
+        this.client.uploadAttachment(this.connection.endpoint(), kind, name, bytes,
+          this.session.currentId && this.session.workspaceCwd
+            ? '&' + paneQuery(this.session.currentId, this.session.workspaceCwd) : '')
     };
   }
 
@@ -2266,6 +2296,12 @@ struct Index {
           headerSymbol($r('sys.symbol.chevron_left'), $r('app.color.pigo_text'), 21)
         }.headerAction().attributeModifier(immersiveSurface(this.darkMode))
           .accessibilityText('返回').enabled(!this.session.busy).onClick(() => { this.mineBack(); })
+      } else if (this.isPaired && !this.dockedSessions()) {
+        Button({ type: ButtonType.Normal }) {
+          headerSymbol($r('sys.symbol.line_2_horizontal'), $r('app.color.pigo_text'), 20)
+        }.id('history').headerAction().attributeModifier(immersiveSurface(this.darkMode))
+          .accessibilityText('打开会话抽屉').enabled(!this.session.busy)
+          .onClick(() => { this.setDrawer(true); })
       }
       Text(this.minePage === 'theme' ? '系统主题' : this.minePage === 'computers' ?
         (this.addingComputer ? (this.pairingComputerId ? '添加连接' : '添加电脑') : '电脑管理') : '我的')
@@ -2392,7 +2428,7 @@ struct Index {
         Button({ type: ButtonType.Normal }) {
           headerSymbol($r('sys.symbol.chevron_left'), $r('app.color.pigo_text'), 21)
         }.headerAction().attributeModifier(immersiveSurface(this.darkMode)).accessibilityText('返回会话').onClick(() => { this.session.showSettings = false; })
-      } else if (!this.dockedSessions() && !this.showFiles) {
+      } else if (!this.dockedSessions()) {
         Button({ type: ButtonType.Normal }) {
           headerSymbol($r('sys.symbol.line_2_horizontal'), $r('app.color.pigo_text'), 20)
         }.id('history').headerAction().attributeModifier(immersiveSurface(this.darkMode))
@@ -2417,7 +2453,7 @@ struct Index {
             Text(this.session.reachable ? (this.session.project ? `${this.session.project} · ${this.computerTitle()}` : this.computerTitle()) :
               `离线 · ${this.computerTitle()}`)
               .fontSize(12).fontColor($r('app.color.pigo_muted')).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
-          }.width('100%').onClick(() => { if (!this.dockedSessions() && !this.showFiles) this.setDrawer(true); })
+          }.width('100%').onClick(() => { if (!this.dockedSessions()) this.setDrawer(true); })
         }
       }.layoutWeight(1).alignItems(HorizontalAlign.Start)
       if (this.showFiles) {
@@ -2518,6 +2554,7 @@ struct Index {
         else this.positionOtherTranscript(id, contentHeight);
       },
       queuedSteering: state.queuedSteering,
+      optimisticMessages: state.optimisticMessages,
       reachable: state.reachable,
       showChatImage: (source: string, label: string): void => this.fileController.showChatImage(source, label),
       showFullReply: (messageId: string): Promise<void> => (focused ? this.streamSync : this.otherStream).showFullReply(messageId),
@@ -2822,7 +2859,7 @@ struct Index {
           left: 16,
           right: 16,
           bottom: this.composerBottomMargin()
-        })
+        }).animation({ duration: 240, curve: Curve.FastOutSlowIn })
       }.width('100%').layoutWeight(1)
     }
   }
@@ -2914,8 +2951,7 @@ struct Index {
     if (this.showSessions) {
       if (event.offsetX < 0) this.setDrawer(false);
     } else if (event.offsetX > 0 && !this.session.busy) {
-      if (this.showFiles) this.fileBack();
-      else if (!this.session.showSettings) this.setDrawer(true);
+      if (!this.session.showSettings && !(this.activeTab === 'mine' && this.minePage)) this.setDrawer(true);
     }
   }
 
@@ -2935,7 +2971,7 @@ struct Index {
   }
 
   private dockedSessions(): boolean {
-    return this.isPaired && this.activeTab !== 'mine' && this.windowWidth >= SPLIT_WINDOW_WIDTH &&
+    return this.isPaired && this.windowWidth >= SPLIT_WINDOW_WIDTH &&
       (!this.splitOpen || this.mainPaneWidth(this.sessionPaneWidth()) >= 640);
   }
 
@@ -3204,7 +3240,7 @@ struct Index {
       scheduleJobMenu: (job: ScheduleJob): MenuElement[] => this.scheduleJobMenu(job),
       scheduleJobs: this.scheduleController.state.scheduleJobs,
       scheduleListError: this.scheduleController.state.scheduleListError,
-      scheduleLoading: this.scheduleController.state.scheduleLoading,
+      scheduleLoaded: this.scheduleController.state.scheduleLoaded,
       schedulePage: this.scheduleController.state.schedulePage!!,
       scheduleSaving: this.scheduleController.state.scheduleSaving,
       workspaces: this.workspaces,
@@ -3531,7 +3567,8 @@ struct Index {
 
   private sakuraConversationFocus(): boolean {
     return this.activeTab !== 'mine' &&
-      (this.session.messages.length > 0 || !!this.session.liveText || !!this.session.liveThinking || this.session.liveTools.length > 0);
+      (this.session.messages.length > 0 || this.session.optimisticMessages.length > 0 ||
+        !!this.session.liveText || !!this.session.liveThinking || this.session.liveTools.length > 0);
   }
 
   private sakuraGirlInteractive(): boolean {
@@ -3605,12 +3642,12 @@ struct Index {
         }.height('100%').layoutWeight(1)
           .onTouch((event: TouchEvent) => { this.observeThemeTap(event); })
           .onGestureJudgeBegin(() => this.dockedSessions() || this.showSessions || this.voiceComposer.holding() || this.voiceComposer.state.recording ||
-            this.voiceComposer.state.voicePreparing || this.voiceComposer.state.voiceFinishing || !this.isPaired || this.activeTab === 'mine'
+            this.voiceComposer.state.voicePreparing || this.voiceComposer.state.voiceFinishing || !this.isPaired ||
+            this.session.showSettings || (this.activeTab === 'mine' && !!this.minePage)
             ? GestureJudgeResult.REJECT : GestureJudgeResult.CONTINUE)
           .gesture(PanGesture({ direction: PanDirection.Horizontal }).onActionEnd((event: GestureEvent) => { this.swipeDrawer(event); }))
       }.width('100%').height('100%').backgroundColor(this.themeCanvas())
-        .borderRadius({ topLeft: this.drawerOpen() ? 24 : 0, bottomLeft: this.drawerOpen() ? 24 : 0 })
-        .clip(true).translate({ x: this.drawerOpen() ? 36 : 0 })
+        .clip(true)
         .accessibilityLevel(this.drawerOpen() || this.scheduleController.state.schedulePage ? 'no-hide-descendants' : 'auto')
       if (this.drawerOpen()) {
         Button({ type: ButtonType.Normal }).width('100%').height('100%').padding(0)
@@ -3818,7 +3855,7 @@ struct Index {
           .margin({ top: this.statusBarHeight + this.headerHeight() + 8 }).hitTestBehavior(HitTestMode.Transparent)
       }
     }.width('100%').height('100%').padding({ left: this.leftInset, right: this.rightInset })
-      .backgroundColor(this.drawerOpen() ? $r('app.color.pigo_sidebar') : this.themeCanvas())
+      .backgroundColor(this.themeCanvas())
       .clip(true)
       .bindSheet(this.showToolDetails, this.toolDetailsSheet(), {
         detents: ['65%', SheetSize.LARGE], dragBar: true, showClose: true,

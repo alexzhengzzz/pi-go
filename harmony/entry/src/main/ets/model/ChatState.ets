@@ -1,5 +1,5 @@
 import { SessionSync } from '../SessionSync';
-import type { BridgeReply, ChatMessage, DraftAttachment, LiveTool, PendingSend, QueuedSteering, StreamFrame } from './PiGoTypes';
+import type { BridgeReply, ChatMessage, DraftAttachment, LiveTool, OptimisticMessage, PendingSend, QueuedSteering, StreamFrame } from './PiGoTypes';
 import { MAX_LIVE_TEXT_LENGTH, STREAM_PAINT_INTERVAL_MS } from './PiGoConstants';
 
 interface Transcript {
@@ -82,6 +82,31 @@ export class ChatState {
       }
     }
     return remaining.length !== queue.length ? remaining : queue;
+  }
+
+  reconcileOptimistic(items: OptimisticMessage[], messages: ChatMessage[], key: string,
+    settled: boolean): OptimisticMessage[] {
+    if (!items.length) return items;
+    const used = new Set<string>();
+    const remaining: OptimisticMessage[] = [];
+    for (const item of items) {
+      if (item.sessionKey !== key) { remaining.push(item); continue; }
+      const after = item.afterId ? messages.findIndex((message: ChatMessage): boolean => message.id === item.afterId) : -1;
+      const start = item.afterId && after < 0 ? -1 : after;
+      const text = item.files.length
+        ? `${item.text}\n\n[Pi Go 附件] 手机上传了 ${item.files.length} 个文件：`.slice(0, 8000)
+        : item.text.slice(0, 8000);
+      const match = messages.findIndex((message: ChatMessage, index: number): boolean =>
+        index > start && message.role === 'user' && !used.has(message.id) && (message.imageCount ?? 0) === item.imageCount &&
+        (item.files.length ? message.text.startsWith(text) : message.text === text));
+      if (match >= 0) {
+        used.add(messages[match].id);
+        continue;
+      }
+      if (settled && !item.sending) continue;
+      remaining.push(item);
+    }
+    return remaining.length !== items.length ? remaining : items;
   }
 
   rememberDraft(key: string, draft: string): void {

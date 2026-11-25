@@ -606,7 +606,7 @@ const publicHandler = async (request, response) => {
       return error(response, 400, 'invalid_target');
     }
     if (route === 'GET /events') {
-      if (streams.size >= 4) return error(response, 429, 'too_many_streams');
+      if (streams.size >= 12) return error(response, 429, 'too_many_streams');
       request.socket.setTimeout(0);
       response.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', 'Connection': 'keep-alive' });
       const sequenced = new URL(request.url ?? '/', 'http://pi-go').searchParams.get('sync') === '2';

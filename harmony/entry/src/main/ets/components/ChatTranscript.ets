@@ -5,7 +5,7 @@ import { ChatContent } from '../ChatContent';
 import { ChatImage } from '../ChatImage';
 import { markdownWorkspacePath, messageFileChips, normalizeWorkspacePath } from '../ChatPaths';
 import { RunEvent, runStatus } from '../RunResults';
-import { ChatMessage, LiveTool, QueuedSteering } from '../model/PiGoTypes';
+import { ChatMessage, LiveTool, OptimisticMessage, QueuedSteering } from '../model/PiGoTypes';
 import {
   buildTranscriptTurns,
   isReadOnlyTool,
@@ -70,6 +70,7 @@ export struct ChatTranscript {
   @Param @Require openingFile: boolean;
   @Event positionTranscript: (id: string, contentHeight: number) => void = unboundAction;
   @Param @Require queuedSteering: QueuedSteering[];
+  @Param optimisticMessages: OptimisticMessage[] = [];
   @Param @Require reachable: boolean;
   @Event showChatImage: (source: string, label: string) => void = unboundAction;
   @Event showFullReply: (messageId: string) => Promise<void> = unboundAction;
@@ -146,12 +147,34 @@ export struct ChatTranscript {
     return { topLeft: r, topRight: Math.max(4, Math.round(r * 0.35)), bottomLeft: r, bottomRight: r };
   }
 
+  private sessionOptimisticMessages(): OptimisticMessage[] {
+    if (!this.optimisticMessages.length) return [];
+    const key = this.draftKey(this.currentId);
+    return this.optimisticMessages.filter((item: OptimisticMessage): boolean => item.sessionKey === key);
+  }
+
+  private optimisticForMessage(messageId: string): OptimisticMessage | undefined {
+    if (!messageId.startsWith('optimistic:')) return undefined;
+    const id = messageId.slice('optimistic:'.length);
+    return this.optimisticMessages.find((item: OptimisticMessage): boolean => item.id === id);
+  }
+
   private displayTurns(): TranscriptTurn[] {
-    return buildTranscriptTurns(this.messages, this.unlistedLiveTools(), this.liveThinking, this.liveText, this.idle);
+    const optimistic = this.sessionOptimisticMessages();
+    const messages = optimistic.length
+      ? this.messages.concat(optimistic.map((item: OptimisticMessage): ChatMessage => ({
+        id: `optimistic:${item.id}`,
+        role: 'user',
+        text: item.text || (!item.imageCount && item.files.length ? item.files.join('\n') : ''),
+        imageCount: item.imageCount || undefined
+      })))
+      : this.messages;
+    return buildTranscriptTurns(messages, this.unlistedLiveTools(), this.liveThinking, this.liveText, this.idle);
   }
 
   private needsWaitingPulse(): boolean {
     if (this.idle || this.liveText || this.liveThinking || this.unlistedLiveTools().length) return false;
+    if (this.sessionOptimisticMessages().length) return true;
     if (!this.messages.length) return true;
     return this.messages[this.messages.length - 1].role === 'user';
   }
@@ -168,7 +191,7 @@ export struct ChatTranscript {
               Button('更早的消息').chatAction().id('history-more').enabled(this.reachable && !this.busy)
                 .onClick(() => { void this.loadHistory(); })
             }
-            if (!this.messages.length && !this.liveText && !this.liveTools.length && !this.liveThinking && this.idle) {
+            if (!this.messages.length && !this.sessionOptimisticMessages().length && !this.liveText && !this.liveTools.length && !this.liveThinking && this.idle) {
               this.emptyTranscript()
             }
             ForEach(this.displayTurns(), (turn: TranscriptTurn) => {
@@ -236,12 +259,16 @@ export struct ChatTranscript {
           .onAreaChange((oldArea: Area, newArea: Area) => {
             this.setTranscriptViewport(Number(newArea.height));
             if (this.transcriptFollow && (oldArea.width !== newArea.width || oldArea.height !== newArea.height)) {
-              // Wait for the transcript to finish wrapping at the new width before scrolling.
-              setTimeout(() => {
-                if (this.currentId === transcriptId && this.transcriptFollow) {
-                  this.transcript.scrollTo({ xOffset: 0, yOffset: this.readTranscriptHeight(), animation: false });
-                }
-              }, 0);
+              if (oldArea.width === newArea.width) {
+                this.transcript.scrollTo({ xOffset: 0, yOffset: this.readTranscriptHeight(), animation: false });
+              } else {
+                // Wait for the transcript to finish wrapping at the new width before scrolling.
+                setTimeout(() => {
+                  if (this.currentId === transcriptId && this.transcriptFollow) {
+                    this.transcript.scrollTo({ xOffset: 0, yOffset: this.readTranscriptHeight(), animation: false });
+                  }
+                }, 0);
+              }
             }
           })
       }, (transcriptId: string) => transcriptId)
@@ -273,9 +300,20 @@ export struct ChatTranscript {
           }
         }
         if (message.imageCount) {
-          Column({ space: 6 }) {
-            this.historyImages(message.imageCount, this.currentId, message.id)
-          }.id(`image-message-${message.id}`).alignItems(HorizontalAlign.Start)
+          if (this.optimisticForMessage(message.id)) {
+            Text(`图片 × ${message.imageCount}`).fontSize(13).fontColor($r('app.color.pigo_muted'))
+          } else {
+            Column({ space: 6 }) {
+              this.historyImages(message.imageCount, this.currentId, message.id)
+            }.id(`image-message-${message.id}`).alignItems(HorizontalAlign.Start)
+          }
+        }
+        if (this.optimisticForMessage(message.id)?.files.length &&
+          (this.optimisticForMessage(message.id)?.text || this.optimisticForMessage(message.id)?.imageCount)) {
+          ForEach(this.optimisticForMessage(message.id)?.files ?? [], (name: string) => {
+            Text(name).fontSize(13).fontColor($r('app.color.pigo_muted'))
+              .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+          })
         }
       }.alignItems(HorizontalAlign.Start).padding({ left: 14, right: 14, top: 10, bottom: 10 })
         .constraintSize({ maxWidth: '88%' })
@@ -694,6 +732,6 @@ export struct ChatTranscript {
   }
 
   private draftKey(sessionId: string): string {
-    return `${this.base}::${sessionId}`;
+    return `${this.base}|${sessionId}`;
   }
 }

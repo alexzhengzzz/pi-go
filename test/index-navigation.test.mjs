@@ -29,7 +29,7 @@ function method(name) {
   return page.slice(start, end);
 }
 const { runNotificationText } = await import('../harmony/entry/src/main/ets/RunResults.ets');
-const methods = ['setDrawer', 'loadSessions', 'applyCatalog', 'positionTranscript', 'loadSessionStatus', 'applyRunningStatus',
+const methods = ['setDrawer', 'swipeDrawer', 'loadSessions', 'applyCatalog', 'positionTranscript', 'loadSessionStatus', 'applyRunningStatus',
   'backgroundRunning', 'backgroundActive', 'sessionState', 'sessionRunning', 'toggleSpace', 'updateSidebarRows', 'revealLibraryAnchor',
   'appendSessionPage', 'setWorkspacePage', 'loadWorkspacePage', 'resetCatalog',
   'chooseComputer', 'leaveComputer', 'persistComputers', 'pair', 'workspaceName', 'openNewSpace', 'closeNewSpace',
@@ -586,6 +586,51 @@ test('an open drawer docks on unfold and folding back reveals the same conversat
   assert.equal(state.showSessions, false);
   assert.equal(state.currentId, 'one');
   assert.equal(state.draft, 'Keep this');
+});
+
+test('the sidebar can be swiped open and docked across all root tabs including files and mine', () => {
+  const state = fixture();
+  let fileBackCalls = 0;
+  Object.assign(state, {
+    windowWidth: 459,
+    isPaired: true,
+    fileBack: () => { fileBackCalls += 1; }
+  });
+  const swipeRight = { offsetX: 80, offsetY: 5 };
+  const swipeLeft = { offsetX: -80, offsetY: 5 };
+
+  for (const tab of ['tasks', 'pending', 'files', 'mine']) {
+    state.activeTab = tab;
+    state.showFiles = tab === 'files';
+    state.minePage = '';
+    state.showSettings = false;
+    state.showSessions = false;
+
+    state.swipeDrawer(swipeRight);
+    assert.equal(state.showSessions, true, `swipe right should open sidebar on ${tab}`);
+    state.swipeDrawer(swipeLeft);
+    assert.equal(state.showSessions, false, `swipe left should close sidebar on ${tab}`);
+  }
+  assert.equal(fileBackCalls, 0);
+
+  // Subpages (mine subpage or session settings) keep swipe right from opening the drawer.
+  state.activeTab = 'mine';
+  state.minePage = 'computers';
+  state.swipeDrawer(swipeRight);
+  assert.equal(state.showSessions, false);
+
+  state.activeTab = 'tasks';
+  state.minePage = '';
+  state.showSettings = true;
+  state.swipeDrawer(swipeRight);
+  assert.equal(state.showSessions, false);
+
+  // On wide screens the sidebar stays docked across all root tabs including mine.
+  state.windowWidth = 711;
+  for (const tab of ['tasks', 'pending', 'files', 'mine']) {
+    state.activeTab = tab;
+    assert.equal(state.dockedSessions(), true, `sidebar should dock on ${tab}`);
+  }
 });
 
 test('the user-chosen sidebar width fits the window and is restored when there is room', () => {
@@ -1605,6 +1650,44 @@ test('queued attachment previews stay scoped to the conversation and clear when 
   state.currentId = 'one';
   state.reconcileSteering(true);
   assert.deepEqual(state.queuedSteering, []);
+});
+
+test('idle send shows an optimistic user message immediately and reconciles when history arrives', async () => {
+  const state = navigationFixture();
+  Object.assign(state, { idle: true, draft: 'Hello Pi', messages: [{ id: 'a1', role: 'assistant', text: 'Ready' }] });
+  let finishPrompt;
+  state.request = path => path === '/prompt'
+    ? new Promise(resolve => { finishPrompt = resolve; })
+    : Promise.resolve({});
+  const sending = state.send();
+  assert.equal(state.draft, '');
+  assert.equal(state.pendingBottom, true);
+  assert.equal(state.transcriptFollow, true);
+  assert.equal(state.optimisticMessages.length, 1);
+  assert.equal(state.optimisticMessages[0].text, 'Hello Pi');
+  assert.equal(state.optimisticMessages[0].sending, true);
+  // A background settled poll during in-flight send must not drop the optimistic bubble.
+  state.reconcileSteering(true);
+  assert.equal(state.optimisticMessages.length, 1);
+
+  finishPrompt({ dispatched: true });
+  await sending;
+  assert.equal(state.optimisticMessages.length, 1);
+  assert.equal(state.optimisticMessages[0].sending, false);
+
+  state.messages = state.messages.concat([{ id: 'u2', role: 'user', text: 'Hello Pi' }]);
+  state.reconcileSteering(false);
+  assert.deepEqual(state.optimisticMessages, []);
+});
+
+test('failed idle send removes optimistic message and restores the draft', async () => {
+  const state = navigationFixture();
+  Object.assign(state, { idle: true, draft: 'Retry me', messages: [] });
+  state.request = async () => { throw new BridgeFailure(409, 'session_busy'); };
+  await state.send();
+  assert.deepEqual(state.optimisticMessages, []);
+  assert.equal(state.draft, 'Retry me');
+  assert.equal(state.pendingSend, undefined);
 });
 
 test('stream paints combine text and thinking and discard duplicate and finalized deltas', () => {

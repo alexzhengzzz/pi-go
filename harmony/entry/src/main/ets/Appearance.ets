@@ -119,34 +119,9 @@ export const THEME_STYLES: ThemeStyle[] = [
     }
   },
   {
-    id: 'bookstore',
-    label: '左岸书店',
-    subtitle: '复古暖灯 · 羊皮纸墨',
-    styleTag: '书房',
-    surface: 'paper',
-    bubble: 'tinted',
-    bubbleRadius: 14,
-    cardRadius: 14,
-    codeRadius: 10,
-    light: {
-      accent: '#8A5016', accentForeground: '#FFFFFF', accentTint: '#F5E7CE',
-      canvas: '#FAF6EE', auraTop: '#40F0CE96', auraBottom: '#36DFB47A',
-      bubbleStart: '#F3E7D2', bubbleEnd: '#F8EFE0', bubbleBorder: '#DFC7A0',
-      codeBg: '#FDFBF6', codeBorder: '#E5D8C3', codeHeaderBg: '#F4ECDD',
-      cardBg: '#F2FCF9F2', cardBorder: '#E2D4BC', cardShadow: '#164A3012'
-    },
-    dark: {
-      accent: '#F2C483', accentForeground: '#1D150D', accentTint: '#3A2B1C',
-      canvas: '#171310', auraTop: '#366E4B26', auraBottom: '#2C52371B',
-      bubbleStart: '#382A1D', bubbleEnd: '#2B2016', bubbleBorder: '#694F35',
-      codeBg: '#1F1914', codeBorder: '#3C3025', codeHeaderBg: '#28201A',
-      cardBg: '#E6201A15', cardBorder: '#47382B', cardShadow: '#44000000'
-    }
-  },
-  {
     id: 'jellyfish',
-    label: '深海水母',
-    subtitle: '荧光水母 · 蔚蓝浮泡',
+    label: '深海秘境',
+    subtitle: '荧光水母 · 鲸鲼游弋',
     styleTag: '深海',
     surface: 'glass',
     bubble: 'gradient',

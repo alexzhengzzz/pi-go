@@ -28,6 +28,29 @@ export class AppUiState {
   @Trace keyboardHeight: number = 0;
 }
 
+export const ENTRY_INSTANCE_KEY_STORAGE: string = 'piGoEntryInstanceKey';
+const windowStates: Map<string, AppUiState> = new Map();
+
 export function appUiState(): AppUiState {
   return AppStorageV2.connect(AppUiState, 'piGoUi', () => new AppUiState())!;
+}
+
+export function registerWindowAppUiState(instanceKey: string, state: AppUiState): void {
+  windowStates.set(instanceKey, state);
+}
+
+export function unregisterWindowAppUiState(instanceKey: string): void {
+  windowStates.delete(instanceKey);
+}
+
+export function windowAppUiState(): AppUiState {
+  try {
+    const shared = LocalStorage.getShared();
+    const key = shared?.get<string>(ENTRY_INSTANCE_KEY_STORAGE);
+    if (key) {
+      const state = windowStates.get(key);
+      if (state) return state;
+    }
+  } catch { /* Fall back to the shared store outside a LocalStorage-backed window. */ }
+  return appUiState();
 }

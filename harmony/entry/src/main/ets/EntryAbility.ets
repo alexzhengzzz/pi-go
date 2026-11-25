@@ -1,17 +1,32 @@
-import { AppUiState, appUiState } from './AppUiState';
+import {
+  AppUiState,
+  ENTRY_INSTANCE_KEY_STORAGE,
+  appUiState,
+  registerWindowAppUiState,
+  unregisterWindowAppUiState
+} from './AppUiState';
 import { UIAbility, Want, Configuration, ConfigurationConstant } from '@kit.AbilityKit';
 import { window } from '@kit.ArkUI';
 import { formInfo } from '@kit.FormKit';
 import { appearanceMode, openSettings } from './Appearance';
 import { liveActivity } from './LiveActivity';
 import { IncomingShare, readIncomingShare, releaseIncomingShare } from './IncomingShare';
+import { entryInstances } from './EntryInstanceRegistry';
 
 export default class EntryAbility extends UIAbility {
-  private readonly appState: AppUiState = appUiState();
+  private readonly appState: AppUiState = new AppUiState();
+  private instanceKey: string = '';
   private mainWindow?: window.Window;
   private shareGeneration: number = 0;
+  private onWindowSizeChange?: () => void;
+  private onAvoidAreaChange?: (info: window.AvoidAreaOptions) => void;
+  private onKeyboardHeightChange?: (height: number) => void;
+  private onWindowStatusChange?: (status: window.WindowStatusType) => void;
 
   onCreate(want: Want): void {
+    this.instanceKey = entryInstances.claimKey();
+    registerWindowAppUiState(this.instanceKey, this.appState);
+    console.info(`[PiGoMulti] onCreate key=${this.instanceKey} count=${entryInstances.count()}`);
     try {
       const saved = openSettings(this.context).getSync('appearance_mode', 'system') as string;
       this.context.getApplicationContext().setColorMode(appearanceMode(saved).colorMode);
@@ -19,13 +34,26 @@ export default class EntryAbility extends UIAbility {
     this.updateColorMode(this.context.config);
     this.applyLaunch(want);
   }
-  onNewWant(want: Want): void { this.applyLaunch(want); }
+  onNewWant(want: Want): void {
+    console.info(`[PiGoMulti] onNewWant key=${this.instanceKey}`);
+    entryInstances.touch(this.instanceKey);
+    this.applyLaunch(want);
+  }
+  onForeground(): void {
+    entryInstances.setForeground(this.instanceKey, true);
+    console.info(`[PiGoMulti] onForeground key=${this.instanceKey}`);
+  }
+  onBackground(): void {
+    entryInstances.setForeground(this.instanceKey, false);
+    console.info(`[PiGoMulti] onBackground key=${this.instanceKey}`);
+  }
   onConfigurationUpdate(config: Configuration): void { this.updateColorMode(config); }
 
   private updateColorMode(config: Configuration): void {
     if (config.colorMode === undefined) return;
     const dark = config.colorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK;
     this.appState.darkMode = dark;
+    appUiState().darkMode = dark;
     const foreground = dark ? '#EDF2F4' : '#1D2933';
     void this.mainWindow?.setWindowSystemBarProperties({
       statusBarContentColor: foreground, navigationBarContentColor: foreground
@@ -33,22 +61,69 @@ export default class EntryAbility extends UIAbility {
   }
 
   onWindowStageCreate(stage: window.WindowStage): void {
-    stage.loadContent('pages/Index', () => {
+    const storage = new LocalStorage();
+    storage.setOrCreate(ENTRY_INSTANCE_KEY_STORAGE, this.instanceKey);
+    try {
+      const main = stage.getMainWindowSync();
+      entryInstances.setWindowStatus(this.instanceKey, main.getWindowStatus());
+    } catch { /* Window status will be synced once the main window is ready. */ }
+    stage.loadContent('pages/Index', storage, () => {
       void stage.getMainWindow().then((mainWindow: window.Window) => {
         this.mainWindow = mainWindow;
         this.updateColorMode(this.context.config);
+        this.trackWindowStatus(mainWindow);
         return mainWindow.setWindowLayoutFullScreen(true).then(() => {
           this.trackAvoidAreas(mainWindow);
         });
       }).catch(() => { /* The page remains usable if system bars are unavailable. */ });
     });
   }
-  onWindowStageDestroy(): void { this.mainWindow = undefined; }
+  onWindowStageDestroy(): void {
+    this.detachWindowListeners();
+    this.mainWindow = undefined;
+  }
   async onDestroy(): Promise<void> {
+    this.detachWindowListeners();
+    entryInstances.unregister(this.instanceKey);
+    unregisterWindowAppUiState(this.instanceKey);
+    console.info(`[PiGoMulti] onDestroy key=${this.instanceKey} remaining=${entryInstances.count()}`);
     this.shareGeneration += 1;
     releaseIncomingShare(this.appState.incomingShare);
     this.appState.incomingShare = { text: '', attachments: [], skipped: false };
-    await liveActivity.dispose();
+    if (entryInstances.count() === 0) {
+      await liveActivity.dispose();
+    } else {
+      liveActivity.detach(this.context);
+    }
+  }
+
+  private trackWindowStatus(mainWindow: window.Window): void {
+    try {
+      entryInstances.setWindowStatus(this.instanceKey, mainWindow.getWindowStatus());
+    } catch { /* Ignore when window status is unavailable. */ }
+    const handleStatus = (status: window.WindowStatusType): void => {
+      entryInstances.setWindowStatus(this.instanceKey, status);
+      console.info(`[PiGoMulti] windowStatusChange key=${this.instanceKey} status=${status}`);
+    };
+    this.onWindowStatusChange = handleStatus;
+    try {
+      mainWindow.on('windowStatusChange', handleStatus);
+    } catch { /* Ignore on devices that do not emit windowStatusChange. */ }
+  }
+
+  private detachWindowListeners(): void {
+    const mainWindow = this.mainWindow;
+    if (!mainWindow) return;
+    try {
+      if (this.onWindowSizeChange) mainWindow.off('windowSizeChange', this.onWindowSizeChange);
+      if (this.onAvoidAreaChange) mainWindow.off('avoidAreaChange', this.onAvoidAreaChange);
+      if (this.onKeyboardHeightChange) mainWindow.off('keyboardHeightChange', this.onKeyboardHeightChange);
+      if (this.onWindowStatusChange) mainWindow.off('windowStatusChange', this.onWindowStatusChange);
+    } catch { /* Ignore listener cleanup errors during teardown. */ }
+    this.onWindowSizeChange = undefined;
+    this.onAvoidAreaChange = undefined;
+    this.onKeyboardHeightChange = undefined;
+    this.onWindowStatusChange = undefined;
   }
 
   private trackAvoidAreas(mainWindow: window.Window): void {
@@ -67,12 +142,22 @@ export default class EntryAbility extends UIAbility {
       this.appState.windowWidth = ui.px2vp(Math.max(0, rect.width - left - right));
       this.appState.windowHeight = ui.px2vp(rect.height);
     };
+    const handleAvoidArea = (info: window.AvoidAreaOptions): void => {
+      if (info.type === window.AvoidAreaType.TYPE_KEYBOARD) return;
+      update();
+    };
+    const handleKeyboard = (height: number): void => {
+      const next = mainWindow.getUIContext().px2vp(height);
+      if (Math.abs(this.appState.keyboardHeight - next) < 1) return;
+      this.appState.keyboardHeight = next;
+    };
+    this.onWindowSizeChange = update;
+    this.onAvoidAreaChange = handleAvoidArea;
+    this.onKeyboardHeightChange = handleKeyboard;
     update();
-    mainWindow.on('windowSizeChange', () => { update(); });
-    mainWindow.on('avoidAreaChange', () => { update(); });
-    mainWindow.on('keyboardHeightChange', (height: number) => {
-      this.appState.keyboardHeight = mainWindow.getUIContext().px2vp(height);
-    });
+    mainWindow.on('windowSizeChange', update);
+    mainWindow.on('avoidAreaChange', handleAvoidArea);
+    mainWindow.on('keyboardHeightChange', handleKeyboard);
   }
 
   private async receiveShare(want: Want): Promise<void> {

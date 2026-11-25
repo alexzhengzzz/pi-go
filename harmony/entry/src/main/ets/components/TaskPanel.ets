@@ -34,7 +34,7 @@ export struct TaskPanel {
   @Event scheduleJobMenu: (job: ScheduleJob) => MenuElement[] = unboundAction;
   @Param @Require scheduleJobs: ScheduleJob[];
   @Param @Require scheduleListError: string;
-  @Param @Require scheduleLoading: boolean;
+  @Param @Require scheduleLoaded: boolean;
   @Param @Require schedulePage: string;
   @Event $schedulePage: (value: string) => void = unboundAction;
   @Param @Require scheduleSaving: boolean;
@@ -115,22 +115,21 @@ export struct TaskPanel {
           SymbolGlyph($r('sys.symbol.arrow_clockwise')).fontSize(17).fontColor([$r('app.color.pigo_muted')])
         }.id('schedule-refresh').width(36).height(36).padding(0).borderRadius(10)
           .backgroundColor($r('app.color.pigo_control')).accessibilityText('刷新定时任务')
-          .enabled(!this.scheduleSaving && !this.scheduleLoading)
+          .enabled(!this.scheduleSaving)
           .onClick(() => { void this.loadScheduleJobs(); })
       }.width('100%')
       Row({ space: 8 }) {
         Button('新建定时任务').chatAction().id('schedule-create').height(42)
           .backgroundColor(this.accent).fontColor(this.accentForeground)
-          .enabled(this.reachable && this.projects.length > 0 && !this.scheduleLoading &&
+          .enabled(this.reachable && this.projects.length > 0 &&
             !this.scheduleSaving && !this.scheduleListError).onClick(() => { this.editSchedule(); })
         Button('运行历史').chatAction().id('schedule-history').height(42)
           .onClick(() => { this.$scheduleError(''); this.$schedulePage('history'); })
       }.width('100%')
-      if (this.scheduleLoading) Text('正在读取电脑上的计划…').fontSize(14).fontColor($r('app.color.pigo_muted'))
       if (this.scheduleListError) Text(this.scheduleListError).fontSize(14).fontColor($r('app.color.pigo_error'))
       else if (!this.reachable && this.scheduleJobs.length) {
         Text('显示上次连接时的定时计划').fontSize(13).fontColor($r('app.color.pigo_muted'))
-      } else if (this.reachable && !this.scheduleLoading && !this.scheduleJobs.length) {
+      } else if (this.reachable && this.scheduleLoaded && !this.scheduleJobs.length) {
         Text(this.projects.length ? '还没有定时任务' : '共享工作区后可创建定时任务').fontSize(14).fontColor($r('app.color.pigo_muted'))
       }
       ForEach(this.scheduleJobs, (job: ScheduleJob) => {
@@ -145,7 +144,7 @@ export struct TaskPanel {
             Image($r('app.media.ic_more')).width(18).height(18).fillColor($r('app.color.pigo_muted'))
           }.id(`schedule-operations-${job.id}`).width(40).height(40).padding(0).borderRadius(10)
             .backgroundColor(Color.Transparent).accessibilityText('定时任务操作')
-            .enabled(this.reachable && !this.scheduleSaving && !this.scheduleLoading).bindMenu(this.scheduleJobMenu(job))
+            .enabled(this.reachable && !this.scheduleSaving).bindMenu(this.scheduleJobMenu(job))
         }.width('100%').padding({ left: 14, right: 6, top: 12, bottom: 12 })
           .attributeModifier(glassCardSurface(this.darkMode, 16))
       }, (job: ScheduleJob) => `${job.id}:${job.version}:${job.nextAt}`)

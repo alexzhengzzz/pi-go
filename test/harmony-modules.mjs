@@ -52,6 +52,14 @@ const systemMocks = new Map([
   };`],
   ['@kit.ArkUI', `export const window = {
     Orientation: { LANDSCAPE: 2 },
+    WindowStatusType: {
+      UNDEFINED: 0,
+      FULL_SCREEN: 1,
+      MAXIMIZE: 2,
+      MINIMIZE: 3,
+      FLOATING: 4,
+      SPLIT_SCREEN: 5
+    },
     getLastWindow: (context) => globalThis.pigoTestLastWindow(context)
   };`],
   ['@kit.PreviewKit', `export const filePreview = {
@@ -67,7 +75,9 @@ const systemMocks = new Map([
       return typeof member === 'function' ? member.bind(api) : member;
     }
   });`],
-  ['@kit.FormKit', 'export const formBindingData = {}; export const formProvider = {};'],
+  ['@kit.FormKit', `export const formBindingData = {};
+  export const formProvider = {};
+  export const formInfo = { FormParam: { IDENTITY_KEY: 'ohos.extra.param.key.form_identity' } };`],
   ['@kit.ImageKit', 'export const image = {};'],
   ['@kit.MediaLibraryKit', 'export const photoAccessHelper = {};'],
   ['@kit.CameraKit', 'export const camera = {}; export const cameraPicker = {};'],

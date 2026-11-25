@@ -49,6 +49,12 @@ export class LiveActivityController {
     this.statusCallback = statusCallback;
   }
 
+  detach(context: common.UIAbilityContext): void {
+    if (this.context !== context) return;
+    this.context = undefined;
+    this.statusCallback = undefined;
+  }
+
   sync(snapshot?: LiveActivitySnapshot): void {
     const revision = ++this.revision;
     this.work = this.work.then(async (): Promise<void> => {

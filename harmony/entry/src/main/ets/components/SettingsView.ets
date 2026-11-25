@@ -1,7 +1,8 @@
 import { glassCardSurface, themedCardSurface } from '../Immersive';
 import { SakuraPetals } from './SakuraPetals';
-import { ArtThemeScene } from './ArtThemeScene';
+import { DeepSeaScene } from './DeepSeaScene';
 import { InkScene } from './InkScene';
+import { SaharaScene } from './SaharaScene';
 import { SunsetScene } from './SunsetScene';
 import { unboundAction } from './ComponentAction';
 import { Companion } from '../CredentialVault';
@@ -453,6 +454,20 @@ export struct SettingsView {
             SunsetScene({ darkMode: this.darkMode, compact: true })
           } else {
             Image($rawfile(this.darkMode ? 'sunset_dark.jpg' : 'sunset_light.jpg'))
+              .width('100%').height('100%').objectFit(ImageFit.Cover).opacity(this.darkMode ? 0.78 : 0.85)
+          }
+        } else if (this.themeId === 'jellyfish') {
+          if (this.themeMotionEnabled) {
+            DeepSeaScene({ darkMode: this.darkMode, compact: true })
+          } else {
+            Image($rawfile(this.darkMode ? 'jellyfish_dark.jpg' : 'jellyfish_light.jpg'))
+              .width('100%').height('100%').objectFit(ImageFit.Cover).opacity(this.darkMode ? 0.78 : 0.85)
+          }
+        } else if (this.themeId === 'sahara') {
+          if (this.themeMotionEnabled) {
+            SaharaScene({ darkMode: this.darkMode, compact: true })
+          } else {
+            Image($rawfile(this.darkMode ? 'sahara_dark.jpg' : 'sahara_light.jpg'))
               .width('100%').height('100%').objectFit(ImageFit.Cover).opacity(this.darkMode ? 0.78 : 0.85)
           }
         } else {

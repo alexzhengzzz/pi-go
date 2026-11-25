@@ -5,7 +5,7 @@ import type { ChatState } from './ChatState';
 import type { ConnectionManager } from './ConnectionManager';
 import type { PiGoClient } from './PiGoClient';
 import { BridgeFailure } from './PiGoTypes';
-import type { BridgeEndpoint, BridgeReply, ChatMessage, DraftAttachment, LiveTool, ModelOption, Payload, PendingInteraction, PendingSend,
+import type { BridgeEndpoint, BridgeReply, ChatMessage, DraftAttachment, LiveTool, ModelOption, OptimisticMessage, Payload, PendingInteraction, PendingSend,
   QueuedSteering, SessionState, StreamFrame } from './PiGoTypes';
 
 export interface StreamSyncHost {
@@ -86,6 +86,7 @@ export class SessionViewState {
   liveRevision: number = 0;
   @Trace pendingSend?: PendingSend = undefined;
   @Trace queuedSteering: QueuedSteering[] = [];
+  @Trace optimisticMessages: OptimisticMessage[] = [];
   @Trace transcriptFollow: boolean = true;
   liveViewSessionKey: string = '';
   liveViewRunId: string = '';
@@ -121,6 +122,12 @@ export class StreamSyncController {
 
   draftKey(id: string): string {
     return `${this.host.base()}|${id}`;
+  }
+
+  private hasPendingOptimistic(): boolean {
+    if (!this.session.currentId || !this.session.optimisticMessages.length) return false;
+    const key = this.draftKey(this.session.currentId);
+    return this.session.optimisticMessages.some((item: OptimisticMessage): boolean => item.sessionKey === key && !item.sending);
   }
 
   rememberDraft(id: string): void {
@@ -382,6 +389,7 @@ export class StreamSyncController {
         this.session.liveThinkingOpen = false;
         this.session.liveTools = [];
         this.session.liveSeq = 0;
+        if (this.hasPendingOptimistic()) this.schedule(150);
       }
       this.syncLiveActivity();
       return;
@@ -528,6 +536,7 @@ export class StreamSyncController {
         this.syncLiveActivity();
         const delay = !this.session.reachable ? 1500 :
           this.session.syncMode === 'sequenced' && this.host.chatState().sync.needsSnapshot() ? 150 :
+          this.hasPendingOptimistic() ? 500 :
           this.streamAlive ? (this.session.syncMode === 'sequenced' ? (this.session.idle ? 20000 : 6000) : (this.session.idle ? 3000 : 1200)) :
           this.session.idle ? 1500 : 650;
         this.schedule(delay);

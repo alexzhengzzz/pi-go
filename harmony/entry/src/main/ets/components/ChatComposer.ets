@@ -121,7 +121,7 @@ export struct ChatComposer {
           .id('draft').width('100%').constraintSize({ minHeight: 42, maxHeight: 108 }).onFocus(() => { this.armTranscriptFollow(); })
           .fontSize(16).fontColor($r('app.color.pigo_text')).placeholderColor($r('app.color.pigo_muted')).backgroundColor(Color.Transparent)
           .padding({ left: 6, right: 6, top: 8, bottom: 8 })
-          .enabled(!this.hasPendingSend).onChange((value: string) => { this.$draft(value); this.syncCommandPalette(); })
+          .enabled(!(this.hasPendingSend && !this.busy)).onChange((value: string) => { this.$draft(value); this.syncCommandPalette(); })
       }
       Row({ space: 6 }) {
         Button({ type: ButtonType.Normal }) {

@@ -1,7 +1,8 @@
 import { unboundAction } from './ComponentAction';
 import { ThemePalette, themePalette } from '../Appearance';
-import { ArtThemeScene } from './ArtThemeScene';
+import { DeepSeaScene } from './DeepSeaScene';
 import { InkScene } from './InkScene';
+import { SaharaScene } from './SaharaScene';
 import { SakuraScene } from './SakuraPetals';
 import { SunsetScene } from './SunsetScene';
 
@@ -28,7 +29,6 @@ export struct ThemeBackdrop {
   private staticThemeWallpaper(): Resource {
     if (this.themeId === 'graphite') return $rawfile(this.darkMode ? 'ink_dark.jpg' : 'ink_light.jpg');
     if (this.themeId === 'sunset') return $rawfile(this.darkMode ? 'sunset_dark.jpg' : 'sunset_light.jpg');
-    if (this.themeId === 'bookstore') return $rawfile(this.darkMode ? 'bookstore_dark.jpg' : 'bookstore_light.jpg');
     if (this.themeId === 'jellyfish') return $rawfile(this.darkMode ? 'jellyfish_dark.jpg' : 'jellyfish_light.jpg');
     if (this.themeId === 'sahara') return $rawfile(this.darkMode ? 'sahara_dark.jpg' : 'sahara_light.jpg');
     return $rawfile(this.darkMode ? 'sakura_dark.jpg' : 'sakura_light.jpg');
@@ -66,27 +66,6 @@ export struct ThemeBackdrop {
           .opacity(this.dimmed
             ? (this.darkMode ? 0.56 : 0.60)
             : (this.darkMode ? 0.90 : 0.94))
-        if (this.dimmed) {
-          Column()
-            .width('100%').height('100%')
-            .linearGradient({ angle: 90, colors: this.themeVeilStops() })
-        }
-      } else if (this.themeId === 'sakura') {
-        SakuraScene({
-          darkMode: this.darkMode,
-          dimmed: this.dimmed,
-          active: this.visible,
-          girlTapSeq: this.girlTapSeq,
-          celebrateSeq: this.celebrateSeq,
-          burstSeq: this.burstSeq,
-          burstKind: this.burstKind,
-          bloomSeq: this.bloomSeq,
-          bloomX: this.bloomX,
-          bloomY: this.bloomY,
-          sceneOpacity: this.dimmed
-            ? (this.darkMode ? 0.56 : 0.60)
-            : (this.darkMode ? 0.88 : 0.92)
-        })
         if (this.dimmed) {
           Column()
             .width('100%').height('100%')
@@ -130,9 +109,27 @@ export struct ThemeBackdrop {
             .width('100%').height('100%')
             .linearGradient({ angle: 90, colors: this.themeVeilStops() })
         }
-      } else {
-        ArtThemeScene({
-          themeId: this.themeId,
+      } else if (this.themeId === 'jellyfish') {
+        DeepSeaScene({
+          darkMode: this.darkMode,
+          dimmed: this.dimmed,
+          active: this.visible,
+          burstSeq: this.burstSeq,
+          burstKind: this.burstKind,
+          tapSeq: this.bloomSeq,
+          tapX: this.bloomX,
+          tapY: this.bloomY,
+          sceneOpacity: this.dimmed
+            ? (this.darkMode ? 0.62 : 0.66)
+            : (this.darkMode ? 0.94 : 0.96)
+        })
+        if (this.dimmed) {
+          Column()
+            .width('100%').height('100%')
+            .linearGradient({ angle: 90, colors: this.themeVeilStops() })
+        }
+      } else if (this.themeId === 'sahara') {
+        SaharaScene({
           darkMode: this.darkMode,
           dimmed: this.dimmed,
           active: this.visible,
@@ -143,7 +140,28 @@ export struct ThemeBackdrop {
           tapY: this.bloomY,
           sceneOpacity: this.dimmed
             ? (this.darkMode ? 0.56 : 0.60)
-            : (this.darkMode ? 0.90 : 0.94)
+            : (this.darkMode ? 0.92 : 0.95)
+        })
+        if (this.dimmed) {
+          Column()
+            .width('100%').height('100%')
+            .linearGradient({ angle: 90, colors: this.themeVeilStops() })
+        }
+      } else {
+        SakuraScene({
+          darkMode: this.darkMode,
+          dimmed: this.dimmed,
+          active: this.visible,
+          girlTapSeq: this.girlTapSeq,
+          celebrateSeq: this.celebrateSeq,
+          burstSeq: this.burstSeq,
+          burstKind: this.burstKind,
+          bloomSeq: this.bloomSeq,
+          bloomX: this.bloomX,
+          bloomY: this.bloomY,
+          sceneOpacity: this.dimmed
+            ? (this.darkMode ? 0.56 : 0.60)
+            : (this.darkMode ? 0.88 : 0.92)
         })
         if (this.dimmed) {
           Column()

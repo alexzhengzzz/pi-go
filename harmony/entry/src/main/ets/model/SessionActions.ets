@@ -3,7 +3,7 @@ import { util } from '@kit.ArkTS';
 import type { ChatState } from './ChatState';
 import type { SessionViewState, StreamSyncController } from './StreamSyncController';
 import { BridgeFailure } from './PiGoTypes';
-import type { AttachmentRef, BridgeReply, DraftAttachment, ModelOption, Payload, PendingInteraction, PendingSend,
+import type { AttachmentRef, BridgeReply, DraftAttachment, ModelOption, OptimisticMessage, Payload, PendingInteraction, PendingSend,
   QueuedSteering, SessionState, UploadedAttachment } from './PiGoTypes';
 
 export interface SessionActionsHost {
@@ -151,12 +151,23 @@ export class SessionActions {
     let navigationConfirmed = false;
     let refreshSpace = '';
     try {
+      let requestPath = path;
       let payload = input;
       if (path === '/open' && this.session.syncMode !== 'legacy') {
+        requestPath = '/session/open';
         payload = { id: input?.id, history: true };
         if (input?.agent) payload.agent = input.agent;
       }
-      const result = await this.host.request(path, payload);
+      let result: BridgeReply;
+      try {
+        result = await this.host.request(requestPath, payload);
+      } catch (error) {
+        if (requestPath === '/session/open' && error instanceof BridgeFailure && error.status === 404) {
+          result = await this.host.request('/open', payload);
+        } else {
+          throw error as Error;
+        }
+      }
       if (epoch !== this.session.epoch) return false;
       if (path === '/new') {
         if (!result.session) throw new BridgeFailure(409, 'desktop_handoff_unconfirmed');
@@ -198,6 +209,8 @@ export class SessionActions {
     const liveRevision = this.session.liveRevision;
     let chat = result;
     if (!chat.cursor || chat.messages === undefined) {
+      this.session.currentId = expected.id;
+      this.session.workspaceCwd = expected.cwd;
       chat = await this.streamSync.requestSessionSnapshot(epoch, true);
     } else if (this.session.syncMode === 'probe') {
       this.session.syncMode = 'sequenced';
@@ -328,12 +341,47 @@ export class SessionActions {
     if (this.host.chatState().unconfirmed.size >= 128) { this.session.status = '请先核对未确认的发送。'; return; }
     const epoch = this.session.epoch;
     const key = this.streamSync.draftKey(id);
+    const afterId = this.session.messages[this.session.messages.length - 1]?.id ?? '';
     const pending: PendingSend = { requestId: util.generateRandomUUID(), text: text, attachments: attachments,
-      steeringAfter: mode === 'steer' && !text.startsWith('/') ? (this.session.messages[this.session.messages.length - 1]?.id ?? '') : undefined };
+      steeringAfter: mode === 'steer' && !text.startsWith('/') ? afterId : undefined };
     this.host.chatState().unconfirmed.set(key, pending);
     this.session.pendingSend = pending;
     this.session.busy = true;
     this.session.status = '';
+    if (!text.startsWith('/')) {
+      const imageCount = attachments.filter((item: DraftAttachment): boolean => item.kind === 'image').length;
+      const files = attachments.filter((item: DraftAttachment): boolean => item.kind === 'file')
+        .map((item: DraftAttachment): string => item.name);
+      if (mode === 'send') {
+        const optimistic: OptimisticMessage = {
+          id: pending.requestId,
+          sessionKey: key,
+          afterId: afterId,
+          text: text,
+          imageCount: imageCount,
+          files: files,
+          sending: true
+        };
+        this.session.optimisticMessages = this.session.optimisticMessages.concat([optimistic]).slice(-32);
+      } else {
+        const queued: QueuedSteering = {
+          id: pending.requestId,
+          sessionKey: key,
+          afterId: afterId,
+          text: text,
+          imageCount: imageCount,
+          files: files
+        };
+        this.session.liveRevision += 1;
+        this.session.queuedSteering = this.session.queuedSteering.concat([queued]).slice(-128);
+      }
+    }
+    this.session.draft = '';
+    this.session.attachments = [];
+    this.streamSync.rememberDraft(id);
+    this.host.syncCommandPalette();
+    this.session.transcriptFollow = true;
+    this.session.pendingBottom = true;
     this.host.animateSend();
     try {
       const refs: AttachmentRef[] = [];
@@ -356,15 +404,31 @@ export class SessionActions {
       if (result.dispatched !== true) throw new Error('dispatch_unconfirmed');
       this.finishSend(key, pending);
       if (mode === 'send') {
-        if (result.handled === true) this.streamSync.cancelOptimisticLiveRun();
-        else this.streamSync.trackDispatchedLiveRun(liveRevision);
+        if (result.handled === true) {
+          this.removeOptimistic(pending.requestId);
+          this.streamSync.cancelOptimisticLiveRun();
+        } else this.streamSync.trackDispatchedLiveRun(liveRevision);
       } else {
         this.session.status = '引导请求已交给 Pi。';
         this.streamSync.trackDispatchedLiveRun(liveRevision);
       }
     } catch (error) {
+      this.removeOptimistic(pending.requestId);
+      if (mode === 'steer') {
+        this.session.queuedSteering = this.session.queuedSteering.filter((item: QueuedSteering): boolean => item.id !== pending.requestId);
+      }
       if (mode === 'send') this.streamSync.cancelOptimisticLiveRun();
       if (epoch !== this.session.epoch) return;
+      if (this.session.currentId === id) {
+        if (!this.session.draft.trim() && pending.text) {
+          this.session.draft = pending.text;
+          this.streamSync.rememberDraft(id);
+        }
+        if (!this.session.attachments.length && pending.attachments.length) {
+          this.session.attachments = pending.attachments;
+        }
+        this.host.syncCommandPalette();
+      }
       if (error instanceof BridgeFailure && error.status === 401) this.host.leaveComputer(true);
       else if (error instanceof BridgeFailure && ['session_busy', 'session_not_streaming', 'session_changed',
         'session_occupied', 'invalid_prompt', 'invalid_request_id', 'probe_request_limit', 'invalid_image', 'image_not_supported', 'payload_too_large',
@@ -451,13 +515,27 @@ export class SessionActions {
     }
     if (key !== this.streamSync.draftKey(this.session.currentId)) return;
     if (pending.steeringAfter !== undefined) {
-      const message: QueuedSteering = { id: pending.requestId, sessionKey: key, afterId: pending.steeringAfter, text: pending.text,
-        imageCount: pending.attachments.filter((item: DraftAttachment): boolean => item.kind === 'image').length,
-        files: pending.attachments.filter((item: DraftAttachment): boolean => item.kind === 'file')
-          .map((item: DraftAttachment): string => item.name) };
-      this.session.liveRevision += 1;
-      this.session.queuedSteering = this.session.queuedSteering.concat([message]).slice(-128);
+      if (!this.session.queuedSteering.some((item: QueuedSteering): boolean => item.id === pending.requestId)) {
+        const message: QueuedSteering = { id: pending.requestId, sessionKey: key, afterId: pending.steeringAfter, text: pending.text,
+          imageCount: pending.attachments.filter((item: DraftAttachment): boolean => item.kind === 'image').length,
+          files: pending.attachments.filter((item: DraftAttachment): boolean => item.kind === 'file')
+            .map((item: DraftAttachment): string => item.name) };
+        this.session.liveRevision += 1;
+        this.session.queuedSteering = this.session.queuedSteering.concat([message]).slice(-128);
+      }
       this.reconcileSteering(this.session.idle);
+    } else if (this.session.optimisticMessages.some((item: OptimisticMessage): boolean => item.id === pending.requestId && item.sending)) {
+      this.session.optimisticMessages = this.session.optimisticMessages.map((item: OptimisticMessage): OptimisticMessage =>
+        item.id === pending.requestId ? {
+          id: item.id,
+          sessionKey: item.sessionKey,
+          afterId: item.afterId,
+          text: item.text,
+          imageCount: item.imageCount,
+          files: item.files,
+          sending: false
+        } : item);
+      this.reconcileSteering(false);
     }
     this.session.pendingSend = undefined;
     // 自己刚发出的消息必须立刻滚到可见位置，即使之前在翻历史。
@@ -468,10 +546,18 @@ export class SessionActions {
     this.host.syncCommandPalette();
   }
 
+  private removeOptimistic(requestId: string): void {
+    if (!this.session.optimisticMessages.some((item: OptimisticMessage): boolean => item.id === requestId)) return;
+    this.session.optimisticMessages = this.session.optimisticMessages.filter((item: OptimisticMessage): boolean => item.id !== requestId);
+  }
+
   reconcileSteering(settled: boolean): void {
-    const remaining = this.host.chatState().reconcileSteering(this.session.queuedSteering, this.session.messages, this.streamSync.draftKey(this.session.currentId),
+    const key = this.streamSync.draftKey(this.session.currentId);
+    const remaining = this.host.chatState().reconcileSteering(this.session.queuedSteering, this.session.messages, key,
       settled, this.session.pendingSend);
     if (remaining !== this.session.queuedSteering) this.session.queuedSteering = remaining;
+    const optimistic = this.host.chatState().reconcileOptimistic(this.session.optimisticMessages, this.session.messages, key, settled);
+    if (optimistic !== this.session.optimisticMessages) this.session.optimisticMessages = optimistic;
   }
 
   async checkSend(): Promise<void> {

@@ -2,6 +2,7 @@
   "module": {
     "name": "entry",
     "type": "entry",
+    "srcEntry": "./ets/MyAbilityStage.ets",
     "mainElement": "EntryAbility",
     "deviceTypes": ["phone", "tablet"],
     "deliveryWithInstall": true,
@@ -26,7 +27,7 @@
     "abilities": [{
       "name": "EntryAbility",
       "srcEntry": "./ets/EntryAbility.ets",
-      "launchType": "singleton",
+      "launchType": "specified",
       "supportWindowMode": ["fullscreen", "split", "floating"],
       "label": "$string:app_name",
       "icon": "$media:pigo",
