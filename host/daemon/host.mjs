@@ -4,18 +4,14 @@
 import { execFile } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
-import { existsSync } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
+import { homedir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { lstat, mkdir, realpath, rmdir, stat } from 'node:fs/promises';
 import { promisify } from 'node:util';
 import { ipcDirectory, localRequest, pairingRuntimes, workers } from '../bridge/local-ipc.mjs';
 import { registerSocket } from '../bridge/socket-registry.mjs';
 import { computerSessions, invalidateComputerSessions } from '../bridge/computer-sessions.mjs';
-import { listSessions, findSession, invalidateSessionCatalog } from './catalog.mjs';
-import { listCodexSessions, findCodexSession, invalidateCodexCatalog } from '../agents/codex/catalog.mjs';
-import { listAgySessions, findAgySession, invalidateAgyCatalog } from '../agents/agy/catalog.mjs';
-import { currentAgents, normalizeAgent } from '../agents/registry.mjs';
+import { currentAgents, invalidateAllAgentCatalogs, listAgentProviders, normalizeAgent } from '../agents/registry.mjs';
 
 const sessionIdPattern = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
 const timingEnabled = process.env.PIGO_TIMING === '1';
@@ -184,7 +180,9 @@ export function createDaemonHost({ registry, runtimes, schedules, profile = daem
       const input = await readInput(request);
       if (request.url === '/schedules/sync') {
         if (!schedules || schedules.closing) return reply(response, 404, { error: 'schedules_unsupported' });
-        return reply(response, 200, schedules.snapshot(input.paths, input.includeJobs, input.knownRuns));
+        const paths = Array.isArray(input.paths) ? input.paths.filter((p) => typeof p === 'string') : [];
+        const knownRuns = Array.isArray(input.knownRuns) ? input.knownRuns.filter((id) => typeof id === 'string') : [];
+        return reply(response, 200, schedules.snapshot(paths, input.includeJobs === true, knownRuns));
       }
       if (request.url === '/schedules/update') {
         if (!schedules || schedules.closing) return reply(response, 404, { error: 'schedules_unsupported' });
@@ -284,7 +282,7 @@ export function createDaemonHost({ registry, runtimes, schedules, profile = daem
         }
         const cwd = await realpath(input.cwd).catch(() => undefined);
         const deleted = cwd !== undefined && deletedSessions.get(input.id) === cwd &&
-          !await findSession(cwd, input.id) && !await findCodexSession(cwd, input.id) && !await findAgySession(cwd, input.id);
+          (await Promise.all(listAgentProviders().map((provider) => provider.findSession(cwd, input.id)))).every((found) => !found);
         return reply(response, 200, { deleted });
       }
       if (request.url === '/delete-session') {
@@ -294,12 +292,13 @@ export function createDaemonHost({ registry, runtimes, schedules, profile = daem
         const cwd = await realpath(input.cwd).catch(() => undefined);
         const requestedAgent = input.agent !== undefined ? normalizeAgent(input.agent) : undefined;
         if (input.agent !== undefined && !requestedAgent) return reply(response, 400, { error: 'invalid_target' });
-        const piMatch = (!requestedAgent || requestedAgent === 'pi') && cwd ? await findSession(cwd, input.id) : undefined;
-        const codexMatch = !piMatch && (!requestedAgent || requestedAgent === 'codex') && cwd
-          ? await findCodexSession(cwd, input.id) : undefined;
-        const agyMatch = !piMatch && !codexMatch && (!requestedAgent || requestedAgent === 'agy') && cwd
-          ? await findAgySession(cwd, input.id) : undefined;
-        const session = piMatch ? { ...piMatch, agent: 'pi' } : codexMatch ?? agyMatch;
+        let session;
+        if (cwd) {
+          for (const provider of listAgentProviders(requestedAgent)) {
+            const found = await provider.findSession(cwd, input.id);
+            if (found) { session = found; break; }
+          }
+        }
         if (!session) return reply(response, 404, { error: 'desktop_session_not_found' });
         const before = await lstat(session.path);
         const managed = runtimes.list();
@@ -320,10 +319,8 @@ export function createDaemonHost({ registry, runtimes, schedules, profile = daem
         deletedSessions.delete(input.id);
         deletedSessions.set(input.id, cwd);
         if (deletedSessions.size > 128) deletedSessions.delete(deletedSessions.keys().next().value);
-        invalidateSessionCatalog();
+        invalidateAllAgentCatalogs();
         invalidateComputerSessions();
-        invalidateCodexCatalog();
-        invalidateAgyCatalog();
         revision = randomUUID();
         return reply(response, 200, { deleted: true });
       }
@@ -386,17 +383,9 @@ export function createDaemonHost({ registry, runtimes, schedules, profile = daem
       let session;
       if (opening && cwd) {
         const tFind = performance.now();
-        if (!requestedAgent || requestedAgent === 'pi') {
-          const found = await findSession(cwd, input.id);
-          if (found) session = { ...found, agent: 'pi' };
-        }
-        if (!session && (!requestedAgent || requestedAgent === 'codex')) {
-          const found = await findCodexSession(cwd, input.id);
-          if (found) session = found;
-        }
-        if (!session && (!requestedAgent || requestedAgent === 'agy')) {
-          const found = await findAgySession(cwd, input.id);
-          if (found) session = found;
+        for (const provider of listAgentProviders(requestedAgent)) {
+          const found = await provider.findSession(cwd, input.id);
+          if (found) { session = found; break; }
         }
         logTiming('open.findSession', tFind, `agent=${session?.agent ?? 'none'}`);
       }
@@ -413,16 +402,8 @@ export function createDaemonHost({ registry, runtimes, schedules, profile = daem
             .map(({ id, agent, name, modified }) => ({ id, agent, name, modified }));
           return reply(response, 200, { sessions });
         }
-        const [piList, codexList, agyList] = await Promise.all([
-          listSessions(cwd, refresh),
-          listCodexSessions(cwd, refresh).catch(() => []),
-          listAgySessions(cwd, refresh).catch(() => []),
-        ]);
-        const sessions = [
-          ...piList.map(({ id, name, modified }) => ({ agent: 'pi', id, name, modified })),
-          ...codexList.map(({ id, name, modified }) => ({ agent: 'codex', id, name, modified })),
-          ...agyList.map(({ id, name, modified }) => ({ agent: 'agy', id, name, modified })),
-        ].sort((a, b) => (b.modified ?? '').localeCompare(a.modified ?? ''));
+        const lists = await Promise.all(listAgentProviders().map((provider) => provider.listSessions(cwd, refresh)));
+        const sessions = lists.flat().sort((a, b) => (b.modified ?? '').localeCompare(a.modified ?? ''));
         return reply(response, 200, { sessions });
       }
       if (request.url === '/authorize') return reply(response, 200, { cwd, profile });

@@ -2,7 +2,7 @@
 // registration and stops its managed Pi runtimes while preserving its files.
 import { createHash, randomBytes } from 'node:crypto';
 import { closeSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 
 const workspaceId = (path) => createHash('sha256').update(path).digest('hex').slice(0, 16);
 

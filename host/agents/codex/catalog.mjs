@@ -6,7 +6,7 @@
 //
 // Every returned row carries `agent: 'codex'`.
 import { createReadStream } from 'node:fs';
-import { readdir, readFile, realpath, stat, unlink } from 'node:fs/promises';
+import { readdir, readFile, realpath, stat } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';

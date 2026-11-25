@@ -1,5 +1,6 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { closeSync, fsyncSync, openSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { normalizeAgent } from '../agents/registry.mjs';
 
 const minute = 60_000;
 const day = 24 * 60 * minute;
@@ -47,9 +48,7 @@ function coalescedOccurrences(job, latest) {
 
 function scheduleFields(input, now) {
   const { kind, time, interval, at, catchUp } = input;
-  const agent = input.agent === undefined || input.agent === 'pi' ? 'pi'
-    : input.agent === 'codex' ? 'codex'
-      : input.agent === 'agy' ? 'agy' : undefined;
+  const agent = normalizeAgent(input.agent);
   const name = typeof input.name === 'string' ? input.name.trim() : '';
   const prompt = typeof input.prompt === 'string' ? input.prompt.trim() : '';
   if (!agent || !name || name.length > 80 || !prompt || prompt.length > 1600 || prompt.startsWith('/') ||

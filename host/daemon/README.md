@@ -1,11 +1,11 @@
 # Pi Go daemon
 
-Pi Go 的常驻宿主。它启动并管理 Pi CLI RPC 会话，供手机打开历史、新建会话、管理工作区和应答扩展交互。
+Pi Go 的常驻宿主。它通过统一的 `AgentProvider` 注册表启动并管理 Pi CLI（RPC）、Codex CLI（`codex app-server`）和 Antigravity（`agy acp`）会话，供手机打开历史、新建会话、管理工作区和应答扩展交互。
 
 ```
-鸿蒙手机 ──HTTP(S)/SSE── broker.mjs ── worker socket ── Pi Go 扩展
-                             │                           （运行在 Pi CLI 会话中）
-                             └── host socket ── daemon ── pi --mode rpc
+鸿蒙手机 ──HTTP(S)/SSE── broker.mjs ── w-*.sock ── Pi 扩展 (phase0.ts)
+                             │                  └── agent-worker.mjs (Codex / AGY)
+                             └── host-*.sock ── daemon ── AgentRegistry / RuntimePool
 ```
 
 - `daemon.mjs` 提供常驻入口，由 launchd 或终端启动。收到 SIGTERM 时停止托管会话。
@@ -40,7 +40,12 @@ Pi Go 的常驻宿主。它启动并管理 Pi CLI RPC 会话，供手机打开�
 | `PIGO_STATE_DIR` | `<ipc>/state` 或 `~/.pi-go` | 注册表等持久化状态 |
 | `PI_CODING_AGENT_DIR` | `~/.pi/agent` | Pi 会话存储与会话历史来源 |
 | `PIGO_PI_BIN` | `pi` | pi 可执行文件 |
-| `PIGO_PI_ARGS` | `[]` | JSON 字符串数组，追加到每个 RPC 子进程的启动参数 |
+| `PIGO_PI_ARGS` | `[]` | JSON 字符串数组，追加到每个 Pi RPC 子进程的启动参数 |
+| `PIGO_CODEX_BIN` / `PIGO_CODEX_ARGS` | `codex` / `[]` | Codex CLI 路径与额外参数 |
+| `PIGO_CODEX_PERMISSION` | `bypass` | Codex 权限策略（`bypass` 或 `ask`） |
+| `PIGO_AGY_BIN` / `PIGO_AGY_ARGS` | `agy` / `[]` | Antigravity CLI 路径与额外参数 |
+| `PIGO_AGY_PERMISSION` | `bypass` | Antigravity 权限策略（`bypass` 或 `ask`） |
+| `PIGO_PUSH_ACCOUNT_FILE` | — | 华为后台推送服务账号 JSON 路径 |
 
 ## Pi CLI 配置与共享会话
 
