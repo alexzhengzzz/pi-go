@@ -11,7 +11,7 @@ import { SakuraGirlHitZone, ThemeBackdrop } from '../components/ThemeBackdrop';
 import { MarkdownTableReaderPage, TextFilePreviewPage, WorkspaceFileEditor } from '../components/FilePreviewPages';
 import { OfflineNotice, RunCompletionBanner, RunningSessionPill, RunningSessionStrip, ScheduledRunBanner,
   SessionSettings } from '../components/SessionOverlays';
-import { AppUiState, windowAppUiState } from '../AppUiState';
+import { AppUiState, appUiState, windowAppUiState } from '../AppUiState';
 import { entryInstances } from '../EntryInstanceRegistry';
 import { CommandList, CommandState, commandDraft, skillDraft } from '../model/CommandState';
 import { ConnectionManager, PairingRequest } from '../model/ConnectionManager';
@@ -818,7 +818,8 @@ struct Index {
       observeRun: (id: string, title: string, active: boolean, stopped: boolean = false): void =>
         this.runCenter.observeRun(id, title, active, stopped),
       requestPermissionAfterDispatch: (): void => this.runCenter.requestPermissionAfterDispatch(),
-      publishLiveActivity: (snapshot?: LiveActivitySnapshot): void => liveActivity.sync(snapshot)
+      publishLiveActivity: (snapshot?: LiveActivitySnapshot): void =>
+        liveActivity.sync(snapshot, this.getUIContext?.()?.getHostContext?.() as common.UIAbilityContext | undefined)
     };
   }
 
@@ -2100,6 +2101,7 @@ struct Index {
       this.settings = settings;
       this.runCenter.restoreSettings(settings);
       this.themeId = themeStyle(settings.getSync('theme_style', 'sakura') as string).id;
+      appUiState().themeId = this.themeId;
       this.themeMotionEnabled = settings.getSync(THEME_MOTION_SETTING, true) !== false;
       this.modeId = appearanceMode(settings.getSync('appearance_mode', 'system') as string).id;
       this.liveViewsEnabled = settings.getSync(LIVE_VIEW_SETTING, true) !== false;
@@ -2159,6 +2161,7 @@ struct Index {
       applyTheme: (theme: string): void => {
         if (theme === this.themeId) return;
         this.themeId = theme;
+        appUiState().themeId = theme;
         void this.saveSetting(SYNC_THEME, theme).catch(() => { this.appearanceNotice = '未能保存主题配色。'; });
       },
       applyMode: (mode: string): void => {
@@ -2198,6 +2201,7 @@ struct Index {
   private selectTheme(id: string): void {
     this.appearanceNotice = '';
     this.themeId = id;
+    appUiState().themeId = id;
     void this.saveSetting(SYNC_THEME, id).catch(() => { this.appearanceNotice = '未能保存主题配色。'; });
     this.accountSync.writeCloudRow({ key: SYNC_THEME, payload: id });
   }

@@ -4,6 +4,7 @@ import { IncomingShare } from './IncomingShare';
 @ObservedV2
 export class AppUiState {
   @Trace darkMode: boolean = false;
+  @Trace themeId: string = 'sakura';
   @Trace address: string = 'http://127.0.0.1:18977';
   @Trace launchTicket: string = '';
   @Trace liveLaunchSession: string = '';

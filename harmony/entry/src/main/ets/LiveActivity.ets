@@ -55,7 +55,8 @@ export class LiveActivityController {
     this.statusCallback = undefined;
   }
 
-  sync(snapshot?: LiveActivitySnapshot): void {
+  sync(snapshot?: LiveActivitySnapshot, owner?: common.UIAbilityContext): void {
+    if (owner && this.context && owner !== this.context) return;
     const revision = ++this.revision;
     this.work = this.work.then(async (): Promise<void> => {
       if (snapshot && revision !== this.revision) return;

@@ -107,9 +107,17 @@ export class EntryInstanceRegistry {
     return key;
   }
 
-  claimKey(): string {
-    const pending = this.pendingKeys.shift();
-    const key = pending ?? this.nextKey();
+  claimKey(want?: Want): string {
+    const explicit = want?.parameters?.['pigoInstanceKey'];
+    let key: string;
+    if (typeof explicit === 'string' && explicit.length > 0) {
+      const idx = this.pendingKeys.indexOf(explicit);
+      if (idx >= 0) this.pendingKeys.splice(idx, 1);
+      key = explicit;
+    } else {
+      const pending = this.pendingKeys.shift();
+      key = pending ?? this.nextKey();
+    }
     if (!this.records.has(key)) {
       this.records.set(key, {
         key: key,
@@ -119,6 +127,11 @@ export class EntryInstanceRegistry {
       });
     }
     return key;
+  }
+
+  isPrimary(key: string): boolean {
+    const preferred = pickPreferredInstance(Array.from(this.records.values()));
+    return !preferred || preferred.key === key;
   }
 
   setForeground(key: string, foreground: boolean): void {

@@ -24,7 +24,7 @@ export default class EntryAbility extends UIAbility {
   private onWindowStatusChange?: (status: window.WindowStatusType) => void;
 
   onCreate(want: Want): void {
-    this.instanceKey = entryInstances.claimKey();
+    this.instanceKey = entryInstances.claimKey(want);
     registerWindowAppUiState(this.instanceKey, this.appState);
     console.info(`[PiGoMulti] onCreate key=${this.instanceKey} count=${entryInstances.count()}`);
     try {

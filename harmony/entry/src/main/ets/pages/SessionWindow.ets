@@ -1,6 +1,7 @@
 import { KeyboardAvoidMode } from '@kit.ArkUI';
 import { pasteboard } from '@kit.BasicServicesKit';
-import { AppUiState, appUiState } from '../AppUiState';
+import { AppUiState, appUiState, windowAppUiState } from '../AppUiState';
+import { themePalette } from '../Appearance';
 import { ChatTranscript } from '../components/ChatTranscript';
 import { PendingInteractionCard } from '../components/ChatDialogs';
 import { headerSymbol } from '../components/HeaderSymbol';
@@ -16,6 +17,7 @@ import { markdownWorkspacePath } from '../ChatPaths';
 @ComponentV2
 struct SessionWindow {
   @Local private app: AppUiState = appUiState();
+  @Local private win: AppUiState = windowAppUiState();
   @Local private session: SessionViewState = new SessionViewState();
   @Local private preview: string = '';
   @Local private previewImage: string = '';
@@ -48,7 +50,11 @@ struct SessionWindow {
   }
 
   private accent(): string {
-    return this.app.darkMode ? '#88D4BE' : '#236F5E';
+    return themePalette(this.app.themeId, this.app.darkMode).accent;
+  }
+
+  private accentTint(): string {
+    return themePalette(this.app.themeId, this.app.darkMode).accentTint;
   }
 
   private status(): string {
@@ -182,8 +188,9 @@ struct SessionWindow {
       transcript: this.scroll,
       transcriptFollow: this.session.transcriptFollow!!,
       workspaceCwd: this.session.workspaceCwd,
+      themeId: this.app.themeId,
       accent: this.accent(),
-      accentTint: this.app.darkMode ? '#243F39' : '#DCEFE7',
+      accentTint: this.accentTint(),
       readTranscriptHeight: (): number => this.transcriptHeight,
       setTranscriptViewport: (): void => {}
     })
@@ -271,5 +278,7 @@ struct SessionWindow {
         this.composer()
       }
     }.id('native-session-window').width('100%').height('100%').backgroundColor($r('app.color.pigo_panel'))
+      .padding({ top: Math.max(0, this.win.statusBarHeight), bottom: Math.max(0, this.win.navBarHeight),
+        left: Math.max(0, this.win.leftInset), right: Math.max(0, this.win.rightInset) })
   }
 }
