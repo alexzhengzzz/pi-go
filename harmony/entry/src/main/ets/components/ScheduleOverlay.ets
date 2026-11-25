@@ -8,6 +8,7 @@ import { WorkspaceRow } from '../model/PiGoTypes';
 import { headerSymbol } from './HeaderSymbol';
 import { runStatusInk, runStatusMark } from './RunStatusMark';
 import { canvasFadeStops } from '../Appearance';
+import { pagePushTransition, subPageTransition } from './PageTransitions';
 
 @Extend(Button)
 function chatAction() {
@@ -159,23 +160,37 @@ export struct ScheduleOverlay {
   build() {
     Navigation() {
       Column({ space: 10 }) {
-        if (this.schedulePage === 'inbox') {
-          this.scheduleInboxList()
-        } else if (this.schedulePage === 'history') {
-          this.scheduleHistoryList()
-        } else {
-          Scroll() {
-            Column({ space: 12 }) {
-              if (this.scheduleError) Text(this.scheduleError).fontSize(14).fontColor($r('app.color.pigo_error'))
-              if (this.schedulePage === 'detail' && this.scheduleDetail) {
-                this.scheduledRunDetail(this.scheduleDetail)
-              } else if (this.schedulePage === 'editor') {
+        Stack({ alignContent: Alignment.TopStart }) {
+          if (this.schedulePage === 'inbox') {
+            Column() {
+              this.scheduleInboxList()
+            }.width('100%').height('100%').transition(subPageTransition())
+          } else if (this.schedulePage === 'history') {
+            Column() {
+              this.scheduleHistoryList()
+            }.width('100%').height('100%').transition(subPageTransition())
+          } else if (this.schedulePage === 'detail') {
+            Scroll() {
+              Column({ space: 12 }) {
+                if (this.scheduleError) Text(this.scheduleError).fontSize(14).fontColor($r('app.color.pigo_error'))
+                if (this.scheduleDetail) {
+                  this.scheduledRunDetail(this.scheduleDetail)
+                }
+              }.width('100%').alignItems(HorizontalAlign.Start)
+                .padding({ left: 16, right: 16, top: this.statusBarHeight + this.headerHeight + 14, bottom: 16 })
+            }.width('100%').height('100%').align(Alignment.TopStart).scrollBar(BarState.Off)
+              .transition(subPageTransition())
+          } else if (this.schedulePage === 'editor') {
+            Scroll() {
+              Column({ space: 12 }) {
+                if (this.scheduleError) Text(this.scheduleError).fontSize(14).fontColor($r('app.color.pigo_error'))
                 this.scheduleEditor()
-              }
-            }.width('100%').alignItems(HorizontalAlign.Start)
-              .padding({ left: 16, right: 16, top: this.statusBarHeight + this.headerHeight + 14, bottom: 16 })
-          }.layoutWeight(1).width('100%').align(Alignment.TopStart).scrollBar(BarState.Off)
-        }
+              }.width('100%').alignItems(HorizontalAlign.Start)
+                .padding({ left: 16, right: 16, top: this.statusBarHeight + this.headerHeight + 14, bottom: 16 })
+            }.width('100%').height('100%').align(Alignment.TopStart).scrollBar(BarState.Off)
+              .transition(subPageTransition())
+          }
+        }.layoutWeight(1).width('100%')
         if (this.selectingRuns && (this.schedulePage === 'inbox' || this.schedulePage === 'history')) {
           this.runSelectionActions()
         } else if (this.schedulePage === 'detail' && this.scheduleDetail?.run.sessionId) {
@@ -199,6 +214,7 @@ export struct ScheduleOverlay {
         barStyle: BarStyle.STACK
       })
       .backgroundColor(this.canvasBg).hitTestBehavior(HitTestMode.BLOCK_HIERARCHY)
+      .transition(pagePushTransition())
   }
   @Builder
   scheduleInboxList() {

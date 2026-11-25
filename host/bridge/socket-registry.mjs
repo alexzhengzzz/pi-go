@@ -254,7 +254,7 @@ export function createSocketRegistry({ shouldShare = () => false } = {}) {
     hosts: () => [...entries.values()].filter(({ kind, data }) => kind === 'host' && data)
       .map(({ socket, data }) => ({ socket, health: data })),
     enableSharing() {
-      for (const entry of entries.values()) if (entry.kind === 'gui' && entry.data) void share(entry);
+      return Promise.all([...entries.values()].filter((entry) => entry.kind === 'gui' && entry.data).map((entry) => share(entry)));
     },
     refreshSocket,
     sweep,

@@ -12,6 +12,7 @@ import { CloudComputer } from '../AccountSync';
 import { validUsb } from '../PairingCode';
 import { connectionLabel } from '../CompanionCheck';
 import { ComputerGroup, computerGroups, computerGroupTitle } from '../ComputerGroups';
+import { parentPageTransition, subPageTransition } from './PageTransitions';
 
 @Extend(Button)
 function chatAction() {
@@ -25,6 +26,7 @@ function chatAction() {
 @ComponentV2
 export struct SettingsView {
   @Param @Require accountBusy: boolean;
+  @Param active: boolean = true;
   @Param @Require accountNotice: string;
   @Event addComputerConnection: (id?: string) => void = unboundAction;
   @Param @Require addingComputer: boolean;
@@ -95,36 +97,50 @@ export struct SettingsView {
   @Param @Require accentTint: string;
 
   build() {
-    Scroll() {
-      Column({ space: 12 }) {
-        if (this.minePage === 'computers') {
-          if (!this.addingComputer) {
-            this.computerList()
-            this.cloudComputerList()
-          }
-          if (this.addingComputer || !this.computers.length) {
-            this.pairingForm()
-          } else {
-            Button('添加电脑').chatAction().id('add-computer').width('100%').height(46)
-              .backgroundColor(this.accent).fontColor(this.accentForeground)
-              .enabled(!this.busy && !this.openingSession && !this.removeTarget)
-              .onClick(() => { this.addComputerConnection(); })
-          }
-        } else if (this.minePage === 'theme') {
-          this.themeSettings()
-        } else {
-          this.profileCard()
-          this.mineEntry('computers', '电脑管理', this.isPaired ?
-            `${this.computerTitle()} · ${this.reachable ? '已连接' : '离线'}` :
-            (this.computers.length ? `${computerGroups(this.computers).length} 台电脑` : '配对并连接电脑'))
-          this.mineEntry('theme', '系统主题', `${themeStyle(this.themeId).label} · ${appearanceMode(this.modeId).label}`)
-          this.runNoticeSettings()
-          this.liveViewSettings()
-        }
-      }.width('100%').alignItems(HorizontalAlign.Start)
-        .padding({ left: 16, right: 16, top: this.topContentClearance, bottom: this.bottomContentClearance })
-    }.layoutWeight(1).width('100%').align(Alignment.TopStart).scrollBar(BarState.Off)
-      .edgeEffect(EdgeEffect.Spring)
+    Stack({ alignContent: Alignment.TopStart }) {
+      if (this.minePage === 'computers') {
+        Scroll() {
+          Column({ space: 12 }) {
+            if (!this.addingComputer) {
+              this.computerList()
+              this.cloudComputerList()
+            }
+            if (this.addingComputer || !this.computers.length) {
+              this.pairingForm()
+            } else {
+              Button('添加电脑').chatAction().id('add-computer').width('100%').height(46)
+                .backgroundColor(this.accent).fontColor(this.accentForeground)
+                .enabled(!this.busy && !this.openingSession && !this.removeTarget)
+                .onClick(() => { this.addComputerConnection(); })
+            }
+          }.width('100%').alignItems(HorizontalAlign.Start)
+            .padding({ left: 16, right: 16, top: this.topContentClearance, bottom: this.bottomContentClearance })
+        }.width('100%').height('100%').align(Alignment.TopStart).scrollBar(BarState.Off)
+          .edgeEffect(EdgeEffect.Spring).transition(subPageTransition())
+      } else if (this.minePage === 'theme') {
+        Scroll() {
+          Column({ space: 12 }) {
+            this.themeSettings()
+          }.width('100%').alignItems(HorizontalAlign.Start)
+            .padding({ left: 16, right: 16, top: this.topContentClearance, bottom: this.bottomContentClearance })
+        }.width('100%').height('100%').align(Alignment.TopStart).scrollBar(BarState.Off)
+          .edgeEffect(EdgeEffect.Spring).transition(subPageTransition())
+      } else {
+        Scroll() {
+          Column({ space: 12 }) {
+            this.profileCard()
+            this.mineEntry('computers', '电脑管理', this.isPaired ?
+              `${this.computerTitle()} · ${this.reachable ? '已连接' : '离线'}` :
+              (this.computers.length ? `${computerGroups(this.computers).length} 台电脑` : '配对并连接电脑'))
+            this.mineEntry('theme', '系统主题', `${themeStyle(this.themeId).label} · ${appearanceMode(this.modeId).label}`)
+            this.runNoticeSettings()
+            this.liveViewSettings()
+          }.width('100%').alignItems(HorizontalAlign.Start)
+            .padding({ left: 16, right: 16, top: this.topContentClearance, bottom: this.bottomContentClearance })
+        }.width('100%').height('100%').align(Alignment.TopStart).scrollBar(BarState.Off)
+          .edgeEffect(EdgeEffect.Spring).transition(parentPageTransition())
+      }
+    }.layoutWeight(1).width('100%')
   }
   @Builder
   computerConnection(record: Companion, group: ComputerGroup) {
@@ -436,47 +452,40 @@ export struct SettingsView {
             radius: '78%',
             colors: [[this.activePalette().auraBottom, 0], ['#00000000', 1]]
           })
-        if (this.themeId === 'sakura') {
-          Image($rawfile(this.darkMode ? 'sakura_dark.jpg' : 'sakura_light.jpg'))
-            .width('100%').height('100%')
-            .objectFit(ImageFit.Cover)
-            .opacity(this.darkMode ? 0.72 : 0.78)
-          if (this.themeMotionEnabled) SakuraPetals({ darkMode: this.darkMode, compact: true })
-        } else if (this.themeId === 'graphite') {
+        if (this.themeId === 'graphite') {
           if (this.themeMotionEnabled) {
-            InkScene({ darkMode: this.darkMode, compact: true })
+            InkScene({ darkMode: this.darkMode, compact: true, active: this.active && this.minePage === 'theme' })
           } else {
             Image($rawfile(this.darkMode ? 'ink_dark.jpg' : 'ink_light.jpg'))
               .width('100%').height('100%').objectFit(ImageFit.Cover).opacity(this.darkMode ? 0.78 : 0.85)
           }
         } else if (this.themeId === 'sunset') {
           if (this.themeMotionEnabled) {
-            SunsetScene({ darkMode: this.darkMode, compact: true })
+            SunsetScene({ darkMode: this.darkMode, compact: true, active: this.active && this.minePage === 'theme' })
           } else {
             Image($rawfile(this.darkMode ? 'sunset_dark.jpg' : 'sunset_light.jpg'))
               .width('100%').height('100%').objectFit(ImageFit.Cover).opacity(this.darkMode ? 0.78 : 0.85)
           }
         } else if (this.themeId === 'jellyfish') {
           if (this.themeMotionEnabled) {
-            DeepSeaScene({ darkMode: this.darkMode, compact: true })
+            DeepSeaScene({ darkMode: this.darkMode, compact: true, active: this.active && this.minePage === 'theme' })
           } else {
             Image($rawfile(this.darkMode ? 'jellyfish_dark.jpg' : 'jellyfish_light.jpg'))
               .width('100%').height('100%').objectFit(ImageFit.Cover).opacity(this.darkMode ? 0.78 : 0.85)
           }
         } else if (this.themeId === 'sahara') {
           if (this.themeMotionEnabled) {
-            SaharaScene({ darkMode: this.darkMode, compact: true })
+            SaharaScene({ darkMode: this.darkMode, compact: true, active: this.active && this.minePage === 'theme' })
           } else {
             Image($rawfile(this.darkMode ? 'sahara_dark.jpg' : 'sahara_light.jpg'))
               .width('100%').height('100%').objectFit(ImageFit.Cover).opacity(this.darkMode ? 0.78 : 0.85)
           }
         } else {
-          if (this.themeMotionEnabled) {
-            ArtThemeScene({ themeId: this.themeId, darkMode: this.darkMode, compact: true })
-          } else {
-            Image($rawfile(`${this.themeId}_${this.darkMode ? 'dark' : 'light'}.jpg`))
-              .width('100%').height('100%').objectFit(ImageFit.Cover).opacity(this.darkMode ? 0.78 : 0.85)
-          }
+          Image($rawfile(this.darkMode ? 'sakura_dark.jpg' : 'sakura_light.jpg'))
+            .width('100%').height('100%')
+            .objectFit(ImageFit.Cover)
+            .opacity(this.darkMode ? 0.72 : 0.78)
+          if (this.themeMotionEnabled && this.active && this.minePage === 'theme') SakuraPetals({ darkMode: this.darkMode, compact: true })
         }
         Column({ space: 8 }) {
           Row() {

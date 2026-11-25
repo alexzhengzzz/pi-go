@@ -30,7 +30,7 @@ async function inspect(file, targetId, info, cwd, resolvedPaths) {
       }
       if (row.type === 'session_info' && typeof row.name === 'string') name = row.name.trim();
       if (row.type === 'message') {
-        if (targetId !== undefined) return { id: header.id, cwd: header.cwd };
+        if (targetId !== undefined) return { id: header.id, cwd: header.cwd, path: file, name: name || firstTitle };
         messageCount++;
         if (firstTitle === undefined && row.message?.role === 'user') firstTitle = sessionTitlePreview(row.message.content) ?? '';
       }
@@ -99,6 +99,12 @@ export async function findComputerSession(id, agent) {
 }
 
 // Read Pi's, Codex's, and agy's native stores, including projects without an active session.
+export function invalidateComputerSessions() {
+  cache.clear();
+  pending.clear();
+  piFileIndex.clear();
+}
+
 export async function computerSessions(revision, cwd, refresh = false) {
   const [piRows, codexRows, agyRows] = await Promise.all([
     piComputerSessions(revision, cwd, refresh),

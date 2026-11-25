@@ -179,6 +179,16 @@ export struct ChatTranscript {
     return this.messages[this.messages.length - 1].role === 'user';
   }
 
+  private settledTurns(): TranscriptTurn[] {
+    return this.displayTurns().filter((turn: TranscriptTurn): boolean => !turn.isLive);
+  }
+
+  private activeLiveTurn(): TranscriptTurn | undefined {
+    const turns = this.displayTurns();
+    const last = turns.length ? turns[turns.length - 1] : undefined;
+    return last?.isLive ? last : undefined;
+  }
+
   @Builder
   defaultEmptyTranscript() {}
 
@@ -194,7 +204,7 @@ export struct ChatTranscript {
             if (!this.messages.length && !this.sessionOptimisticMessages().length && !this.liveText && !this.liveTools.length && !this.liveThinking && this.idle) {
               this.emptyTranscript()
             }
-            ForEach(this.displayTurns(), (turn: TranscriptTurn) => {
+            ForEach(this.settledTurns(), (turn: TranscriptTurn) => {
               if (turn.kind === 'user' && turn.message) {
                 this.userBubble(turn.message)
               } else {
@@ -204,6 +214,12 @@ export struct ChatTranscript {
                 this.runResultCard(run)
               }, (run: RunEvent) => run.id)
             }, (turn: TranscriptTurn) => this.turnKey(turn))
+            if (this.activeLiveTurn()) {
+              this.assistantTurn(this.activeLiveTurn()!)
+              ForEach(this.resultsForTurn(this.activeLiveTurn()!), (run: RunEvent) => {
+                this.runResultCard(run)
+              }, (run: RunEvent) => run.id)
+            }
             if (this.needsWaitingPulse()) {
               Row({ space: 8 }) {
                 LoadingProgress().width(13).height(13).color(this.accent)
@@ -719,7 +735,7 @@ export struct ChatTranscript {
     const finalSig = turn.message
       ? `${turn.message.id}:${turn.message.text.length}:${turn.message.textTruncated ?? false}:${turn.message.imageCount ?? 0}`
       : '';
-    return `a:${turn.id}:${open}:${this.idle ? 1 : 0}:${turn.liveText.length}:${finalSig}:${stepSig}:${results}`;
+    return `a:${turn.id}:${open}:${finalSig}:${stepSig}:${results}`;
   }
 
   private unlistedLiveTools(): LiveTool[] {

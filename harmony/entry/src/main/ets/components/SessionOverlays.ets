@@ -2,6 +2,7 @@ import { glassCardSurface } from '../Immersive';
 import { RunMessage, scheduleRunStatus } from '../ScheduledRuns';
 import { ModelOption, RunNotice } from '../model/PiGoTypes';
 import { unboundAction } from './ComponentAction';
+import { bannerTransition, subPageTransition } from './PageTransitions';
 
 @Extend(Button)
 function chatAction() {
@@ -43,7 +44,7 @@ export struct RunCompletionBanner {
         .attributeModifier(glassCardSurface(this.darkMode, 16, true))
     }.width('100%').justifyContent(FlexAlign.Center).padding({ left: 16, right: 16 })
       .margin({ top: this.statusBarHeight + 8 }).hitTestBehavior(HitTestMode.Transparent)
-      .transition(TransitionEffect.OPACITY.animation({ duration: 180, curve: Curve.EaseOut }))
+      .transition(bannerTransition())
   }
 }
 
@@ -258,6 +259,7 @@ export struct SessionSettings {
             .onClick(() => { this.share(); })
         }.width('100%').padding(14).attributeModifier(glassCardSurface(this.darkMode, 16))
       }.width('100%').padding({ left: 16, right: 16, top: this.topContentClearance, bottom: this.bottomPad + 16 })
-    }.layoutWeight(1).width('100%').align(Alignment.TopStart).scrollBar(BarState.Off)
+    }.width('100%').height('100%').align(Alignment.TopStart).scrollBar(BarState.Off)
+      .transition(subPageTransition())
   }
 }

@@ -34,8 +34,16 @@ export function findConversationWindow(address: string, id: string): WindowConve
   return undefined;
 }
 
-export function closeConversationWindows(): void {
-  pending.forEach((conversation: WindowConversation): void => conversation.dispose());
-  pending.clear();
-  active.forEach((conversation: WindowConversation): void => conversation.close());
+export function closeConversationWindows(address?: string): void {
+  const keys: string[] = [];
+  pending.forEach((conversation: WindowConversation, key: string): void => {
+    if (!address || conversation.endpoint.address === address) {
+      conversation.dispose();
+      keys.push(key);
+    }
+  });
+  for (const key of keys) pending.delete(key);
+  active.forEach((conversation: WindowConversation): void => {
+    if (!address || conversation.endpoint.address === address) conversation.close();
+  });
 }

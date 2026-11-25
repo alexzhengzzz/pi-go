@@ -1139,7 +1139,7 @@ test('failed initial transcript leaves the drawer available for retry', async ()
   const messages = [];
   state.getUIContext = () => ({ getPromptAction: () => ({ showToast: ({ message }) => messages.push(message) }) });
   state.request = async path => {
-    if (path === '/open') return { session: { id: 'two' } };
+    if (path === '/session/open' || path === '/open') return { session: { id: 'two' } };
     throw new Error('network');
   };
   assert.equal(await state.requestAction('/open', { id: 'two' }), false);
@@ -1576,10 +1576,10 @@ test('background refresh does not scroll again after the cached conversation is 
 test('chat cache is bounded and retains a usable history cursor', () => {
   const state = navigationFixture();
   state.messages = Array.from({ length: 120 }, (_, index) => ({ id: String(index) }));
-  for (let index = 0; index < 10; index++) state.cacheChat({ id: String(index) });
-  assert.equal(state.chatState.chatCache.size, 8);
+  for (let index = 0; index < 18; index++) state.cacheChat({ id: String(index) });
+  assert.equal(state.chatState.chatCache.size, 16);
   assert.equal(state.chatState.chatCache.has('0'), false);
-  const cached = state.chatState.chatCache.get('9');
+  const cached = state.chatState.chatCache.get('17');
   assert.equal(cached.messages.length, 60);
   assert.equal(cached.historyCursor, '60');
 });
@@ -1814,7 +1814,7 @@ test('opening with bundled history shows the transcript without another request'
       return { ...current, messages: [{ id: 'latest' }], historyCursor: 'older' };
     };
     assert.equal(await state.requestAction('/open', { id: 'two' }), true);
-    assert.deepEqual(requests, [['/open', { id: 'two', history: true }]]);
+    assert.deepEqual(requests, [['/session/open', { id: 'two', history: true }]]);
     assert.equal(state.syncMode, 'sequenced');
     assert.equal(state.currentId, 'two');
     assert.deepEqual(state.messages, [{ id: 'latest' }]);
@@ -1840,7 +1840,7 @@ test('switching away and back ignores earlier snapshots and history for the same
   const calls = [];
   state.request = async (path, input) => {
     calls.push(path);
-    if (path === '/open') selected = input.id;
+    if (path === '/session/open' || path === '/open') selected = input.id;
     const current = snapshot(syncCursor(11, selected, selected + '-worker'), selected);
     if (path.startsWith('/history')) return { ...current, messages: [{ id: selected + '-message' }] };
     return current;
@@ -1853,7 +1853,7 @@ test('switching away and back ignores earlier snapshots and history for the same
   assert.equal(state.currentId, 'one');
   assert.equal(state.liveText, 'one');
   assert.deepEqual(state.messages, [{ id: 'one-message' }]);
-  assert.deepEqual(calls, ['/open', '/session/snapshot?history=1', '/history?id=two&sync=2', '/open', '/session/snapshot?history=1', '/history?id=one&sync=2']);
+  assert.deepEqual(calls, ['/session/open', '/session/snapshot?history=1', '/history?id=two&sync=2', '/session/open', '/session/snapshot?history=1', '/history?id=one&sync=2']);
 });
 
 test('legacy bridges fall back on a missing snapshot route, while transient errors keep the new protocol', async () => {

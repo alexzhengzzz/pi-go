@@ -70,9 +70,11 @@ async function sessionFiles(root, matches) {
 
 let cache;
 let generation = 0;
+const piFileIndex = new Map();
 
 export function invalidateSessionCatalog() {
   cache = undefined;
+  piFileIndex.clear();
   generation += 1;
 }
 
@@ -96,7 +98,10 @@ export async function listSessions(cwd, refresh = false) {
       const row = await inspect(file).catch(() => undefined);
       if (!row) continue;
       const resolved = await realpath(row.cwd).catch(() => undefined);
-      if (resolved) rows.push({ ...row, cwd: resolved });
+      if (resolved) {
+        rows.push({ ...row, cwd: resolved });
+        piFileIndex.set(row.id, file);
+      }
     }
   }));
   rows.sort((left, right) => right.modified.localeCompare(left.modified));
@@ -113,11 +118,25 @@ export async function findSession(cwd, id) {
     throw error;
   });
   if (!root) return undefined;
+  const indexed = piFileIndex.get(id);
+  if (indexed && indexed.startsWith(`${root}/`)) {
+    const resolvedFile = await realpath(indexed).catch(() => undefined);
+    if (resolvedFile === indexed) {
+      const row = await inspect(indexed, id).catch(() => undefined);
+      if (row) {
+        const resolved = await realpath(row.cwd).catch(() => undefined);
+        if (resolved === cwd) return row;
+      }
+    }
+    piFileIndex.delete(id);
+  }
   const filename = `${id}.jsonl`;
   const files = await sessionFiles(root, (name) => name === filename || name.endsWith(`_${filename}`));
   if (files.length !== 1) return undefined;
   const row = await inspect(files[0], id).catch(() => undefined);
   if (!row) return undefined;
   const resolved = await realpath(row.cwd).catch(() => undefined);
-  return resolved === cwd ? row : undefined;
+  if (resolved !== cwd) return undefined;
+  piFileIndex.set(id, files[0]);
+  return row;
 }

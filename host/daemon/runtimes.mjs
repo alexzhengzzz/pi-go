@@ -71,7 +71,10 @@ export class RpcRuntime {
     this.exited = true;
     this.exitCode = code;
     this.scheduledPrompt?.complete({ reason: 'runtime_exited' });
-    for (const { reject } of this.commands.values()) reject(new Error('runtime_exited'));
+    for (const { reject, timer } of this.commands.values()) {
+      clearTimeout(timer);
+      reject(new Error('runtime_exited'));
+    }
     this.commands.clear();
     this.uiQueue = [];
     this.pool.forget(this);
@@ -108,6 +111,7 @@ export class RpcRuntime {
         this.commands.delete(id);
         reject(new Error('command_timeout'));
       }, commandTimeoutMs);
+      timer.unref?.();
       this.commands.set(id, { resolve, reject, timer });
       try {
         this.child.stdin.write(`${JSON.stringify({ type, id, ...data })}\n`);
@@ -215,18 +219,26 @@ export class RpcRuntime {
 }
 
 export class AgentWorkerRuntime {
-  constructor(pool, agent, cwd, sessionId, scheduled = false) {
+  constructor(pool, agent, cwd, sessionId, scheduled = false, options = {}) {
     this.agent = agent;
     this.pool = pool;
     this.cwd = cwd;
-    this.sessionPath = sessionId;
+    this.sessionPath = options.sessionPath || sessionId;
     this.sessionId = sessionId;
     this.socketPath = undefined;
     this.readyEvent = undefined;
     this.exited = false;
     this.exitCode = null;
     this.readyResolvers = [];
-    const args = [agentWorkerScript, '--agent', agent, '--cwd', cwd, ...(sessionId ? ['--session', sessionId] : [])];
+    const args = [
+      agentWorkerScript,
+      '--agent', agent,
+      '--cwd', cwd,
+      ...(sessionId ? ['--session', sessionId] : []),
+      ...(options.sessionPath ? ['--session-path', options.sessionPath] : []),
+      ...(options.appDataDir ? ['--app-data-dir', options.appDataDir] : []),
+      ...(options.sessionName ? ['--session-name', options.sessionName] : []),
+    ];
     const env = scheduled ? { ...process.env, PIGO_SCHEDULED_RESULTS: '1' } : process.env;
     this.child = spawn(process.execPath, args, { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
     this.startedAt = Date.now();
@@ -327,10 +339,10 @@ export class AgentWorkerRuntime {
 export class RuntimePool {
   constructor() { this.runtimes = new Map(); }
 
-  start(cwd, sessionPath, scheduled = false, agent = 'pi') {
+  start(cwd, sessionPath, scheduled = false, agent = 'pi', options = {}) {
     const runtime = agent === 'pi'
       ? new RpcRuntime(this, cwd, sessionPath, scheduled)
-      : new AgentWorkerRuntime(this, agent, cwd, sessionPath, scheduled);
+      : new AgentWorkerRuntime(this, agent, cwd, sessionPath, scheduled, options);
     this.runtimes.set(`${runtime.pid}`, runtime);
     return runtime;
   }
@@ -340,7 +352,9 @@ export class RuntimePool {
   find(pid, sessionId) {
     if (!Number.isInteger(pid) || typeof sessionId !== 'string') return undefined;
     const runtime = this.runtimes.get(`${pid}`);
-    return runtime && !runtime.exited ? runtime : undefined;
+    if (!runtime || runtime.exited) return undefined;
+    if (runtime.sessionId && runtime.sessionId !== sessionId) return undefined;
+    return runtime;
   }
 
   findBySession(cwd, sessionId, agent = 'pi') {

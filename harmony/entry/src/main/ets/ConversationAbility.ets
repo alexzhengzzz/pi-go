@@ -1,5 +1,6 @@
-import { UIAbility, Want } from '@kit.AbilityKit';
+import { Configuration, ConfigurationConstant, UIAbility, Want } from '@kit.AbilityKit';
 import { window } from '@kit.ArkUI';
+import { appUiState } from './AppUiState';
 import { registerConversationWindow, takeConversationWindow, unregisterConversationWindow } from './ConversationWindowLaunch';
 import { WINDOW_CONVERSATION_STORAGE, WindowConversation } from './model/WindowConversation';
 
@@ -7,7 +8,14 @@ export default class ConversationAbility extends UIAbility {
   private stage?: window.WindowStage;
   private conversation?: WindowConversation;
 
-  onCreate(want: Want): void { this.accept(want); }
+  onCreate(want: Want): void {
+    appUiState().darkMode = this.context.config.colorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK;
+    this.accept(want);
+  }
+
+  onConfigurationUpdate(config: Configuration): void {
+    appUiState().darkMode = config.colorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK;
+  }
 
   onWindowStageCreate(stage: window.WindowStage): void {
     this.stage = stage;

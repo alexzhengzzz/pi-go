@@ -12,6 +12,7 @@ import { newLanIdentity, newPublicIdentity, privateIPv4, publicAddress } from '.
 import { startDiscovery } from './lan-discovery.mjs';
 import { listFiles, previewFile, saveFile, openWorkspaceDownload, findWorkspaceFileByName } from './workspace-files.mjs';
 import { SessionMetadata, stateDirectory } from './session-metadata.mjs';
+import { readColdSnapshot } from './session-snapshot.mjs';
 import { computerSessions, findComputerSession } from './computer-sessions.mjs';
 import { archivedCodexSessionIds } from '../agents/codex/catalog.mjs';
 import { archivedAgySessionIds } from '../agents/agy/catalog.mjs';
@@ -68,8 +69,11 @@ let chosen = false;
 let ticketTimer;
 let closing = false;
 let handoffPending = false;
+const warmingSessions = new Map();
+let handoffQueue = Promise.resolve();
 let stopDiscovery;
 let selectionVersion = 0;
+let lastCatalogRevision;
 const grants = new Map();
 const streams = new Set();
 let remoteRequests = 0;
@@ -83,6 +87,11 @@ let pollingPush = false;
 const registry = createSocketRegistry({ shouldShare: () => computerAccess && Boolean(bearer) && !closing });
 
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const timingEnabled = process.env.PIGO_TIMING === '1';
+const logTiming = (label, startMs, extra = '') => {
+  if (!timingEnabled) return;
+  process.stderr.write(`[pigo-timing] broker.${label}: ${(performance.now() - startMs).toFixed(1)}ms${extra ? ` ${extra}` : ''}\n`);
+};
 
 function acceptRemoteRequest(response) {
   const now = performance.now();
@@ -137,8 +146,18 @@ function savePairing(nextBearer) {
 async function pumpEvents(client, authorization) {
   try {
     while (!client.closed && matches(authorization, bearer)) {
-      const live = registry.workers();
-      const current = client.target ? paneWorker(live, client.target) : selectionFor(live);
+      let live = registry.workers();
+      let current = client.target ? paneWorker(live, client.target) : selectionFor(live);
+      if (!current) {
+        const warmId = client.target?.id ?? selected?.id;
+        const warm = warmId ? warmingSessions.get(warmId) : undefined;
+        if (warm) {
+          await warm.promise;
+          if (client.closed || !matches(authorization, bearer)) break;
+          live = registry.workers();
+          current = client.target ? paneWorker(live, client.target) : selectionFor(live);
+        }
+      }
       if (!current) {
         client.session = undefined;
         if (!client.response.write(`data: ${JSON.stringify({ type: 'bridge/status', state: selected ? 'session_closed' : 'no_session_selected' })}\n\n`)) client.response.destroy();
@@ -401,7 +420,11 @@ async function pendingInteraction(worker) {
     if (pending?.status === 200) return pending.data.interaction;
     return undefined;
   }
-  const hosts = registry.hosts();
+  let hosts = registry.hosts();
+  if (hosts.length === 0) {
+    await registry.sweep();
+    hosts = registry.hosts();
+  }
   if (hosts.length !== 1) return undefined;
   const pending = await localRequest(hosts[0].socket, 'POST', '/pending', workerIdentity(worker), 700).catch(() => undefined);
   if (pending?.status === 200) return pending.data.interaction;
@@ -477,6 +500,57 @@ async function replyOpen(request, response, worker, includeHistory, selectTarget
   return reply(response, 200, chat);
 }
 
+function enqueueDaemonHandoff(fn) {
+  const queued = handoffQueue.then(fn, fn);
+  handoffQueue = queued.then(() => {}, () => {});
+  return queued;
+}
+
+function startBackgroundWarmup(row, context, agent, selectTarget) {
+  const existing = warmingSessions.get(row.id);
+  if (existing) return existing;
+  const entry = { id: row.id, cwd: row.cwd, agent, promise: undefined };
+  entry.promise = enqueueDaemonHandoff(async () => {
+    const t0 = performance.now();
+    try {
+      if (closing || !bearer || !context.socket) return { error: 'desktop_handoff_required' };
+      const already = registry.workers().filter(({ session }) => session.id === row.id);
+      if (already.length === 1) {
+        if (selectTarget && selected?.id === row.id && selected?.cwd === row.cwd && !selected.socket) select(already[0]);
+        return { worker: already[0] };
+      }
+      const payload = agent ? { cwd: row.cwd, id: row.id, agent } : { cwd: row.cwd, id: row.id };
+      const result = await localRequest(context.socket, 'POST', '/open', payload, 12000).catch(() => undefined);
+      if (closing || !bearer) return { error: 'unpaired' };
+      if (!result || result.status !== 200 || typeof result.data?.id !== 'string' || result.data.id !== row.id) {
+        return { error: result?.data?.error ?? 'desktop_handoff_failed' };
+      }
+      const expected = realpathSync(row.cwd);
+      const isTarget = ({ session }) => {
+        try { return session.id === row.id && realpathSync(session.cwd) === expected; }
+        catch { return false; }
+      };
+      if (typeof result.data.socket === 'string') {
+        await registry.refreshSocket(result.data.socket);
+      }
+      await registry.waitForWorker(isTarget, 2500);
+      const available = registry.workers().filter(isTarget);
+      if (available.length !== 1) return { error: available.length ? 'session_occupied' : 'desktop_share_failed' };
+      if (selectTarget && selected?.id === row.id && selected?.cwd === row.cwd && !selected.socket) {
+        select(available[0]);
+      }
+      logTiming('warmup.ready', t0, `agent=${agent ?? 'pi'}`);
+      return { worker: available[0] };
+    } catch {
+      return { error: 'desktop_handoff_failed' };
+    } finally {
+      if (warmingSessions.get(row.id) === entry) warmingSessions.delete(row.id);
+    }
+  });
+  warmingSessions.set(row.id, entry);
+  return entry;
+}
+
 async function nativeHandoff(request, response, route, cwd, id, context, hasLiveProject, includeHistory = false, fork, agent, selectTarget = true) {
   if (handoffPending) return error(response, 409, 'desktop_busy');
   handoffPending = true;
@@ -503,8 +577,11 @@ async function nativeHandoff(request, response, route, cwd, id, context, hasLive
     if (route === '/new' && agent && !context.agents?.some((entry) => entry.id === agent && entry.installed !== false)) {
       return error(response, 409, 'desktop_agent_unavailable');
     }
+    const tDaemon = performance.now();
     const payload = agent ? { cwd, id, agent } : { cwd, id };
-    const result = await localRequest(context.socket, 'POST', route, payload, 12000).catch(() => undefined);
+    const result = await enqueueDaemonHandoff(() =>
+      localRequest(context.socket, 'POST', route, payload, 12000).catch(() => undefined));
+    logTiming(`handoff.daemon(${route})`, tDaemon, `agent=${agent ?? 'auto'}`);
     if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
     if (!result) return error(response, 409, 'desktop_handoff_unconfirmed');
     if (result.status !== 200) return error(response, result.status, result.data.error ?? 'desktop_handoff_failed');
@@ -520,14 +597,19 @@ async function nativeHandoff(request, response, route, cwd, id, context, hasLive
           session.id === result.data.id && realpathSync(session.cwd) === expected;
       } catch { return false; }
     };
+    const tWait = performance.now();
     if (typeof result.data.socket === 'string') {
       await registry.refreshSocket(result.data.socket);
     }
     await registry.waitForWorker(isTarget, 2500);
+    logTiming('handoff.waitForWorker', tWait);
     const available = registry.workers().filter(isTarget);
     if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
     if (available.length !== 1) return error(response, 409, available.length ? 'session_occupied' : 'desktop_share_failed');
-    return await replyOpen(request, response, available[0], includeHistory, selectTarget);
+    const tReply = performance.now();
+    const replied = await replyOpen(request, response, available[0], includeHistory, selectTarget);
+    logTiming('handoff.replyOpen', tReply);
+    return replied;
   } finally { handoffPending = false; }
 }
 
@@ -541,11 +623,12 @@ const publicHandler = async (request, response) => {
     const route = `${request.method} ${path}`;
     if (!remote && route === 'GET /health') return reply(response, 200, { protocol: 'pi-go-bridge/1' });
     if (route === 'POST /pair') {
+      if (remote && !acceptRemoteRequest(response)) return;
       if (remote && (!pairing || pairing.expiresAt <= Date.now())) return error(response, 401, 'invalid_ticket');
       const input = await body(request, remote ? 1024 : undefined);
       if (remote && pairing?.expiresAt <= Date.now()) clearTicket();
       if (!matches(input.ticket, pairing?.ticket) && !matches(input.ticket, pairing?.code)) {
-        if (!remote && pairing && ++pairing.attempts >= 5) clearTicket();
+        if (pairing && ++pairing.attempts >= 5) clearTicket();
         return error(response, 401, 'invalid_ticket');
       }
       const token = randomBytes(32).toString('hex');
@@ -554,7 +637,8 @@ const publicHandler = async (request, response) => {
       catch { return error(response, 500, 'pairing_state_unavailable'); }
       clearTicket();
       bearer = nextBearer;
-      registry.enableSharing();
+      await registry.enableSharing();
+      await registry.sweep();
       lastSeen = Date.now();
       selected = undefined;
       chosen = false;
@@ -659,9 +743,19 @@ const publicHandler = async (request, response) => {
       const kind = parameters.get('kind');
       const name = safeAttachmentName(parameters.get('name') ?? '');
       if ((kind !== 'image' && kind !== 'file') || !name) return error(response, 400, 'invalid_attachment');
-      const live = registry.workers();
+      let live = registry.workers();
       if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
-      const current = target ? paneWorker(live, target) : selectionFor(live);
+      let current = target ? paneWorker(live, target) : selectionFor(live);
+      if (!current) {
+        const warmId = target?.id ?? selected?.id;
+        const warm = warmId ? warmingSessions.get(warmId) : undefined;
+        if (warm) {
+          await warm.promise;
+          if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
+          live = registry.workers();
+          current = target ? paneWorker(live, target) : selectionFor(live);
+        }
+      }
       if (!current) return error(response, 409, 'session_unavailable');
       if (live.filter(({ session }) => session.id === current.session.id).length !== 1) return error(response, 409, 'session_occupied');
       const bytes = await rawBody(request, kind === 'image' ? maxImageBytes : maxFileBytes);
@@ -766,6 +860,13 @@ const publicHandler = async (request, response) => {
       const limit = Math.min(Math.max(Math.floor(Number(parameters.get('limit') ?? '50') || 50), 1), 100);
       const context = await hostContext();
       if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
+      let sessionLive = live;
+      if (parameters.get('refresh') === '1' || context.revision !== lastCatalogRevision) {
+        lastCatalogRevision = context.revision;
+        await registry.sweep();
+        if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
+        sessionLive = registry.workers();
+      }
       const view = parameters.get('view') ?? 'all';
       if (!['all', 'archived', 'pinned', 'recent'].includes(view)) return error(response, 400, 'invalid_view');
       if (scope === 'filtered' && view === 'all') return error(response, 400, 'invalid_view');
@@ -774,13 +875,13 @@ const publicHandler = async (request, response) => {
         desktopHandoff: Boolean(context.socket), canCreateWorkspace: context.canCreateWorkspace === true,
         workspaces: context.workspaces,
         agents: context.agents,
-        projects: scope === null ? [...new Set([...live.map(({ session }) => session.cwd), ...context.granted])].sort()
+        projects: scope === null ? [...new Set([...sessionLive.map(({ session }) => session.cwd), ...context.granted])].sort()
           : (context.workspaces ?? []).map(({ cwd }) => cwd),
       };
       if (scope === 'workspaces') return reply(response, 200, { ...catalogInfo, sessions: [] });
       const cwd = scope === 'workspace' ? parameters.get('cwd') : undefined;
       if (scope === 'workspace' && !catalogInfo.projects.includes(cwd)) return error(response, 403, 'desktop_workspace_unshared');
-      const merged = await catalog(live, context.socket, context.granted, true, context.revision, cwd, parameters.get('refresh') === '1');
+      const merged = await catalog(sessionLive, context.socket, context.granted, true, context.revision, cwd, parameters.get('refresh') === '1');
       // Read native archive flags after merging so cached rows and live workers respect desktop changes.
       const archivedAgy = await archivedAgySessionIds(merged.filter(({ agent }) => agent === 'agy').map(({ id }) => id));
       if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
@@ -805,26 +906,68 @@ const publicHandler = async (request, response) => {
         total: filtered.length, nextCursor: start + limit < filtered.length ? start + limit : undefined });
     }
     if (openingSession) {
+      const tOpen = performance.now();
       if (handoffPending) return error(response, 409, 'desktop_busy');
       if (typeof input.id !== 'string') return error(response, 400, 'invalid_session');
       const includeHistory = input.history === true;
+      const allowFastSnapshot = includeHistory && (detached || input.fast === true);
       let currentLive = live;
       let targets = currentLive.filter(({ session }) => session.id === input.id);
       if (targets.length === 0) {
-        // Fast local sweep catches a just-shared worker without waiting 250ms on cold opens.
-        await registry.sweep();
-        currentLive = registry.workers();
-        targets = currentLive.filter(({ session }) => session.id === input.id);
+        const activeWarm = warmingSessions.get(input.id);
+        if (activeWarm && !allowFastSnapshot) {
+          await activeWarm.promise;
+          if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
+          currentLive = registry.workers();
+          targets = currentLive.filter(({ session }) => session.id === input.id);
+        }
       }
       if (targets.length === 0) {
-        const [context, native] = await Promise.all([hostContext(), computerAccess ? findComputerSession(input.id, input.agent) : undefined]);
-        const row = native ?? (await catalog(currentLive, context.socket, context.granted, false)).find(({ id }) => id === input.id);
-        if (!row) return error(response, 409, 'desktop_handoff_required');
-        return await nativeHandoff(request, response, '/open', row.cwd, row.id, context,
-          currentLive.some(({ session }) => session.cwd === row.cwd), includeHistory, undefined, input.agent ?? row.agent, !detached);
+        // Overlap local sweep with hostContext + native lookup so cold opens
+        // don't pay a serial sweep cost while still catching just-shared CLI workers.
+        const tLookup = performance.now();
+        const [, context, native] = await Promise.all([
+          registry.sweep(),
+          hostContext(),
+          computerAccess ? findComputerSession(input.id, input.agent) : undefined,
+        ]);
+        logTiming('open.sweep+lookup', tLookup);
+        if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
+        currentLive = registry.workers();
+        targets = currentLive.filter(({ session }) => session.id === input.id);
+        if (targets.length === 0) {
+          const row = native ?? (await catalog(currentLive, context.socket, context.granted, false)).find(({ id }) => id === input.id);
+          if (!row) return error(response, 409, 'desktop_handoff_required');
+          const hasLiveProject = currentLive.some(({ session }) => session.cwd === row.cwd);
+          const resolvedAgent = input.agent ?? row.agent;
+          if (allowFastSnapshot && !context.ambiguous && context.socket &&
+              (computerAccess || hasLiveProject || context.granted.includes(row.cwd))) {
+            const tCold = performance.now();
+            const cold = await readColdSnapshot({ ...row, agent: resolvedAgent }).catch(() => undefined);
+            logTiming('open.coldSnapshot', tCold, `agent=${resolvedAgent ?? 'pi'} hit=${Boolean(cold)}`);
+            if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
+            if (cold) {
+              metadata.visit(cold.session);
+              if (!detached) {
+                chosen = true;
+                selected = { socket: undefined, id: row.id, cwd: row.cwd };
+                selectionVersion += 1;
+              }
+              startBackgroundWarmup(row, context, resolvedAgent, !detached);
+              logTiming('open.total(cold-fast)', tOpen, `agent=${resolvedAgent ?? 'pi'}`);
+              return reply(response, 200, cold);
+            }
+          }
+          const res = await nativeHandoff(request, response, '/open', row.cwd, row.id, context,
+            hasLiveProject, includeHistory, undefined, resolvedAgent, !detached);
+          logTiming('open.total(cold)', tOpen, `agent=${resolvedAgent ?? 'pi'}`);
+          return res;
+        }
       }
       if (targets.length !== 1) return error(response, 409, 'session_occupied');
-      return await replyOpen(request, response, targets[0], includeHistory, !detached);
+      const res = await replyOpen(request, response, targets[0], includeHistory, !detached);
+      logTiming('open.total(warm)', tOpen);
+      return res;
     }
     if (route === 'POST /new') {
       const context = await hostContext();
@@ -842,7 +985,11 @@ const publicHandler = async (request, response) => {
       }
       const result = await localRequest(context.socket, 'POST', '/close-workspace', { cwd: input.cwd }, 12000).catch(() => undefined);
       if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
-      if (!result) return error(response, 409, 'desktop_handoff_unconfirmed');
+      if (!result) {
+        await registry.sweep();
+        if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
+        return error(response, 409, registry.hosts().length === 0 ? 'desktop_handoff_required' : 'desktop_handoff_unconfirmed');
+      }
       if (result.status !== 200) return error(response, result.status, result.data?.error ?? 'desktop_close_failed');
       try { grants.delete(realpathSync(input.cwd)); } catch {}
       if (selected) {
@@ -852,10 +999,23 @@ const publicHandler = async (request, response) => {
         }
         if (hosted) { selected = undefined; chosen = false; selectionVersion += 1; }
       }
+      await registry.sweep();
       return reply(response, 200, { closed: true });
     }
     const snapshot = route === 'GET /session/snapshot';
-    if (!current) {
+    let activeLive = live;
+    let activeCurrent = current;
+    if (!activeCurrent) {
+      const warmId = target?.id ?? selected?.id;
+      const warm = warmId ? warmingSessions.get(warmId) : undefined;
+      if (warm) {
+        await warm.promise;
+        if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
+        activeLive = registry.workers();
+        activeCurrent = target ? paneWorker(activeLive, target) : selectionFor(activeLive);
+      }
+    }
+    if (!activeCurrent) {
       if (target) return error(response, 409, 'session_unavailable');
       if (selected && (snapshot || route === 'GET /chat')) {
         const target = selected;
@@ -872,25 +1032,25 @@ const publicHandler = async (request, response) => {
       if (route === 'GET /chat' || route === 'GET /session') return reply(response, 200, { messages: [], state: selected ? 'session_closed' : live.length ? 'no_session_selected' : 'no_shared_sessions' });
       return error(response, 409, 'session_unavailable');
     }
-    if (route === 'GET /session') return reply(response, 200, { session: current.session });
-    if (input && (input.id !== current.session.id || live.filter(({ session }) => session.id === input.id).length !== 1)) return error(response, 409, 'session_changed');
+    if (route === 'GET /session') return reply(response, 200, { session: activeCurrent.session });
+    if (input && (input.id !== activeCurrent.session.id || activeLive.filter(({ session }) => session.id === input.id).length !== 1)) return error(response, 409, 'session_changed');
     if (route === 'POST /fork') {
       const version = selectionVersion;
       const context = await hostContext();
-      return await nativeHandoff(request, response, '/open', current.session.cwd, undefined, context, true,
-        input.history === true, { worker: current, messageId: input.messageId, version });
+      return await nativeHandoff(request, response, '/open', activeCurrent.session.cwd, undefined, context, true,
+        input.history === true, { worker: activeCurrent, messageId: input.messageId, version });
     }
     if (route === 'POST /answer') {
       if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
-      if (current.session?.interactions === 'worker') {
-        const answer = await localRequest(current.socket, 'POST', workerPath('/answer', current.session, true),
+      if (activeCurrent.session?.interactions === 'worker') {
+        const answer = await localRequest(activeCurrent.socket, 'POST', workerPath('/answer', activeCurrent.session, true),
           { pendingId: input.pendingId, answer: input.answer }).catch(() => undefined);
         if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
         return reply(response, answer?.status ?? 409, answer?.data ?? { error: 'interaction_unavailable' });
       }
       const hosts = registry.hosts();
       if (hosts.length !== 1) return error(response, 409, 'interaction_unavailable');
-      const answer = await localRequest(hosts[0].socket, 'POST', '/answer', { ...workerIdentity(current), pendingId: input.pendingId, answer: input.answer }).catch(() => undefined);
+      const answer = await localRequest(hosts[0].socket, 'POST', '/answer', { ...workerIdentity(activeCurrent), pendingId: input.pendingId, answer: input.answer }).catch(() => undefined);
       if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
       return reply(response, answer?.status ?? 409, answer?.data ?? { error: 'interaction_unavailable' });
     }
@@ -898,17 +1058,17 @@ const publicHandler = async (request, response) => {
     const sessionScopedMessage = isImage || route === 'GET /message-text';
     const scopedRead = sessionScopedMessage || snapshot || route === 'GET /history';
     const version = selectionVersion;
-    const result = await localRequest(current.socket, request.method, workerPath(request.url, current.session, true), input,
+    const result = await localRequest(activeCurrent.socket, request.method, workerPath(request.url, activeCurrent.session, true), input,
       isImage ? 8000 : undefined, isImage ? maxHistoryImageBase64 + 1024 : undefined).catch(() => undefined);
     if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
     if (!result) return error(response, 409, 'session_unavailable');
     if (scopedRead && !target && version !== selectionVersion) return error(response, 409, 'session_changed');
     if ((snapshot || route === 'GET /chat' || (remote && route === 'GET /models')) && result.status === 200 &&
-        (result.data.session?.id !== current.session.id || ((snapshot || remote) && result.data.session?.cwd !== current.session.cwd))) {
+        (result.data.session?.id !== activeCurrent.session.id || ((snapshot || remote) && result.data.session?.cwd !== activeCurrent.session.cwd))) {
       return error(response, 409, 'session_changed');
     }
     if ((snapshot || route === 'GET /chat') && result.status === 200) {
-      result.data.interaction = await pendingInteraction(current);
+      result.data.interaction = await pendingInteraction(activeCurrent);
       if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
     }
     if (scopedRead && !target && version !== selectionVersion) return error(response, 409, 'session_changed');
@@ -926,8 +1086,8 @@ const publicHandler = async (request, response) => {
 };
 const publicServer = tls ? createSecureServer({ ...publicOptions, minVersion: 'TLSv1.2', key: tls.key, cert: tls.cert,
   handshakeTimeout: 5000 }, publicHandler) : createServer(publicOptions, publicHandler);
-publicServer.maxConnections = 16;
-publicServer.setTimeout(18000, (socket) => socket.destroy());
+publicServer.maxConnections = 32;
+publicServer.setTimeout(65000, (socket) => socket.destroy());
 
 const admin = createServer(options, async (request, response) => {
   if (request.headers.origin !== undefined) return error(response, 403, 'invalid_source');
@@ -940,7 +1100,7 @@ const admin = createServer(options, async (request, response) => {
   try {
     if (request.url === '/computer-access' && !remote) {
       computerAccess = true;
-      registry.enableSharing();
+      await registry.enableSharing();
       return reply(response, 200, { enabled: true });
     }
     if (['/ticket', '/ticket-lan', '/ticket-remote'].includes(request.url)) {
@@ -994,6 +1154,7 @@ function stop() {
   bearer = undefined;
   stopDiscovery?.();
   registry.stop();
+  warmingSessions.clear();
   for (const client of streams) { client.closed = true; client.upstream?.destroy(); try { client.response.destroy(); } catch {} }
   streams.clear();
   publicServer.close();

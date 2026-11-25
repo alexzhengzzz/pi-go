@@ -11,13 +11,18 @@ import { lstat, mkdir, realpath, rmdir, stat } from 'node:fs/promises';
 import { promisify } from 'node:util';
 import { ipcDirectory, localRequest, pairingRuntimes, workers } from '../bridge/local-ipc.mjs';
 import { registerSocket } from '../bridge/socket-registry.mjs';
-import { computerSessions } from '../bridge/computer-sessions.mjs';
+import { computerSessions, invalidateComputerSessions } from '../bridge/computer-sessions.mjs';
 import { listSessions, findSession, invalidateSessionCatalog } from './catalog.mjs';
 import { listCodexSessions, findCodexSession, invalidateCodexCatalog } from '../agents/codex/catalog.mjs';
 import { listAgySessions, findAgySession, invalidateAgyCatalog } from '../agents/agy/catalog.mjs';
 import { currentAgents, normalizeAgent } from '../agents/registry.mjs';
 
 const sessionIdPattern = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
+const timingEnabled = process.env.PIGO_TIMING === '1';
+const logTiming = (label, startMs, extra = '') => {
+  if (!timingEnabled) return;
+  process.stderr.write(`[pigo-timing] daemon.${label}: ${(performance.now() - startMs).toFixed(1)}ms${extra ? ` ${extra}` : ''}\n`);
+};
 const mutatingRoutes = new Set(['/open', '/new', '/authorize', '/create-workspace', '/close-workspace', '/rename-workspace', '/remove-workspace', '/delete-session', '/schedules/update']);
 const routes = new Set(['/open', '/new', '/catalog', '/projects', '/authorize', '/pending', '/answer',
   '/create-workspace', '/close-workspace', '/rename-workspace', '/remove-workspace', '/delete-session', '/workspaces', '/workspace-library', '/session-deleted',
@@ -129,29 +134,39 @@ export function createDaemonHost({ registry, runtimes, schedules, profile = daem
 
   // Shared tail of /open and /new: bring a live or freshly spawned runtime to
   // readiness, share it into the extension bridge, and report the session id.
-  async function handoff(cwd, expectedId, sessionPath, agent = 'pi') {
+  async function handoff(cwd, expectedId, sessionPath, agent = 'pi', sessionMeta = undefined) {
+    const t0 = performance.now();
     const existing = expectedId === undefined
       ? undefined
       : runtimes.list().find((runtime) => (runtime.agent ?? 'pi') === agent && runtime.cwd === cwd && runtime.sessionId === expectedId);
-    const runtime = existing ?? runtimes.start(cwd, agent === 'pi' ? sessionPath : expectedId, false, agent);
+    const runtime = existing ?? runtimes.start(cwd, agent === 'pi' ? sessionPath : expectedId, false, agent, {
+      sessionPath,
+      appDataDir: sessionMeta?.appDataDir,
+      sessionName: sessionMeta?.name,
+    });
     let state;
+    const tReady = performance.now();
     try { state = await runtime.awaitReady(expectedId); }
     catch (error) {
       if (!existing) runtime.kill();
       throw new Error(error.message.startsWith('runtime_not_ready') ? 'desktop_session_not_ready' : 'desktop_busy');
     }
+    logTiming(`handoff.awaitReady(${agent})`, tReady, existing ? 'reused' : 'spawned');
     if (expectedId !== undefined && state.sessionId !== expectedId) {
       if (!existing) runtime.kill();
       throw new Error('desktop_session_not_ready');
     }
     if (agent === 'pi') {
+      const tShare = performance.now();
       try {
         if (!(await shareRuntime(runtime))) throw new Error('desktop_share_failed');
       } catch {
         if (!existing) runtime.kill();
         throw new Error('desktop_share_failed');
       }
+      logTiming('handoff.shareRuntime(pi)', tShare);
     }
+    logTiming(`handoff.total(${agent})`, t0);
     return { id: state.sessionId, socket: state.socketPath };
   }
 
@@ -306,6 +321,7 @@ export function createDaemonHost({ registry, runtimes, schedules, profile = daem
         deletedSessions.set(input.id, cwd);
         if (deletedSessions.size > 128) deletedSessions.delete(deletedSessions.keys().next().value);
         invalidateSessionCatalog();
+        invalidateComputerSessions();
         invalidateCodexCatalog();
         invalidateAgyCatalog();
         revision = randomUUID();
@@ -369,6 +385,7 @@ export function createDaemonHost({ registry, runtimes, schedules, profile = daem
       let registered = await registry.findByRealpath(cwd);
       let session;
       if (opening && cwd) {
+        const tFind = performance.now();
         if (!requestedAgent || requestedAgent === 'pi') {
           const found = await findSession(cwd, input.id);
           if (found) session = { ...found, agent: 'pi' };
@@ -381,6 +398,7 @@ export function createDaemonHost({ registry, runtimes, schedules, profile = daem
           const found = await findAgySession(cwd, input.id);
           if (found) session = found;
         }
+        logTiming('open.findSession', tFind, `agent=${session?.agent ?? 'none'}`);
       }
       registered = await ensureRegistered(cwd, registered, request.url === '/authorize');
       const transient = Boolean(session) || request.url === '/new';
@@ -409,7 +427,7 @@ export function createDaemonHost({ registry, runtimes, schedules, profile = daem
       }
       if (request.url === '/authorize') return reply(response, 200, { cwd, profile });
       const targetAgent = opening ? (session.agent ?? 'pi') : (requestedAgent ?? 'pi');
-      const { id: sessionId, socket } = await handoff(cwd, opening ? input.id : undefined, session?.path, targetAgent);
+      const { id: sessionId, socket } = await handoff(cwd, opening ? input.id : undefined, session?.path, targetAgent, session);
       return reply(response, 200, { id: sessionId, agent: targetAgent, ...(socket ? { socket } : {}) });
     } catch (error) {
       const known = ['desktop_busy', 'desktop_session_not_ready', 'desktop_share_failed'];

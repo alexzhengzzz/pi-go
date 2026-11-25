@@ -6,7 +6,7 @@
 // into the unified AgentSession interface consumed by `host/agents/worker-core.mjs`.
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
-import { existsSync, readFileSync, realpathSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { JsonRpcProcess } from '../jsonrpc.mjs';
 import { sessionTitlePreview } from '../../bridge/message-view.mjs';
@@ -17,6 +17,11 @@ import {
 const effortLevels = ['low', 'medium', 'high', 'xhigh'];
 const effortSuffixPattern = /^(.*?)-(low|medium|high|xhigh)$/i;
 const effortLabelSuffixPattern = /\s*\((Low|Medium|High|XHigh|Extra)\)\s*$/i;
+const timingEnabled = process.env.PIGO_TIMING === '1';
+const logTiming = (label, startMs, extra = '') => {
+  if (!timingEnabled) return;
+  process.stderr.write(`[pigo-timing] agy.${label}: ${(performance.now() - startMs).toFixed(1)}ms${extra ? ` ${extra}` : ''}\n`);
+};
 
 function extraArgs() {
   if (!process.env.PIGO_AGY_ARGS) return [];
@@ -100,12 +105,20 @@ function mapToolNameAndArgs(rawName, rawInput, kind, title) {
   };
 }
 
-function parseTranscriptEntries(sessionId) {
-  let file;
+function findTranscriptFile(sessionId) {
+  if (!sessionId) return undefined;
   for (const { dir } of agyHomes()) {
     const candidate = join(dir, 'brain', sessionId, '.system_generated', 'logs', 'transcript.jsonl');
-    if (existsSync(candidate)) { file = candidate; break; }
+    try {
+      const info = statSync(candidate);
+      if (info.isFile() && info.size > 0) return candidate;
+    } catch {}
   }
+  return undefined;
+}
+
+function parseTranscriptEntries(sessionId, transcriptFile) {
+  const file = transcriptFile ?? findTranscriptFile(sessionId);
   if (!file) return [];
   let raw;
   try { raw = readFileSync(file, 'utf8'); } catch { return []; }
@@ -128,10 +141,8 @@ function parseTranscriptEntries(sessionId) {
       for (const item of media) {
         const uri = typeof item?.uri === 'string' ? item.uri : '';
         const path = uri.startsWith('file://') ? decodeURIComponent(new URL(uri).pathname) : uri;
-        if (path && existsSync(path)) {
-          try {
-            images.push({ mimeType: item.mime_type || 'image/jpeg', data: readFileSync(path).toString('base64') });
-          } catch {}
+        if (path) {
+          images.push({ mimeType: item.mime_type || 'image/jpeg', path });
         }
       }
       if (text || images.length) {
@@ -317,7 +328,7 @@ function extractToolOutputText(update) {
 }
 
 export class AgyDriver extends EventEmitter {
-  constructor({ cwd, sessionId, attach = false, scheduled = false }) {
+  constructor({ cwd, sessionId, appDataDir, sessionName, attach = false, scheduled = false }) {
     super();
     this.agent = 'agy';
     this.cwd = realpathSync(cwd);
@@ -338,9 +349,9 @@ export class AgyDriver extends EventEmitter {
       approvals: true,
     };
     this.sessionId = sessionId;
-    this.sessionTitle = undefined;
+    this.sessionTitle = sessionName && sessionName !== '未命名会话' ? sessionName : undefined;
     this.titlePreview = undefined;
-    this.appDataDir = process.env.PIGO_AGY_APP_DATA_DIR || undefined;
+    this.appDataDir = process.env.PIGO_AGY_APP_DATA_DIR || appDataDir || undefined;
     this.activeTurnId = undefined;
     this.currentProvider = 'google';
     this.currentModelId = undefined;
@@ -351,6 +362,7 @@ export class AgyDriver extends EventEmitter {
     this.entriesList = [];
     this.liveTurn = undefined;
     this.replaying = false;
+    this.skipReplayContent = false;
     this.replayAssistant = undefined;
     this.uiQueue = [];
     try { this.historyDirectory = realpathSync(agyConversationsRoot()); } catch { this.historyDirectory = undefined; }
@@ -377,32 +389,44 @@ export class AgyDriver extends EventEmitter {
         this.uiQueue = [];
       }
     });
-    await rpc.request('initialize', {
-      protocolVersion: 1,
-      clientInfo: { name: 'pi-go', title: 'Pi Go', version: '0.2.0' },
-      clientCapabilities: {},
-    });
+    try {
+      await rpc.request('initialize', {
+        protocolVersion: 1,
+        clientInfo: { name: 'pi-go', title: 'Pi Go', version: '0.2.0' },
+        clientCapabilities: {},
+      });
+    } catch (error) {
+      await rpc.stop().catch(() => {});
+      throw error;
+    }
     this.rpc = rpc;
     return rpc;
   }
 
   async start() {
-    let existing;
-    if (this.initialSessionId) {
-      existing = await findAgySession(this.cwd, this.initialSessionId).catch(() => undefined);
-      if (existing?.name && existing.name !== '未命名会话') {
+    const t0 = performance.now();
+    if (this.initialSessionId && (!this.appDataDir || !this.sessionTitle)) {
+      const tFind = performance.now();
+      const existing = await findAgySession(this.cwd, this.initialSessionId).catch(() => undefined);
+      logTiming('findAgySession', tFind);
+      if (existing?.name && existing.name !== '未命名会话' && !this.sessionTitle) {
         this.sessionTitle = existing.name;
       }
       if (existing?.appDataDir && !this.appDataDir) {
         this.appDataDir = existing.appDataDir;
       }
     }
+    const tSpawn = performance.now();
     await this.spawnRpc();
+    logTiming('spawnRpc', tSpawn);
 
     let sessionReply;
     if (this.initialSessionId) {
+      const transcriptFile = findTranscriptFile(this.initialSessionId);
       this.replaying = true;
+      this.skipReplayContent = Boolean(transcriptFile);
       this.replayAssistant = undefined;
+      const tLoad = performance.now();
       try {
         sessionReply = await this.rpc.request('session/load', {
           sessionId: this.initialSessionId,
@@ -411,23 +435,30 @@ export class AgyDriver extends EventEmitter {
         });
       } finally {
         this.replaying = false;
+        this.skipReplayContent = false;
         this.replayAssistant = undefined;
       }
+      logTiming('session/load', tLoad);
       this.sessionId = sessionReply?.sessionId || this.initialSessionId;
-      const richEntries = parseTranscriptEntries(this.sessionId);
+      const tTranscript = performance.now();
+      const richEntries = parseTranscriptEntries(this.sessionId, transcriptFile);
+      logTiming('parseTranscript', tTranscript, `entries=${richEntries.length}`);
       if (richEntries.length >= this.entriesList.length) {
         this.entriesList = richEntries;
       }
     } else {
+      const tNew = performance.now();
       sessionReply = await this.rpc.request('session/new', {
         cwd: this.cwd,
         mcpServers: [],
       });
+      logTiming('session/new', tNew);
       this.sessionId = sessionReply?.sessionId;
     }
 
     this.applySessionConfig(sessionReply);
     invalidateAgyCatalog();
+    logTiming('start.total', t0);
   }
 
   applySessionConfig(sessionReply) {
@@ -718,7 +749,7 @@ export class AgyDriver extends EventEmitter {
     }
 
     if (this.replaying) {
-      this.handleReplayUpdate(kind, update);
+      if (!this.skipReplayContent) this.handleReplayUpdate(kind, update);
       return;
     }
 

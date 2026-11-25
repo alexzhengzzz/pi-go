@@ -171,11 +171,13 @@ async function rolloutFiles(root, matches) {
 
 const cache = new Map();
 const pending = new Map();
+const codexFileIndex = new Map();
 let generation = 0;
 
 export function invalidateCodexCatalog() {
   cache.clear();
   pending.clear();
+  codexFileIndex.clear();
   generation += 1;
 }
 
@@ -229,7 +231,10 @@ export async function codexComputerSessions(revision, workspace, refresh = false
           }
         }
         entries.set(file, { mtime: info.mtimeMs, size: info.size, ino: info.ino, row });
-        if (row) rows.push(row);
+        if (row) {
+          rows.push(row);
+          codexFileIndex.set(row.id, file);
+        }
       }
     }));
     rows.sort((a, b) => b.modified.localeCompare(a.modified));
@@ -257,13 +262,28 @@ export async function findCodexSession(cwd, id) {
     throw error;
   });
   if (!root) return undefined;
+  const indexed = codexFileIndex.get(id);
+  if (indexed && indexed.startsWith(`${root}/`)) {
+    const resolvedFile = await realpath(indexed).catch(() => undefined);
+    if (resolvedFile === indexed) {
+      const row = await inspectRollout(indexed, id).catch(() => undefined);
+      if (row) {
+        const resolved = await realpath(row.cwd).catch(() => undefined);
+        if (!cwd || resolved === cwd) return { ...row, cwd: resolved ?? row.cwd };
+      }
+    }
+    codexFileIndex.delete(id);
+  }
   const suffix = `${id}.jsonl`;
   const files = await rolloutFiles(root, (name) => name === suffix || name.endsWith(`-${suffix}`) || name.endsWith(`_${suffix}`));
   for (const file of files) {
     const row = await inspectRollout(file, id).catch(() => undefined);
     if (!row) continue;
     const resolved = await realpath(row.cwd).catch(() => undefined);
-    if (!cwd || resolved === cwd) return { ...row, cwd: resolved ?? row.cwd };
+    if (!cwd || resolved === cwd) {
+      codexFileIndex.set(id, file);
+      return { ...row, cwd: resolved ?? row.cwd };
+    }
   }
   return undefined;
 }

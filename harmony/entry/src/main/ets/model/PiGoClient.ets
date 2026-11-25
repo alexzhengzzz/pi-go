@@ -44,10 +44,16 @@ export class PiGoClient {
       }
       if (input) opts.extraData = JSON.stringify(input);
       const response = await req.request(`${address}${path}`, opts);
-      const reply = JSON.parse(response.result as string) as BridgeReply;
-      if (response.responseCode < 200 || response.responseCode >= 300) {
-        throw new BridgeFailure(response.responseCode, reply.error ?? 'request_failed');
+      let reply: BridgeReply | undefined;
+      try {
+        reply = JSON.parse(response.result as string) as BridgeReply;
+      } catch {
+        reply = undefined;
       }
+      if (response.responseCode < 200 || response.responseCode >= 300) {
+        throw new BridgeFailure(response.responseCode, reply?.error ?? 'request_failed');
+      }
+      if (!reply) throw new BridgeFailure(response.responseCode, 'invalid_response');
       return reply;
     } finally { req.destroy(); }
   }
@@ -119,7 +125,7 @@ export class PiGoClient {
       }
       if (writeError) throw new Error(writeError);
       if (expected > limit) throw new Error('file_too_large');
-      if (received !== expected) throw new Error('incomplete_download');
+      if (expected >= 0 && received !== expected) throw new Error('incomplete_download');
     } finally {
       req.destroy();
       if (file) fileIo.closeSync(file);
@@ -146,11 +152,16 @@ export class PiGoClient {
       }
       opts.extraData = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
       const response = await req.request(`${endpoint.address}/upload?kind=${encodeURIComponent(kind)}&name=${encodeURIComponent(name)}${pane}`, opts);
-      const reply = JSON.parse(response.result as string) as BridgeReply;
-      if (response.responseCode < 200 || response.responseCode >= 300) {
-        throw new BridgeFailure(response.responseCode, reply.error ?? 'request_failed');
+      let reply: BridgeReply | undefined;
+      try {
+        reply = JSON.parse(response.result as string) as BridgeReply;
+      } catch {
+        reply = undefined;
       }
-      if (!reply.attachment || typeof reply.attachment.token !== 'string' || reply.attachment.kind !== kind) {
+      if (response.responseCode < 200 || response.responseCode >= 300) {
+        throw new BridgeFailure(response.responseCode, reply?.error ?? 'request_failed');
+      }
+      if (!reply?.attachment || typeof reply.attachment.token !== 'string' || reply.attachment.kind !== kind) {
         throw new BridgeFailure(response.responseCode, 'invalid_attachment');
       }
       return reply.attachment;
@@ -183,7 +194,7 @@ export class PiGoClient {
     });
     req.on('dataReceive', (data: ArrayBuffer) => {
       if (!events.current()) return;
-      buffer += decoder.decodeWithStream(new Uint8Array(data), { stream: true });
+      buffer += decoder.decodeWithStream(new Uint8Array(data), { stream: true }).replace(/\r\n/g, '\n');
       if (buffer.length > 262144) {
         events.closed(500);
         return;
@@ -192,10 +203,12 @@ export class PiGoClient {
       while (boundary >= 0) {
         const raw = buffer.substring(0, boundary);
         buffer = buffer.substring(boundary + 2);
-        let payload = '';
+        const lines: string[] = [];
         for (const line of raw.split('\n')) {
-          if (line.startsWith('data: ')) payload += line.substring(6);
+          if (line.startsWith('data: ')) lines.push(line.substring(6));
+          else if (line.startsWith('data:')) lines.push(line.substring(5));
         }
+        const payload = lines.join('\n');
         if (payload) events.frame(payload);
         if (!events.current()) return;
         boundary = buffer.indexOf('\n\n');

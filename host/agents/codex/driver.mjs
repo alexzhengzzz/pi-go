@@ -11,6 +11,11 @@ import { codexSessionsRoot, findCodexSession, invalidateCodexCatalog, listCodexS
 
 const effortLevels = ['low', 'medium', 'high', 'xhigh'];
 const approvalChoices = ['允许一次', '本会话允许', '拒绝'];
+const timingEnabled = process.env.PIGO_TIMING === '1';
+const logTiming = (label, startMs, extra = '') => {
+  if (!timingEnabled) return;
+  process.stderr.write(`[pigo-timing] codex.${label}: ${(performance.now() - startMs).toFixed(1)}ms${extra ? ` ${extra}` : ''}\n`);
+};
 
 function extraArgs() {
   if (!process.env.PIGO_CODEX_ARGS) return [];
@@ -138,12 +143,7 @@ function turnsToEntries(turns) {
           if (part.type === 'text' && typeof part.text === 'string') {
             userTexts.push(cleanUserText(part.text));
           } else if (part.type === 'localImage' && typeof part.path === 'string') {
-            try {
-              const bytes = readFileSync(part.path);
-              userImages.push({ mimeType: 'image/jpeg', data: bytes.toString('base64') });
-            } catch {
-              userImages.push({ mimeType: 'image/jpeg', data: '' });
-            }
+            userImages.push({ mimeType: 'image/jpeg', path: part.path });
           } else if (part.type === 'image') {
             userImages.push({ mimeType: 'image/jpeg', data: '' });
           } else if (part.type === 'skill' && typeof part.name === 'string') {
@@ -173,7 +173,7 @@ function turnsToEntries(turns) {
         turnId: turn.id,
         role: 'user',
         text: userTexts.filter(Boolean).join('\n'),
-        images: userImages.filter((img) => img.data),
+        images: userImages.filter((img) => img.data || img.path),
         imageCount: userImages.length,
       });
     }
@@ -199,11 +199,12 @@ function turnsToEntries(turns) {
 }
 
 export class CodexDriver extends EventEmitter {
-  constructor({ cwd, sessionId, attach = false, scheduled = false }) {
+  constructor({ cwd, sessionId, sessionPath, sessionName, attach = false, scheduled = false }) {
     super();
     this.agent = 'codex';
     this.cwd = realpathSync(cwd);
     this.initialSessionId = sessionId;
+    this.initialSessionPath = sessionPath;
     this.attach = attach;
     this.scheduled = scheduled;
     this.permission = process.env.PIGO_CODEX_PERMISSION === 'ask' ? 'ask' : 'bypass';
@@ -229,8 +230,9 @@ export class CodexDriver extends EventEmitter {
     this.skillsCache = [];
     this.cachedEntries = [];
     this.entriesDirty = true;
+    this.entriesGeneration = 0;
     this.uiQueue = [];
-    this.titlePreview = undefined;
+    this.titlePreview = sessionName && sessionName !== '未命名会话' ? sessionName : undefined;
     this.rolloutPath = undefined;
     this.rolloutMtime = 0;
     this.rolloutSize = 0;
@@ -253,11 +255,16 @@ export class CodexDriver extends EventEmitter {
         this.uiQueue = [];
       }
     });
-    await rpc.request('initialize', {
-      clientInfo: { name: 'pi-go', title: 'Pi Go', version: '0.2.0' },
-      capabilities: null,
-    });
-    rpc.notify('initialized');
+    try {
+      await rpc.request('initialize', {
+        clientInfo: { name: 'pi-go', title: 'Pi Go', version: '0.2.0' },
+        capabilities: null,
+      });
+      rpc.notify('initialized');
+    } catch (error) {
+      await rpc.stop().catch(() => {});
+      throw error;
+    }
     this.rpc = rpc;
     return rpc;
   }
@@ -265,12 +272,13 @@ export class CodexDriver extends EventEmitter {
   // Release the exclusive ~/.codex/thread-writer-locks/<id>.lock after a phone
   // turn finishes so Codex Desktop can open or write to the same thread freely.
   async releaseWriterLock() {
-    if (!this.writerClaimed || this.activeTurnId || !this.thread?.id) return;
+    if (this.stopping || !this.writerClaimed || this.activeTurnId || !this.thread?.id) return;
     if (this.restartingRpc) return this.restartingRpc;
     this.restartingRpc = (async () => {
       const old = this.rpc;
       this.writerClaimed = false;
       await old?.stop();
+      if (this.stopping) return;
       await this.spawnRpc();
     })().catch(() => {}).finally(() => { this.restartingRpc = undefined; });
     return this.restartingRpc;
@@ -278,7 +286,7 @@ export class CodexDriver extends EventEmitter {
 
   async watchRolloutFile() {
     if (!this.thread?.id) return;
-    const found = this.thread.path || (await findCodexSession(this.cwd, this.thread.id))?.path;
+    const found = this.thread.path || this.initialSessionPath || (await findCodexSession(this.cwd, this.thread.id))?.path;
     if (!found || found === this.rolloutPath) return;
     if (this.rolloutPath) unwatchFile(this.rolloutPath);
     this.rolloutPath = found;
@@ -301,12 +309,13 @@ export class CodexDriver extends EventEmitter {
   }
 
   async start() {
+    const t0 = performance.now();
     await this.spawnRpc();
+    logTiming('spawnRpc', t0);
 
-    const modelRes = await this.rpc.request('model/list', {}).catch(() => ({ data: [] }));
-    if (Array.isArray(modelRes?.data)) {
-      this.modelsCache = modelRes.data.filter((m) => !m.hidden).map((m) => mapCodexModel(m, this.currentProvider));
-    }
+    // Run model/list in parallel with thread/read (or thread/start) to avoid serial RPC round-trip.
+    const tThread = performance.now();
+    const modelsPromise = this.rpc.request('model/list', {}).catch(() => ({ data: [] }));
 
     let response;
     if (this.initialSessionId) {
@@ -337,6 +346,12 @@ export class CodexDriver extends EventEmitter {
       });
       this.writerClaimed = true;
     }
+    const modelRes = await modelsPromise;
+    logTiming('thread+models', tThread);
+
+    if (Array.isArray(modelRes?.data)) {
+      this.modelsCache = modelRes.data.filter((m) => !m.hidden).map((m) => mapCodexModel(m, this.currentProvider));
+    }
 
     this.thread = response.thread;
     this.currentProvider = response.modelProvider || this.thread?.modelProvider || 'openai';
@@ -345,9 +360,12 @@ export class CodexDriver extends EventEmitter {
     if (this.modelsCache.length) {
       this.modelsCache = this.modelsCache.map((m) => ({ ...m, provider: this.currentProvider }));
     }
-    await this.refreshEntries().catch(() => {});
-    await this.watchRolloutFile().catch(() => {});
+    const tEntries = performance.now();
+    await this.refreshEntries({ initial: true }).catch(() => {});
+    logTiming('refreshEntries', tEntries);
+    void this.watchRolloutFile().catch(() => {});
     invalidateCodexCatalog();
+    logTiming('start.total', t0);
   }
 
   currentModelObject() {
@@ -395,11 +413,14 @@ export class CodexDriver extends EventEmitter {
     return this.rpc.request(method, params, timeoutMs);
   }
 
-  async refreshEntries() {
+  async refreshEntries({ initial = false } = {}) {
     if (!this.thread?.id) return [];
+    const generation = ++this.entriesGeneration;
+    const maxPages = initial ? 2 : 4;
     const turns = [];
     let cursor = null;
-    for (let page = 0; page < 4; page += 1) {
+    let remainingCursor = null;
+    for (let page = 0; page < maxPages; page += 1) {
       const res = await this.callRpc('thread/turns/list', {
         threadId: this.thread.id,
         cursor,
@@ -408,13 +429,45 @@ export class CodexDriver extends EventEmitter {
         itemsView: 'full',
       });
       if (Array.isArray(res?.data)) turns.push(...res.data);
-      if (!res?.nextCursor) break;
+      if (!res?.nextCursor) {
+        remainingCursor = null;
+        break;
+      }
       cursor = res.nextCursor;
+      remainingCursor = cursor;
     }
+    if (generation !== this.entriesGeneration) return this.cachedEntries;
     turns.reverse();
     this.cachedEntries = turnsToEntries(turns);
     this.entriesDirty = false;
+    if (initial && remainingCursor) {
+      void this.backfillOlderTurns(generation, remainingCursor, 4 - maxPages).catch(() => {});
+    }
     return this.cachedEntries;
+  }
+
+  async backfillOlderTurns(generation, startCursor, pages) {
+    if (!this.thread?.id || pages <= 0) return;
+    const older = [];
+    let cursor = startCursor;
+    for (let page = 0; page < pages && cursor; page += 1) {
+      if (generation !== this.entriesGeneration || this.activeTurnId) return;
+      const res = await this.callRpc('thread/turns/list', {
+        threadId: this.thread.id,
+        cursor,
+        limit: 25,
+        sortDirection: 'desc',
+        itemsView: 'full',
+      });
+      if (Array.isArray(res?.data)) older.push(...res.data);
+      cursor = res?.nextCursor ?? null;
+    }
+    if (generation !== this.entriesGeneration || this.activeTurnId || !older.length) return;
+    older.reverse();
+    const olderEntries = turnsToEntries(older);
+    if (olderEntries.length) {
+      this.cachedEntries = [...olderEntries, ...this.cachedEntries];
+    }
   }
 
   async entries() {
@@ -754,10 +807,12 @@ export class CodexDriver extends EventEmitter {
   }
 
   async stop() {
+    this.stopping = true;
     if (this.rolloutPath) {
       unwatchFile(this.rolloutPath);
       this.rolloutPath = undefined;
     }
+    if (this.restartingRpc) await this.restartingRpc.catch(() => {});
     await this.rpc?.stop();
   }
 }

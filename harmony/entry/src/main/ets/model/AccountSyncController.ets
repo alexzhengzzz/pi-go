@@ -113,6 +113,14 @@ export class AccountSyncController {
     return this.cloudStore;
   }
 
+  dispose(): void {
+    if (this.cloudTimer !== -1) {
+      clearTimeout(this.cloudTimer);
+      this.cloudTimer = -1;
+    }
+    this.cloudRevision += 1;
+  }
+
   scheduleCloudSync(delay: number = 650): void {
     const profile = this.state.huaweiProfile;
     if (!profile) return;

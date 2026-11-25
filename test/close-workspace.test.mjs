@@ -21,8 +21,9 @@ function fakeWorker(context, ipc, { id, cwd, idle, name }) {
     acceptsImage: true, model: { provider: "pi-go-test", id: "fixture", name: "Fixture" } };
   const server = createServer(async (req, res) => {
     const reply = (status, data) => { res.writeHead(status, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); };
-    if (req.method === "GET" && (req.url === "/session" || req.url === "/chat")) {
-      return reply(200, req.url === "/session" ? { session } : { session, messages: [], liveText: "", historyCursor: undefined });
+    const pathname = new URL(req.url ?? "/", "http://pi-go").pathname;
+    if (req.method === "GET" && (pathname === "/session" || pathname === "/chat")) {
+      return reply(200, pathname === "/session" ? { session } : { session, messages: [], liveText: "", historyCursor: undefined });
     }
     reply(404, { error: "not_found" });
   });

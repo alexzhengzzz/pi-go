@@ -30,6 +30,7 @@
     "host/bridge/run-results.mjs",
     "host/bridge/run-push.mjs",
     "host/bridge/session-metadata.mjs",
+    "host/bridge/session-snapshot.mjs",
     "host/bridge/workspace-files.mjs",
     "host/bridge/lan-tls.mjs",
     "host/bridge/lan-discovery.mjs",

@@ -16,6 +16,7 @@ import { entryInstances } from '../EntryInstanceRegistry';
 import { CommandList, CommandState, commandDraft, skillDraft } from '../model/CommandState';
 import { ConnectionManager, PairingRequest } from '../model/ConnectionManager';
 import { ChatState } from '../model/ChatState';
+import type { TranscriptCacheBook } from '../model/ChatState';
 import { SessionCatalog, SessionStore, SIDEBAR_VIEWS, WorkspacePage, workspaceName } from '../model/SessionStore';
 import { headerSymbol } from '../components/HeaderSymbol';
 import { PiGoClient } from '../model/PiGoClient';
@@ -27,6 +28,7 @@ import { SessionSidebar } from '../components/SessionSidebar';
 import { ChatComposer } from '../components/ChatComposer';
 import { ChatTranscript } from '../components/ChatTranscript';
 import { RunResultView } from '../components/RunResultView';
+import { bannerTransition, modalFadeTransition, pagePushTransition } from '../components/PageTransitions';
 import { DiffLine, InboxRun, RunEvent, RunFile, RunScreenshot } from '../RunResults';
 import { KeyboardAvoidMode, UIContext } from '@kit.ArkUI';
 import { inputMethod } from '@kit.IMEKit';
@@ -39,7 +41,7 @@ import { closeConversationWindows, findConversationWindow, prepareConversationWi
 import { panePath, paneQuery, WindowConversation } from '../model/WindowConversation';
 import { preferences } from '@kit.ArkData';
 import { pasteboard } from '@kit.BasicServicesKit';
-import { Companion, CredentialVault } from '../CredentialVault';
+import { Companion, ComputerBook, CredentialVault, subscribeComputerBook } from '../CredentialVault';
 import { AppearanceMode, THEME_MOTION_SETTING, ThemePalette, appearanceMode, canvasFadeStops, openSettings, themePalette, themeStyle } from '../Appearance';
 import { HuaweiProfile } from '../HuaweiProfile';
 import { CloudComputer, SYNC_MODE, SYNC_THEME } from '../AccountSync';
@@ -232,6 +234,8 @@ struct Index {
   private readonly library: Scroller = new Scroller();
   private readonly sidebarRows: SidebarRows = new SidebarRows();
   private pendingLibraryReveal: boolean = false;
+  private disposed: boolean = false;
+  private unsubscribeVault?: () => void = undefined;
 
   onBackPress(): boolean {
     if (this.fileController.state.markdownTableReader) { this.fileController.closeMarkdownTableReader(); return true; }
@@ -266,6 +270,11 @@ struct Index {
   }
 
   aboutToAppear(): void {
+    this.disposed = false;
+    this.unsubscribeVault = subscribeComputerBook((book: ComputerBook, source: CredentialVault): void => {
+      if (this.disposed || source === this.vault) return;
+      this.computers = this.connection.restoreComputers(book.computers, (): string => util.generateRandomUUID());
+    });
     this.getUIContext().setKeyboardAvoidMode(KeyboardAvoidMode.RESIZE);
     const context = this.getUIContext().getHostContext();
     if (context) {
@@ -324,6 +333,10 @@ struct Index {
     this.voiceComposer.resetVoice();
   }
   aboutToDisappear(): void {
+    this.disposed = true;
+    this.unsubscribeVault?.();
+    this.unsubscribeVault = undefined;
+    this.accountSync.dispose();
     this.voiceComposer.disposeReplySpeech();
     if (this.fileController.state.markdownTableReader) this.fileController.closeMarkdownTableReader();
     this.visible = false;
@@ -348,6 +361,11 @@ struct Index {
     const epoch = this.session.epoch;
     try {
       this.vault = await CredentialVault.open(context);
+      const cachedBook = await this.vault.loadTranscriptCache();
+      this.chatState.restoreTranscriptCache(cachedBook);
+      this.chatState.setCachePersister((book: TranscriptCacheBook): void => {
+        void this.vault?.saveTranscriptCache(book);
+      });
       const saved = await this.vault.load();
       if (!saved || epoch !== this.session.epoch) return;
       this.computers = this.connection.restoreComputers(saved.computers, (): string => util.generateRandomUUID());
@@ -372,7 +390,7 @@ struct Index {
     if (!validUsb(address)) return;
     await this.restoreChain;
     for (let attempt = 0; attempt < 40; attempt++) {
-      if (this.launchTicket !== ticket) return;
+      if (this.disposed || this.launchTicket !== ticket) return;
       if (!this.session.busy && !this.session.openingSession) {
         this.launchTicket = '';
         if (!this.addingComputer) this.pairingComputerId = '';
@@ -400,7 +418,7 @@ struct Index {
     }
     await this.restoreChain;
     for (let attempt = 0; attempt < 40; attempt++) {
-      if (this.liveLaunchSession !== id) return;
+      if (this.disposed || this.liveLaunchSession !== id) return;
       if (this.visible && !this.loading && !this.session.busy && !this.session.openingSession) {
         const address = this.liveLaunchAddress;
         if (address && address !== this.base) {
@@ -577,9 +595,9 @@ struct Index {
     this.showFiles = false;
     this.session.showSettings = false;
     this.showSessions = false;
-    this.scheduleController.state.schedulePage = '';
     const key = this.streamSync.draftKey(id);
     if (pendingId) {
+      this.scheduleController.state.schedulePage = '';
       try {
         const result = await this.request('/session/snapshot');
         if (key !== this.streamSync.draftKey(this.session.currentId)) return false;
@@ -592,9 +610,22 @@ struct Index {
       } catch { this.streamSync.schedule(0); }
     }
     await this.runCenter.syncRunResults(this.connection.endpoint(), id, key);
+    let openedRun: RunEvent | undefined = undefined;
     if (!pendingId && key === this.streamSync.draftKey(this.session.currentId) && this.runCenter.state.sessionRunKey === key) {
-      const run = this.runCenter.state.sessionRuns.find((row: RunEvent): boolean => row.id === eventId);
-      if (run) this.runCenter.openRunResult(run);
+      openedRun = this.runCenter.state.sessionRuns.find((row: RunEvent): boolean => row.id === eventId);
+      if (openedRun) this.runCenter.openRunResult(openedRun);
+    }
+    if (this.scheduleController.state.schedulePage) {
+      if (openedRun) {
+        const openedId = openedRun.id;
+        setTimeout(() => {
+          if (this.runCenter.state.reviewedRun?.id === openedId) {
+            this.scheduleController.state.schedulePage = '';
+          }
+        }, 260);
+      } else {
+        this.scheduleController.state.schedulePage = '';
+      }
     }
     return true;
   }
@@ -1083,7 +1114,7 @@ struct Index {
 
   private sessionDeleted(id: string): void {
     this.sessions = this.sessions.filter((row: SessionRow): boolean => row.id !== id);
-    this.chatState.chatCache.delete(this.streamSync.draftKey(id));
+    this.chatState.deleteTranscriptCache(this.streamSync.draftKey(id));
     if (this.session.currentId === id) {
       this.showSessions = !this.dockedSessions();
       void this.loadSessions();
@@ -1180,7 +1211,7 @@ struct Index {
   }
 
   private leaveComputer(revoked: boolean = false, next?: Companion): void {
-    if (this.launchedNativeWindow || this.openingNativeWindow) closeConversationWindows();
+    if (this.launchedNativeWindow || this.openingNativeWindow) closeConversationWindows(this.base);
     if (this.splitOpen) this.clearSplit();
     if (this.fileController.state.markdownTableReader) this.fileController.closeMarkdownTableReader();
     this.fileController.state.textFilePreview = undefined;
@@ -1220,7 +1251,7 @@ struct Index {
     this.session.liveSeq = 0;
     this.session.messages = [];
     this.sessions = [];
-    this.chatState.chatCache.clear();
+    this.chatState.forgetTranscriptCache();
     this.runningSessionIds = [];
     this.runningSessions = [];
     this.runCenter.clearObservedRuns();
@@ -2314,6 +2345,7 @@ struct Index {
   mineView() {
     SettingsView({
       accountBusy: this.accountSync.state.accountBusy,
+      active: this.visible && this.activeTab === 'mine',
       accountNotice: this.accountSync.state.accountNotice,
       addComputerConnection: (id?: string): void => this.addComputerConnection(id),
       addingComputer: this.addingComputer,
@@ -2768,10 +2800,13 @@ struct Index {
 
   @Builder
   chat() {
-    if (this.showFiles) {
-      this.workspaceFiles()
-    } else if (this.session.showSettings) {
-      SessionSettings({
+    Stack({ alignContent: Alignment.TopStart }) {
+      if (this.showFiles) {
+        Column() {
+          this.workspaceFiles()
+        }.width('100%').height('100%')
+      } else if (this.session.showSettings) {
+        SessionSettings({
         renameDraft: this.session.renameDraft,
         busy: this.session.busy,
         reachable: this.session.reachable,
@@ -2804,12 +2839,16 @@ struct Index {
         share: (): void => { void this.shareController.shareCurrentSession('session-share'); },
         thinkingLevelLabel: (level: string): string => this.thinkingLevelLabel(level)
       })
-    } else if (this.activeTab === 'pending') {
-      this.taskView()
-    } else if (this.session.noSession && !this.splitOpen) {
-      this.welcome()
-    } else {
-      Stack({ alignContent: Alignment.Bottom }) {
+      } else if (this.activeTab === 'pending') {
+        Column() {
+          this.taskView()
+        }.width('100%').height('100%')
+      } else if (this.session.noSession && !this.splitOpen) {
+        Column() {
+          this.welcome()
+        }.width('100%').height('100%')
+      } else {
+        Stack({ alignContent: Alignment.Bottom }) {
         if (this.splitOpen) {
           this.splitConversation()
         } else {
@@ -2860,8 +2899,9 @@ struct Index {
           right: 16,
           bottom: this.composerBottomMargin()
         }).animation({ duration: 240, curve: Curve.FastOutSlowIn })
-      }.width('100%').layoutWeight(1)
-    }
+        }.width('100%').height('100%')
+      }
+    }.width('100%').layoutWeight(1)
   }
 
   @Builder
@@ -3654,6 +3694,7 @@ struct Index {
           .backgroundColor(this.darkMode ? '#52000000' : '#2E0F1722').borderRadius(0)
           .accessibilityText('关闭会话列表').onClick(() => { this.setDrawer(false); })
           .gesture(PanGesture({ direction: PanDirection.Horizontal }).onActionEnd((event: GestureEvent) => { this.swipeDrawer(event); }))
+          .transition(modalFadeTransition())
       }
       if (this.dockedSessions() || this.drawerOpen()) {
         this.sessionDrawer()
@@ -3685,57 +3726,57 @@ struct Index {
         }.width('100%').height('100%').justifyContent(FlexAlign.Center)
           .hitTestBehavior(HitTestMode.None)
       }
-      if (this.fileController.state.editingPath || this.fileController.state.textFilePreview) {
+      if (this.fileController.state.editingPath) {
         Stack({ alignContent: Alignment.Top }) {
-          if (this.fileController.state.editingPath) {
-            WorkspaceFileEditor({
-              editingPath: this.fileController.state.editingPath,
-              fileText: this.fileController.state.fileText,
-              fileOriginal: this.fileController.state.fileOriginal,
-              busy: this.session.busy,
-              reachable: this.session.reachable,
-              editorNotice: this.fileController.state.editorNotice,
-              darkMode: this.darkMode,
-              headerHeight: this.headerHeight(),
-              statusBarHeight: this.statusBarHeight,
-              bottomPad: this.bottomPad(),
-              accent: this.accent(),
-              accentForeground: this.accentForeground(),
-              back: (): void => this.fileController.returnToFilePreview(true),
-              showPreview: (): void => this.fileController.previewDraft(),
-              changeText: (text: string): void => { this.fileController.state.fileText = text; },
-              saveFile: (): Promise<void> => this.fileController.saveFile()
-            })
-          }
-          if (this.fileController.state.textFilePreview) {
-            Stack({ alignContent: Alignment.Top }) {
-              TextFilePreviewPage({
-                preview: this.fileController.state.textFilePreview,
-                busy: this.session.busy,
-                savingPreview: this.fileController.state.savingPreview,
-                canEdit: !this.fileController.state.editingPath,
-                previewNotice: this.fileController.state.previewNotice,
-                previewScroller: this.previewScroller,
-                pageNumber: this.fileController.previewPageNumber(),
-                darkMode: this.darkMode,
-                headerHeight: this.headerHeight(),
-                statusBarHeight: this.statusBarHeight,
-                bottomPad: this.bottomPad(),
-                accent: this.accent(),
-                accentForeground: this.accentForeground(),
-                close: (): void => { this.fileController.state.textFilePreview = undefined; },
-                editPreview: (preview: ReceivedFilePreview): void => this.fileController.editPreview(preview),
-                savePreviewLocally: (preview: ReceivedFilePreview): Promise<void> => this.fileController.savePreviewLocally(preview),
-                reopenSystemPreview: (preview: ReceivedFilePreview): Promise<void> => this.fileController.reopenSystemPreview(preview),
-                imagePreviewError: (preview: ReceivedFilePreview): Promise<void> => this.fileController.imagePreviewError(preview),
-                changePreviewPage: (forward: boolean): void => this.fileController.changePreviewPage(forward),
-                markdownBody: (): void => this.textPreviewMarkdown()
-              })
-            }.width('100%').height('100%').backgroundColor(this.themeCanvas())
-              .hitTestBehavior(HitTestMode.BLOCK_HIERARCHY)
-          }
+          WorkspaceFileEditor({
+            editingPath: this.fileController.state.editingPath,
+            fileText: this.fileController.state.fileText,
+            fileOriginal: this.fileController.state.fileOriginal,
+            busy: this.session.busy,
+            reachable: this.session.reachable,
+            editorNotice: this.fileController.state.editorNotice,
+            darkMode: this.darkMode,
+            headerHeight: this.headerHeight(),
+            statusBarHeight: this.statusBarHeight,
+            bottomPad: this.bottomPad(),
+            accent: this.accent(),
+            accentForeground: this.accentForeground(),
+            back: (): void => this.fileController.returnToFilePreview(true),
+            showPreview: (): void => this.fileController.previewDraft(),
+            changeText: (text: string): void => { this.fileController.state.fileText = text; },
+            saveFile: (): Promise<void> => this.fileController.saveFile()
+          })
         }.width('100%').height('100%').backgroundColor(this.themeCanvas())
           .hitTestBehavior(HitTestMode.BLOCK_HIERARCHY)
+          .transition(pagePushTransition())
+      }
+      if (this.fileController.state.textFilePreview) {
+        Stack({ alignContent: Alignment.Top }) {
+          TextFilePreviewPage({
+            preview: this.fileController.state.textFilePreview,
+            busy: this.session.busy,
+            savingPreview: this.fileController.state.savingPreview,
+            canEdit: !this.fileController.state.editingPath,
+            previewNotice: this.fileController.state.previewNotice,
+            previewScroller: this.previewScroller,
+            pageNumber: this.fileController.previewPageNumber(),
+            darkMode: this.darkMode,
+            headerHeight: this.headerHeight(),
+            statusBarHeight: this.statusBarHeight,
+            bottomPad: this.bottomPad(),
+            accent: this.accent(),
+            accentForeground: this.accentForeground(),
+            close: (): void => { this.fileController.state.textFilePreview = undefined; },
+            editPreview: (preview: ReceivedFilePreview): void => this.fileController.editPreview(preview),
+            savePreviewLocally: (preview: ReceivedFilePreview): Promise<void> => this.fileController.savePreviewLocally(preview),
+            reopenSystemPreview: (preview: ReceivedFilePreview): Promise<void> => this.fileController.reopenSystemPreview(preview),
+            imagePreviewError: (preview: ReceivedFilePreview): Promise<void> => this.fileController.imagePreviewError(preview),
+            changePreviewPage: (forward: boolean): void => this.fileController.changePreviewPage(forward),
+            markdownBody: (): void => this.textPreviewMarkdown()
+          })
+        }.width('100%').height('100%').backgroundColor(this.themeCanvas())
+          .hitTestBehavior(HitTestMode.BLOCK_HIERARCHY)
+          .transition(pagePushTransition())
       }
       if (this.fileController.state.markdownTableReader) {
         MarkdownTableReaderPage({
@@ -3812,6 +3853,7 @@ struct Index {
           })
         }.width('100%').justifyContent(FlexAlign.Center)
           .margin({ top: this.statusBarHeight + this.headerHeight() + 10 }).hitTestBehavior(HitTestMode.Transparent)
+          .transition(bannerTransition())
       }
       if (this.scheduleController.state.schedulePage) this.scheduleOverlay()
       if (this.runCenter.state.reviewedRun) {
@@ -3853,6 +3895,7 @@ struct Index {
           })
         }.width('100%').justifyContent(FlexAlign.Center)
           .margin({ top: this.statusBarHeight + this.headerHeight() + 8 }).hitTestBehavior(HitTestMode.Transparent)
+          .transition(bannerTransition())
       }
     }.width('100%').height('100%').padding({ left: this.leftInset, right: this.rightInset })
       .backgroundColor(this.themeCanvas())

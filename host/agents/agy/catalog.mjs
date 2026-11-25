@@ -168,6 +168,30 @@ function querySummariesDb(dbPath, appName) {
   }
 }
 
+function querySummaryById(dbPath, id, appName) {
+  if (!existsSync(dbPath)) return undefined;
+  let db;
+  try {
+    db = new DatabaseSync(dbPath, { readOnly: true });
+    const stmt = db.prepare(`
+      SELECT conversation_id, title, preview, step_count, last_modified_time,
+             workspace_uris, parent_conversation_id, nesting_depth, app_data_dir
+      FROM conversation_summaries
+      WHERE conversation_id = ?
+      LIMIT 1
+    `);
+    const row = stmt.get(id);
+    if (!row || typeof row.conversation_id !== 'string' || !idPattern.test(row.conversation_id)) return undefined;
+    if (row.parent_conversation_id || Number(row.nesting_depth) > 0) return undefined;
+    if (row.app_data_dir && appName && row.app_data_dir !== appName) return undefined;
+    return row;
+  } catch {
+    return undefined;
+  } finally {
+    try { db?.close(); } catch {}
+  }
+}
+
 async function inspectSidecarSession(home, id, filePath, info, workspace, locations) {
   let meta;
   const metaFile = join(home, 'conversations', `${id}.json`);
@@ -313,11 +337,68 @@ export async function listAgySessions(cwd, refresh = false) {
 export async function findAgySession(cwd, id) {
   if (!idPattern.test(id)) return undefined;
   const target = cwd ? await realpath(cwd).catch(() => cwd) : undefined;
-  const rows = await agyComputerSessions(undefined, target, false);
-  const found = rows.find((row) => row.id === id);
-  if (found) return found;
-  const refreshed = await agyComputerSessions(undefined, target, true);
-  return refreshed.find((row) => row.id === id);
+  const homes = [];
+  for (const item of agyHomes()) {
+    const resolved = await realpath(item.dir).catch(() => undefined);
+    if (resolved) homes.push({ dir: resolved, appDataDir: item.appDataDir });
+  }
+  if (!homes.length) return undefined;
+
+  const homesKey = homes.map((h) => h.dir).join(':');
+  for (const key of [target ?? '', '']) {
+    const hit = cache.get(key);
+    if (hit?.homesKey === homesKey && Date.now() - hit.time < cacheMs) {
+      const cached = hit.rows.find((row) => row.id === id && (!target || row.cwd === target));
+      if (cached) {
+        const exists = await stat(cached.path).catch(() => undefined);
+        if (exists) return cached;
+      }
+    }
+  }
+
+  const locations = new Map();
+  const resolveCwd = (dir) => {
+    if (!locations.has(dir)) locations.set(dir, realpath(dir).catch(() => dir));
+    return locations.get(dir);
+  };
+  for (const { dir: home, appDataDir } of homes) {
+    const convDir = join(home, 'conversations');
+    const convFile = join(convDir, `${id}.db`);
+    const fileStat = await stat(convFile).catch(() => undefined);
+    if (!fileStat) continue;
+
+    const row = querySummaryById(join(home, 'conversation_summaries.db'), id, appDataDir);
+    if (row) {
+      const uris = parseWorkspaceUris(row.workspace_uris);
+      if (uris.length) {
+        const cwds = await Promise.all(uris.map((u) => resolveCwd(u)));
+        const matchedCwd = target ? cwds.find((c) => c === target) : cwds[0];
+        if (matchedCwd) {
+          const rawTitle = typeof row.title === 'string' ? row.title.trim() : '';
+          const rawPreview = cleanAgyPreview(row.preview);
+          const previewTitle = rawPreview ? sessionTitlePreview(rawPreview) : undefined;
+          const stepCount = Number(row.step_count) || 0;
+          if (rawTitle || previewTitle || stepCount > 0) {
+            return {
+              agent: 'agy',
+              id,
+              cwd: matchedCwd,
+              path: convFile,
+              appDataDir: row.app_data_dir || appDataDir,
+              name: rawTitle || previewTitle || '未命名会话',
+              modified: toIsoDate(row.last_modified_time, fileStat.mtimeMs),
+              messageCount: Math.max(1, stepCount),
+              active: false,
+            };
+          }
+        }
+      }
+    }
+
+    const sidecar = await inspectSidecarSession(home, id, convFile, fileStat, target, locations).catch(() => undefined);
+    if (sidecar) return { ...sidecar, appDataDir: sidecar.appDataDir || appDataDir };
+  }
+  return undefined;
 }
 
 export function readAgyTranscriptEntries(sessionId) {

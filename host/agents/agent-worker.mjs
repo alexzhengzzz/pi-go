@@ -19,15 +19,18 @@ const option = (name) => {
 const agent = option('--agent') || 'codex';
 const cwd = option('--cwd') || process.cwd();
 const sessionId = option('--session');
+const sessionPath = option('--session-path');
+const appDataDir = option('--app-data-dir');
+const sessionName = option('--session-name');
 const attach = argv.includes('--attach');
 const scheduled = process.env.PIGO_SCHEDULED_RESULTS === '1';
 
 async function main() {
   let driver;
   if (agent === 'codex') {
-    driver = new CodexDriver({ cwd, sessionId, attach, scheduled });
+    driver = new CodexDriver({ cwd, sessionId, sessionPath, sessionName, attach, scheduled });
   } else if (agent === 'agy') {
-    driver = new AgyDriver({ cwd, sessionId, attach, scheduled });
+    driver = new AgyDriver({ cwd, sessionId, sessionPath, appDataDir, sessionName, attach, scheduled });
   } else {
     throw new Error(`unsupported_agent:${agent}`);
   }
@@ -56,6 +59,11 @@ async function main() {
   process.on('SIGTERM', () => { void shutdown(); });
   process.on('SIGINT', () => { void shutdown(); });
   process.stdin.on('error', () => {});
+  if (!process.stdin.isTTY) {
+    process.stdin.resume();
+    process.stdin.once('end', () => { void shutdown(); });
+    process.stdin.once('close', () => { void shutdown(); });
+  }
 }
 
 main().catch((error) => {

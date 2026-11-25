@@ -209,9 +209,19 @@ export class SessionActions {
     const liveRevision = this.session.liveRevision;
     let chat = result;
     if (!chat.cursor || chat.messages === undefined) {
+      const previousId = this.session.currentId;
+      const previousCwd = this.session.workspaceCwd;
       this.session.currentId = expected.id;
       this.session.workspaceCwd = expected.cwd;
-      chat = await this.streamSync.requestSessionSnapshot(epoch, true);
+      try {
+        chat = await this.streamSync.requestSessionSnapshot(epoch, true);
+      } catch (error) {
+        if (epoch === this.session.epoch) {
+          this.session.currentId = previousId;
+          this.session.workspaceCwd = previousCwd;
+        }
+        throw error as Error;
+      }
     } else if (this.session.syncMode === 'probe') {
       this.session.syncMode = 'sequenced';
     }

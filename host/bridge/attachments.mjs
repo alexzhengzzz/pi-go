@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { mkdirSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { lstatSync, mkdirSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { join, sep } from 'node:path';
 
 export const maxHistoryImageBase64 = Math.ceil(8 * 1024 * 1024 / 3) * 4;
 export const maxImageBytes = 512 * 1024;
@@ -76,6 +76,18 @@ function pruneAttachments(directory) {
   } catch {}
 }
 
+function assertNoSymlinkEscape(cwd, target) {
+  const rootReal = realpathSync(cwd);
+  const info = lstatSync(target, { throwIfNoEntry: false });
+  if (info?.isSymbolicLink()) throw new Error('path_forbidden');
+  if (info) {
+    const targetReal = realpathSync(target);
+    if (targetReal !== rootReal && !targetReal.startsWith(rootReal + sep)) {
+      throw new Error('path_forbidden');
+    }
+  }
+}
+
 // Content-addressed staging: re-uploading identical bytes is idempotent, so
 // phone retries and duplicate sends never fork extra files.
 export function stageAttachment(cwd, name, bytes) {
@@ -83,17 +95,20 @@ export function stageAttachment(cwd, name, bytes) {
   const safe = safeAttachmentName(name);
   if (!safe) throw new Error('invalid_attachment');
   const directory = stagingDir(cwd);
+  assertNoSymlinkEscape(cwd, join(cwd, '.pi-go'));
   mkdirSync(directory, { recursive: true, mode: 0o700 });
+  assertNoSymlinkEscape(cwd, directory);
   const token = tokenOf(bytes);
   const target = join(directory, `${token}-${safe}`);
-  if (statSync(target, { throwIfNoEntry: false }) === undefined) {
+  assertNoSymlinkEscape(cwd, target);
+  if (lstatSync(target, { throwIfNoEntry: false }) === undefined) {
     const temporary = join(directory, `.tmp-${process.pid}-${randomBytes(4).toString('hex')}`);
     try {
       writeFileSync(temporary, bytes, { mode: 0o600, flag: 'wx' });
       renameSync(temporary, target);
     } catch (cause) {
       try { unlinkSync(temporary); } catch {}
-      if (statSync(target, { throwIfNoEntry: false }) === undefined) throw cause;
+      if (lstatSync(target, { throwIfNoEntry: false }) === undefined) throw cause;
     }
   }
   pruneAttachments(directory);
@@ -103,7 +118,11 @@ export function stageAttachment(cwd, name, bytes) {
 export function stagedAttachment(cwd, token) {
   if (typeof token !== 'string' || !/^[a-f0-9]{16}$/.test(token)) return undefined;
   let directory;
-  try { directory = stagingDir(cwd); } catch { return undefined; }
+  try {
+    directory = stagingDir(cwd);
+    assertNoSymlinkEscape(cwd, join(cwd, '.pi-go'));
+    assertNoSymlinkEscape(cwd, directory);
+  } catch { return undefined; }
   let found;
   try {
     for (const name of readdirSync(directory).sort()) {
@@ -116,7 +135,11 @@ export function stagedAttachment(cwd, token) {
   } catch { return undefined; }
   if (found === undefined) return undefined;
   const path = join(directory, `${token}-${found}`);
-  const info = statSync(path, { throwIfNoEntry: false });
+  let info;
+  try {
+    assertNoSymlinkEscape(cwd, path);
+    info = lstatSync(path, { throwIfNoEntry: false });
+  } catch { return undefined; }
   if (info === undefined || !info.isFile() || info.size > maxFileBytes) return undefined;
   return { token, path, name: found, size: info.size };
 }

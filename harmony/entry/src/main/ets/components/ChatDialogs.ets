@@ -4,6 +4,7 @@ import { toolActionTitle } from '../TranscriptTurns';
 import { AgentInfo, LiveTool, PendingInteraction, ToolDetails, WorkspaceRow } from '../model/PiGoTypes';
 import { workspaceName } from '../model/SessionStore';
 import { unboundAction } from './ComponentAction';
+import { modalCardTransition, modalFadeTransition } from './PageTransitions';
 
 @Extend(Button)
 function chatAction() {
@@ -123,7 +124,9 @@ export struct NewSessionDialog {
         }.width('100%').padding(18)
       }.width('90%').constraintSize({ maxWidth: 380, maxHeight: this.windowHeight * 0.85 })
         .scrollBar(BarState.Auto).attributeModifier(glassCardSurface(this.darkMode, 20, true))
+        .transition(modalCardTransition())
     }.id('new-session-dialog').width('100%').height('100%')
+      .transition(modalFadeTransition())
   }
 }
 
@@ -165,7 +168,9 @@ export struct NewSpaceDialog {
         }.width('100%')
       }.width('90%').constraintSize({ maxWidth: 360 }).padding(18)
         .attributeModifier(glassCardSurface(this.darkMode, 20, true))
+        .transition(modalCardTransition())
     }.id('new-space-dialog').width('100%').height('100%')
+      .transition(modalFadeTransition())
   }
 }
 

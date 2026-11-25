@@ -2,6 +2,7 @@ import { glassButtonSurface } from '../Immersive';
 import { ReceivedFilePreview } from '../model/PiGoTypes';
 import { unboundAction } from './ComponentAction';
 import { headerSymbol } from './HeaderSymbol';
+import { pagePushTransition } from './PageTransitions';
 
 @Extend(Button)
 function chatAction() {
@@ -141,6 +142,7 @@ export struct MarkdownTableReaderPage {
     }.width('100%').height('100%').padding({
       left: 16, right: 16, top: this.statusBarHeight + 8, bottom: this.bottomPad + 4
     }).backgroundColor(this.canvas).hitTestBehavior(HitTestMode.BLOCK_HIERARCHY)
+      .transition(pagePushTransition())
   }
 }
 

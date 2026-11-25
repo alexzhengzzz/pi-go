@@ -15,7 +15,7 @@ fi
 result="$("$hdc" "${target_flags[@]}" install -r "$hap")"
 print -r -- "$result"
 [[ "$result" == *'successfully'* || "$result" == *'Success'* ]] || exit 1
-if ! "$hdc" "${target_flags[@]}" fport ls | rg -q "tcp:$port tcp:$port.*Reverse"; then
+if ! "$hdc" "${target_flags[@]}" fport ls | grep -q "tcp:$port tcp:$port.*Reverse"; then
   "$hdc" "${target_flags[@]}" rport "tcp:$port" "tcp:$port"
 fi
 "$hdc" "${target_flags[@]}" shell aa start -a EntryAbility -b "$bundle" --ps address "http://127.0.0.1:$port"

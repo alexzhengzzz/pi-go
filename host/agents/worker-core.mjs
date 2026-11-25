@@ -555,8 +555,14 @@ export function createWorkerServer(driver, {
           if (!toolId) {
             const entry = entries.find((row) => row.id === parameters.get('message'));
             if (!entry || !['user', 'assistant'].includes(entry.role)) return fail(404, 'image_not_found');
-            const content = (entry.images ?? []).map((img) => ({ type: 'image', mimeType: img.mimeType, data: img.data }));
-            return replyImage(response, content, Number(imageIndex));
+            const idx = Number(imageIndex);
+            const target = (entry.images ?? [])[idx];
+            if (!target) return fail(404, 'image_not_found');
+            let data = target.data;
+            if ((!data || typeof data !== 'string') && typeof target.path === 'string') {
+              try { data = readFileSync(target.path).toString('base64'); } catch { return fail(404, 'image_not_found'); }
+            }
+            return replyImage(response, [{ type: 'image', mimeType: target.mimeType, data }], 0);
           }
         }
         const toolsByMessage = new Map();

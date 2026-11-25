@@ -103,8 +103,8 @@ struct Result: Decodable { var ok: Bool; var data: Payload?; var error: String? 
             env["PIGO_APP_RESOURCES"] = resources.path
             env["PATH"] = "\(URL(fileURLWithPath: node).deletingLastPathComponent().path):/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
             process.environment = env
-            let output = Pipe(), input = Pipe(), errors = Pipe()
-            process.standardOutput = output; process.standardInput = input; process.standardError = errors
+            let output = Pipe(), input = Pipe()
+            process.standardOutput = output; process.standardInput = input; process.standardError = FileHandle.nullDevice
             try process.run()
             input.fileHandleForWriting.write(encoded); try input.fileHandleForWriting.close()
             let data = output.fileHandleForReading.readDataToEndOfFile()

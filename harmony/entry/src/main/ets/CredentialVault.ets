@@ -2,8 +2,10 @@ import type { common } from '@kit.AbilityKit';
 import { preferences } from '@kit.ArkData';
 import { util } from '@kit.ArkTS';
 import type { BusinessError } from '@kit.BasicServicesKit';
+import { fileIo } from '@kit.CoreFileKit';
 import { cryptoFramework } from '@kit.CryptoArchitectureKit';
 import { huks } from '@kit.UniversalKeystoreKit';
+import type { TranscriptCacheBook } from './model/ChatState';
 import { SIDEBAR_MAX_ENTRIES, SIDEBAR_MAX_EXPANDED, SIDEBAR_VIEWS } from './model/SessionStore';
 import type { SidebarBook, SidebarEntry, SidebarState } from './model/SessionStore';
 
@@ -20,6 +22,14 @@ export interface ComputerBook {
   version: number;
   active: string;
   computers: Companion[];
+}
+
+type ComputerBookListener = (record: ComputerBook, source: CredentialVault) => void;
+const computerBookListeners: Set<ComputerBookListener> = new Set();
+
+export function subscribeComputerBook(listener: ComputerBookListener): () => void {
+  computerBookListeners.add(listener);
+  return (): void => { computerBookListeners.delete(listener); };
 }
 
 interface StoredCompanions {
@@ -57,12 +67,18 @@ export class CredentialVault {
   private readonly encoder: util.TextEncoder = new util.TextEncoder();
   private readonly base64: util.Base64Helper = new util.Base64Helper();
   private readonly store: preferences.Preferences;
+  private readonly cacheFile: string;
   private writing: Promise<void> = Promise.resolve();
+  private cacheWriting: Promise<void> = Promise.resolve();
 
-  private constructor(store: preferences.Preferences) { this.store = store; }
+  private constructor(store: preferences.Preferences, cacheFile: string) {
+    this.store = store;
+    this.cacheFile = cacheFile;
+  }
 
   static async open(context: common.Context): Promise<CredentialVault> {
-    return new CredentialVault(await preferences.getPreferences(context, { name: 'pigo' }));
+    const cacheFile = `${context.filesDir}/pigo-chat-cache.json`;
+    return new CredentialVault(await preferences.getPreferences(context, { name: 'pigo' }), cacheFile);
   }
 
   private properties(purpose: number): huks.HuksParam[] {
@@ -103,7 +119,13 @@ export class CredentialVault {
     const tagAt = bytes.length - 16;
     const properties = this.cipher(huks.HuksKeyPurpose.HUKS_KEY_PURPOSE_DECRYPT, nonce, bytes.slice(tagAt));
     const session = await huks.initSession(this.alias, { properties: properties });
-    const result = await huks.finishSession(session.handle, { properties: properties, inData: bytes.slice(0, tagAt) });
+    let result: huks.HuksReturnResult;
+    try {
+      result = await huks.finishSession(session.handle, { properties: properties, inData: bytes.slice(0, tagAt) });
+    } catch (error) {
+      await huks.abortSession(session.handle, { properties: [] }).catch(() => {});
+      throw error as Error;
+    }
     const text = new util.TextDecoder('utf-8').decodeWithStream(result.outData);
     const stored = JSON.parse(text) as StoredCompanions;
     if (stored.version === 2 && Array.isArray(stored.computers) && typeof stored.active === 'string') {
@@ -125,12 +147,22 @@ export class CredentialVault {
         const nonce = (await cryptoFramework.createRandom().generateRandom(12)).data;
         const properties = this.cipher(huks.HuksKeyPurpose.HUKS_KEY_PURPOSE_ENCRYPT, nonce);
         const session = await huks.initSession(this.alias, { properties: properties });
-        const inData = this.encoder.encodeInto(snapshot);
-        const result = await huks.finishSession(session.handle, { properties: properties, inData: inData });
+        let result: huks.HuksReturnResult;
+        try {
+          const inData = this.encoder.encodeInto(snapshot);
+          result = await huks.finishSession(session.handle, { properties: properties, inData: inData });
+        } catch (error) {
+          await huks.abortSession(session.handle, { properties: [] }).catch(() => {});
+          throw error as Error;
+        }
         const value: Sealed = { nonce: this.base64.encodeToStringSync(nonce), data: this.base64.encodeToStringSync(result.outData) };
         await this.store.put('sealed', JSON.stringify(value));
       }
       await this.store.flush();
+      const copied: ComputerBook = JSON.parse(snapshot) as ComputerBook;
+      computerBookListeners.forEach((listener: ComputerBookListener): void => {
+        if (listener) listener(copied, this);
+      });
     });
     return this.writing;
   }
@@ -169,5 +201,44 @@ export class CredentialVault {
       await this.store.flush();
     });
     return this.writing;
+  }
+
+  async loadTranscriptCache(): Promise<TranscriptCacheBook> {
+    const empty: TranscriptCacheBook = { version: 1, entries: [] };
+    try {
+      const stat = fileIo.statSync(this.cacheFile);
+      if (stat.size <= 0 || stat.size > 512 * 1024) return empty;
+      const file = fileIo.openSync(this.cacheFile, fileIo.OpenMode.READ_ONLY);
+      try {
+        const buffer = new ArrayBuffer(stat.size);
+        const read = fileIo.readSync(file.fd, buffer);
+        const text = util.TextDecoder.create('utf-8').decodeToString(new Uint8Array(buffer, 0, read));
+        const parsed = JSON.parse(text) as TranscriptCacheBook;
+        if (parsed && parsed.version === 1 && Array.isArray(parsed.entries)) return parsed;
+      } finally {
+        fileIo.closeSync(file);
+      }
+    } catch { /* missing or corrupted cache falls back cleanly */ }
+    return empty;
+  }
+
+  saveTranscriptCache(book: TranscriptCacheBook): Promise<void> {
+    const snapshot = JSON.stringify(book);
+    this.cacheWriting = this.cacheWriting.catch(() => {}).then(() => {
+      try {
+        if (!book.entries.length) {
+          try { fileIo.unlinkSync(this.cacheFile); } catch {}
+          return;
+        }
+        if (snapshot.length > 512 * 1024) return;
+        const file = fileIo.openSync(this.cacheFile, fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC | fileIo.OpenMode.WRITE_ONLY);
+        try {
+          fileIo.writeSync(file.fd, snapshot);
+        } finally {
+          fileIo.closeSync(file);
+        }
+      } catch { /* cache persistence is best-effort */ }
+    });
+    return this.cacheWriting;
   }
 }

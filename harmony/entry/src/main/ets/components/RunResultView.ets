@@ -6,6 +6,7 @@ import { canvasFadeStops, ThemePalette, themePalette, themeStyle } from '../Appe
 import { immersiveSurface, themedCardSurface } from '../Immersive';
 import { headerSymbol } from './HeaderSymbol';
 import { runStatusInk, runStatusMark } from './RunStatusMark';
+import { pagePushTransition, subPageTransition } from './PageTransitions';
 
 @ComponentV2
 export struct RunResultView {
@@ -258,24 +259,31 @@ export struct RunResultView {
         .hitTestBehavior(HitTestMode.None)
       Column() {
         this.reviewHeader()
-        if (this.file) {
-          if (this.loading || this.error) {
-            Column({ space: 12 }) {
-              if (this.loading) LoadingProgress().width(28).height(28).color(this.palette().accent)
-              else {
-                Text(this.error).fontSize(14).fontColor($r('app.color.pigo_muted'))
-                Button('重试').height(38).fontSize(13).fontColor(this.palette().accent)
-                  .backgroundColor(this.palette().accentTint)
-                  .onClick(() => { if (this.file) this.openDiff(this.file); })
+        Stack({ alignContent: Alignment.TopStart }) {
+          if (this.file) {
+            Column() {
+              if (this.loading || this.error) {
+                Column({ space: 12 }) {
+                  if (this.loading) LoadingProgress().width(28).height(28).color(this.palette().accent)
+                  else {
+                    Text(this.error).fontSize(14).fontColor($r('app.color.pigo_muted'))
+                    Button('重试').height(38).fontSize(13).fontColor(this.palette().accent)
+                      .backgroundColor(this.palette().accentTint)
+                      .onClick(() => { if (this.file) this.openDiff(this.file); })
+                  }
+                }.layoutWeight(1).justifyContent(FlexAlign.Center).padding({ bottom: this.bottom })
+              } else {
+                this.diffReview(diffLines(this.patch))
               }
-            }.layoutWeight(1).justifyContent(FlexAlign.Center).padding({ bottom: this.bottom })
-          } else {
-            this.diffReview(diffLines(this.patch))
+            }.width('100%').height('100%').transition(subPageTransition())
+          } else if (this.result) {
+            Column() {
+              this.resultOverview(this.result)
+            }.width('100%').height('100%').transition(subPageTransition())
           }
-        } else if (this.result) {
-          this.resultOverview(this.result)
-        }
+        }.layoutWeight(1).width('100%')
       }.width('100%').height('100%')
     }.width('100%').height('100%').backgroundColor(this.palette().canvas).hitTestBehavior(HitTestMode.BLOCK_HIERARCHY)
+      .transition(pagePushTransition())
   }
 }

@@ -2,6 +2,20 @@ import { SessionSync } from '../SessionSync';
 import type { BridgeReply, ChatMessage, DraftAttachment, LiveTool, OptimisticMessage, PendingSend, QueuedSteering, StreamFrame } from './PiGoTypes';
 import { MAX_LIVE_TEXT_LENGTH, STREAM_PAINT_INTERVAL_MS } from './PiGoConstants';
 
+export const CHAT_CACHE_MAX_ENTRIES: number = 16;
+const PERSIST_MAX_MESSAGES: number = 24;
+const PERSIST_MAX_TEXT: number = 2000;
+
+export interface CachedTranscriptEntry {
+  key: string;
+  reply: BridgeReply;
+}
+
+export interface TranscriptCacheBook {
+  version: number;
+  entries: CachedTranscriptEntry[];
+}
+
 interface Transcript {
   messages: ChatMessage[];
   cursor?: string;
@@ -21,6 +35,8 @@ export class ChatState {
   private pendingLiveText: string = '';
   private pendingLiveThinking: string = '';
   private deltaPaintTimer: number = -1;
+  private persistCache?: (book: TranscriptCacheBook) => void;
+  private cacheSaveTimer: number = -1;
 
   constructor(sharedDrafts?: ChatState) {
     this.drafts = sharedDrafts?.drafts ?? new Map<string, string>();
@@ -177,9 +193,95 @@ export class ChatState {
     return false;
   }
 
+  setCachePersister(persist?: (book: TranscriptCacheBook) => void): void {
+    this.persistCache = persist;
+  }
+
+  restoreTranscriptCache(book: TranscriptCacheBook): void {
+    if (!book || book.version !== 1 || !Array.isArray(book.entries)) return;
+    const entries = book.entries.slice(-CHAT_CACHE_MAX_ENTRIES);
+    for (let i = 0; i < entries.length; i++) {
+      const item = entries[i];
+      if (!item || typeof item.key !== 'string' || !item.key || !item.reply?.session?.id) continue;
+      if (!this.chatCache.has(item.key)) {
+        this.chatCache.set(item.key, item.reply);
+      }
+    }
+    while (this.chatCache.size > CHAT_CACHE_MAX_ENTRIES) {
+      const oldest = Array.from(this.chatCache.keys())[0];
+      if (!oldest) break;
+      this.chatCache.delete(oldest);
+    }
+  }
+
+  exportTranscriptCache(): TranscriptCacheBook {
+    const entries: CachedTranscriptEntry[] = [];
+    this.chatCache.forEach((reply: BridgeReply, key: string) => {
+      if (!reply.session) return;
+      const rawMessages = reply.messages ?? [];
+      const sliceStart = Math.max(0, rawMessages.length - PERSIST_MAX_MESSAGES);
+      const messages: ChatMessage[] = [];
+      for (let i = sliceStart; i < rawMessages.length; i++) {
+        const msg = rawMessages[i];
+        const compact: ChatMessage = {
+          id: msg.id,
+          role: msg.role,
+          text: msg.text.length > PERSIST_MAX_TEXT ? msg.text.slice(0, PERSIST_MAX_TEXT) : msg.text,
+          textTruncated: msg.textTruncated || msg.text.length > PERSIST_MAX_TEXT ? true : undefined,
+          imageCount: msg.imageCount,
+          thinking: msg.thinking ? msg.thinking.slice(0, PERSIST_MAX_TEXT) : undefined,
+          thinkingMs: msg.thinkingMs,
+          tools: msg.tools
+        };
+        messages.push(compact);
+      }
+      const compactReply: BridgeReply = {
+        session: reply.session,
+        messages: messages,
+        historyCursor: sliceStart > 0 ? rawMessages[sliceStart].id : reply.historyCursor
+      };
+      entries.push({ key: key, reply: compactReply });
+    });
+    return { version: 1, entries: entries.slice(-CHAT_CACHE_MAX_ENTRIES) };
+  }
+
+  private scheduleCachePersist(): void {
+    if (!this.persistCache) return;
+    if (this.cacheSaveTimer !== -1) clearTimeout(this.cacheSaveTimer);
+    this.cacheSaveTimer = setTimeout(() => {
+      this.cacheSaveTimer = -1;
+      if (this.persistCache) this.persistCache(this.exportTranscriptCache());
+    }, 400);
+  }
+
+  flushTranscriptCache(): void {
+    if (this.cacheSaveTimer !== -1) {
+      clearTimeout(this.cacheSaveTimer);
+      this.cacheSaveTimer = -1;
+    }
+    if (this.persistCache) this.persistCache(this.exportTranscriptCache());
+  }
+
+  deleteTranscriptCache(key: string): void {
+    if (this.chatCache.delete(key)) this.scheduleCachePersist();
+  }
+
+  forgetTranscriptCache(address?: string): void {
+    if (address) {
+      const prefix = `${address}|`;
+      for (const key of Array.from(this.chatCache.keys())) {
+        if (key.startsWith(prefix)) this.chatCache.delete(key);
+      }
+    } else {
+      this.chatCache.clear();
+    }
+    this.flushTranscriptCache();
+  }
+
   cacheTranscript(key: string, reply: BridgeReply): void {
     this.chatCache.delete(key);
     this.chatCache.set(key, reply);
-    if (this.chatCache.size > 8) this.chatCache.delete(Array.from(this.chatCache.keys())[0]);
+    if (this.chatCache.size > CHAT_CACHE_MAX_ENTRIES) this.chatCache.delete(Array.from(this.chatCache.keys())[0]);
+    this.scheduleCachePersist();
   }
 }
