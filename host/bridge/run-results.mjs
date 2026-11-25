@@ -1,10 +1,14 @@
-import { execFileSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { lstat, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, relative, resolve } from 'node:path';
+import { promisify } from 'node:util';
 import { previewFile } from './workspace-files.mjs';
 import { stateDirectory } from './session-metadata.mjs';
+
+const execFileAsync = promisify(execFile);
 
 const fileLimit = 1200;
 const textBudget = 8 * 1024 * 1024;
@@ -128,6 +132,122 @@ export function describeChanges(cwd, before) {
     }
   } finally {
     if (directory) rmSync(directory, { recursive: true, force: true });
+  }
+  return { files, patches, partial };
+}
+
+async function treePathsAsync(cwd) {
+  const paths = [];
+  const queue = [''];
+  let visited = 0;
+  while (queue.length && visited <= fileLimit) {
+    const dir = queue.shift();
+    let entries;
+    try { entries = await readdir(join(cwd, dir), { withFileTypes: true }); }
+    catch { continue; }
+    for (const entry of entries) {
+      const path = dir ? `${dir}/${entry.name}` : entry.name;
+      if (!allowable(path)) continue;
+      if (++visited > fileLimit) return { paths, partial: true };
+      if (entry.isDirectory()) queue.push(path);
+      if (entry.isFile()) paths.push(path);
+    }
+  }
+  return { paths, partial: false };
+}
+
+async function workspacePathsAsync(cwd) {
+  try {
+    const { stdout } = await execFileAsync('git', ['--no-optional-locks', 'ls-files', '-z', '--cached', '--others', '--exclude-standard', '--', '.'],
+      { cwd, encoding: 'utf8', timeout: 1500, maxBuffer: 512 * 1024 });
+    const paths = [...new Set(stdout.split('\0').filter(allowable))];
+    return { paths: paths.slice(0, fileLimit), partial: paths.length > fileLimit };
+  } catch (error) {
+    if (error.code === 128) return treePathsAsync(cwd);
+    return { paths: [], partial: true };
+  }
+}
+
+export async function captureWorkspaceAsync(cwd) {
+  const { paths, partial } = await workspacePathsAsync(cwd);
+  let remaining = textBudget;
+  const files = new Map();
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(8, paths.length) }, async () => {
+    while (next < paths.length) {
+      const path = paths[next++];
+      try {
+        const info = await lstat(join(cwd, path));
+        if (!info.isFile()) continue;
+        const signature = [info.ino, info.size, info.mtimeMs, info.ctimeMs, info.mode].join(':');
+        let text;
+        if (info.size <= remaining && info.size <= 64 * 1024) {
+          remaining -= info.size;
+          try { text = previewFile(cwd, path).text; } catch {}
+        }
+        files.set(path, { signature, text, mode: info.mode });
+      } catch {}
+    }
+  }));
+  return { files, partial };
+}
+
+async function makePatchAsync(directory, before, after, slot) {
+  const left = join(directory, `before-${slot}`);
+  const right = join(directory, `after-${slot}`);
+  if (before) await writeFile(left, before.text, { mode: 0o600 });
+  if (after) await writeFile(right, after.text, { mode: 0o600 });
+  try {
+    await execFileAsync('git', ['--no-pager', 'diff', '--no-index', '--no-ext-diff', '--no-textconv', '--no-color',
+      '--no-renames', '--', before ? left : '/dev/null', after ? right : '/dev/null'],
+    { cwd: directory, encoding: 'utf8', timeout: 1000, maxBuffer: patchLimit });
+  } catch (error) {
+    if (error.code !== 1 || typeof error.stdout !== 'string') return;
+    const start = error.stdout.indexOf('\n@@ ');
+    if (start >= 0) return error.stdout.slice(start + 1);
+  }
+}
+
+export async function describeChangesAsync(cwd, before) {
+  if (!before) return { files: [], partial: true, patches: {} };
+  const after = await captureWorkspaceAsync(cwd);
+  const files = [];
+  const patches = {};
+  const patchJobs = [];
+  const paths = new Set([...before.files.keys(), ...after.files.keys()]);
+  let partial = before.partial || after.partial;
+  for (const path of paths) {
+    const old = before.files.get(path);
+    const next = after.files.get(path);
+    if ((!old && before.partial) || (!next && after.partial)) continue;
+    if (old && next && (old.text !== undefined && next.text !== undefined
+      ? old.text === next.text && old.mode === next.mode : old.signature === next.signature)) continue;
+    if (files.length >= 30) { partial = true; break; }
+    const item = { path, change: !old ? 'added' : next ? 'modified' : 'deleted',
+      diff: false, artifact: Boolean(next && artifactPattern.test(path)) };
+    files.push(item);
+    if (patchJobs.length < 12 && (!old || old.text !== undefined) && (!next || next.text !== undefined)) {
+      patchJobs.push({ item, old, next });
+    }
+  }
+  if (patchJobs.length) {
+    const directory = await mkdtemp(join(tmpdir(), 'pigo-diff-'));
+    try {
+      let idx = 0;
+      await Promise.all(Array.from({ length: Math.min(4, patchJobs.length) }, async () => {
+        while (idx < patchJobs.length) {
+          const slot = idx++;
+          const { item, old, next } = patchJobs[slot];
+          const patch = await makePatchAsync(directory, old, next, slot);
+          if (patch) {
+            Object.defineProperty(patches, item.path, { value: patch, enumerable: true });
+            item.diff = true;
+          }
+        }
+      }));
+    } finally {
+      await rm(directory, { recursive: true, force: true }).catch(() => {});
+    }
   }
   return { files, patches, partial };
 }

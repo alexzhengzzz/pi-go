@@ -58,6 +58,7 @@ async function main() {
   };
   process.on('SIGTERM', () => { void shutdown(); });
   process.on('SIGINT', () => { void shutdown(); });
+  driver.on('fatal', () => { void shutdown(); });
   process.stdin.on('error', () => {});
   if (!process.stdin.isTTY) {
     process.stdin.resume();

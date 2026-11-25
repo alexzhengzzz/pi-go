@@ -12,9 +12,9 @@
 // daemon teardown.
 import { randomBytes } from 'node:crypto';
 import { createServer } from 'node:http';
-import { readFileSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { lstatSync, readFileSync, realpathSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
+import { join, resolve, sep } from 'node:path';
 import { workerSocket } from '../bridge/local-ipc.mjs';
 import { registerSocket } from '../bridge/socket-registry.mjs';
 import {
@@ -25,7 +25,7 @@ import {
   imageParts, messageTextSlice, reply, replyImage, sessionAttachmentMarker,
   toolDetail, toolDetails,
 } from '../bridge/message-view.mjs';
-import { captureWorkspace, describeChanges, referencedArtifacts, saveRunResult } from '../bridge/run-results.mjs';
+import { captureWorkspace, describeChangesAsync, referencedArtifacts, saveRunResult } from '../bridge/run-results.mjs';
 
 const maxBody = 16 * 1024;
 const messagePreviewLength = 8000;
@@ -184,10 +184,12 @@ export function createWorkerServer(driver, {
     const sequenced = sequencedStreams.size ? `data: ${JSON.stringify(update)}\n\n` : legacy;
     for (const stream of streams) {
       const target = streamTargets.get(stream);
-      if ((target && (current?.id !== target.id || current.cwd !== target.cwd)) ||
-          !stream.write(sequencedStreams.has(stream) ? sequenced : legacy)) {
+      if (stream.destroyed || stream.writableEnded || stream.writableLength > 512 * 1024 ||
+          (target && (current?.id !== target.id || current.cwd !== target.cwd))) {
         stream.destroy();
+        continue;
       }
+      stream.write(sequencedStreams.has(stream) ? sequenced : legacy);
     }
   };
 
@@ -197,7 +199,10 @@ export function createWorkerServer(driver, {
   const startPing = () => {
     if (pingTimer) return;
     pingTimer = setInterval(() => {
-      for (const stream of streams) if (!stream.write(': ping\n\n')) stream.destroy();
+      for (const stream of streams) {
+        if (stream.destroyed || stream.writableEnded || stream.writableLength > 512 * 1024) stream.destroy();
+        else stream.write(': ping\n\n');
+      }
     }, 4000);
     pingTimer.unref();
   };
@@ -330,7 +335,7 @@ export function createWorkerServer(driver, {
         }).slice(0, 8);
         const finishedAt = Date.now();
         let changes;
-        try { changes = describeChanges(current.cwd, baseline); }
+        try { changes = await describeChangesAsync(current.cwd, baseline); }
         catch { changes = { files: [], patches: {}, partial: true }; }
         const { files, patches, partial } = changes;
         const resultText = anchor?.role === 'assistant' ? anchor.text : '';
@@ -560,7 +565,19 @@ export function createWorkerServer(driver, {
             if (!target) return fail(404, 'image_not_found');
             let data = target.data;
             if ((!data || typeof data !== 'string') && typeof target.path === 'string') {
-              try { data = readFileSync(target.path).toString('base64'); } catch { return fail(404, 'image_not_found'); }
+              try {
+                const info = lstatSync(target.path);
+                if (!info.isFile() || info.size > maxImageBytes) return fail(404, 'image_not_found');
+                const resolved = realpathSync(target.path);
+                const allowedRoots = [status()?.cwd, driver.historyDirectory, tmpdir()]
+                  .filter((dir) => typeof dir === 'string' && dir)
+                  .map((dir) => { try { return realpathSync(dir); } catch { return undefined; } })
+                  .filter(Boolean);
+                if (!allowedRoots.some((root) => resolved === root || resolved.startsWith(root + sep))) {
+                  return fail(403, 'path_forbidden');
+                }
+                data = readFileSync(resolved).toString('base64');
+              } catch { return fail(404, 'image_not_found'); }
             }
             return replyImage(response, [{ type: 'image', mimeType: target.mimeType, data }], 0);
           }

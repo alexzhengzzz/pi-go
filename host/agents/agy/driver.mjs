@@ -385,8 +385,14 @@ export class AgyDriver extends EventEmitter {
     rpc.onRequest((method, params, id) => this.onServerRequest(method, params, id));
     rpc.on('exit', () => {
       if (this.rpc === rpc) {
+        this.rpc = undefined;
         for (const item of this.uiQueue) item.reject(new Error('process_exited'));
         this.uiQueue = [];
+        if (this.activeTurnId) {
+          this.activeTurnId = undefined;
+          this.emit('turn_end', { aborted: true, reason: 'error' });
+        }
+        if (!this.stopping) this.emit('fatal', new Error('agy_process_exited'));
       }
     });
     try {
@@ -986,6 +992,7 @@ export class AgyDriver extends EventEmitter {
   }
 
   async stop() {
+    this.stopping = true;
     await this.rpc?.stop();
   }
 }

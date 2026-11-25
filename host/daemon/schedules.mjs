@@ -1,5 +1,5 @@
-import { randomUUID } from 'node:crypto';
-import { readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
+import { randomBytes, randomUUID } from 'node:crypto';
+import { closeSync, fsyncSync, openSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 
 const minute = 60_000;
 const day = 24 * 60 * minute;
@@ -85,10 +85,19 @@ export class ScheduleService {
   }
 
   save(state) {
-    const temporary = `${this.file}.${process.pid}.tmp`;
-    writeFileSync(temporary, JSON.stringify(state), { mode: 0o600 });
-    renameSync(temporary, this.file);
-    this.state = state;
+    const temporary = `${this.file}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
+    const fd = openSync(temporary, 'wx', 0o600);
+    try {
+      writeFileSync(fd, JSON.stringify(state));
+      fsyncSync(fd);
+      closeSync(fd);
+      renameSync(temporary, this.file);
+      this.state = state;
+    } catch (error) {
+      try { closeSync(fd); } catch {}
+      try { unlinkSync(temporary); } catch {}
+      throw error;
+    }
   }
 
   start() {

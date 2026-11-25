@@ -1,7 +1,7 @@
 // Persistent list of Pi Go workspaces. Closing a workspace removes its
 // registration and stops its managed Pi runtimes while preserving its files.
-import { createHash } from 'node:crypto';
-import { lstatSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { createHash, randomBytes } from 'node:crypto';
+import { closeSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 
 const workspaceId = (path) => createHash('sha256').update(path).digest('hex').slice(0, 16);
@@ -24,10 +24,19 @@ export class WorkspaceRegistry {
   }
 
   save(state) {
-    const next = `${this.file}.${process.pid}.tmp`;
-    writeFileSync(next, JSON.stringify(state, null, 2), { mode: 0o600 });
-    renameSync(next, this.file);
-    this.state = state;
+    const next = `${this.file}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
+    const fd = openSync(next, 'wx', 0o600);
+    try {
+      writeFileSync(fd, JSON.stringify(state, null, 2));
+      fsyncSync(fd);
+      closeSync(fd);
+      renameSync(next, this.file);
+      this.state = state;
+    } catch (error) {
+      try { closeSync(fd); } catch {}
+      try { unlinkSync(next); } catch {}
+      throw error;
+    }
   }
 
   list() { return this.state.workspaces.map((row) => ({ ...row })); }

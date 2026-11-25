@@ -160,7 +160,8 @@ async function pumpEvents(client, authorization) {
       }
       if (!current) {
         client.session = undefined;
-        if (!client.response.write(`data: ${JSON.stringify({ type: 'bridge/status', state: selected ? 'session_closed' : 'no_session_selected' })}\n\n`)) client.response.destroy();
+        if (client.response.destroyed || client.response.writableEnded) break;
+        client.response.write(`data: ${JSON.stringify({ type: 'bridge/status', state: selected ? 'session_closed' : 'no_session_selected' })}\n\n`);
         if (client.sequenced) break;
         await pause(400);
         continue;
@@ -172,10 +173,12 @@ async function pumpEvents(client, authorization) {
       let lastWriteAt = Date.now();
       const done = new Promise((resolve) => { finish = resolve; });
       const tick = setInterval(() => {
-        if (client.closed || !matches(authorization, bearer) || changed()) client.upstream?.destroy();
-        else if (!client.sequenced || Date.now() - lastWriteAt >= 10000) {
-          if (!client.response.write(': keepalive\n\n')) client.response.destroy();
-          else lastWriteAt = Date.now();
+        if (client.closed || !matches(authorization, bearer) || changed() ||
+            client.response.destroyed || client.response.writableEnded || client.response.writableLength > 512 * 1024) {
+          client.upstream?.destroy();
+        } else if (!client.sequenced || Date.now() - lastWriteAt >= 10000) {
+          client.response.write(': keepalive\n\n');
+          lastWriteAt = Date.now();
         }
       }, 4000);
       const path = workerPath(client.sequenced ? '/events?sync=2' : '/events', current.session, true);
@@ -184,8 +187,14 @@ async function pumpEvents(client, authorization) {
         res.setEncoding('utf8');
         res.on('data', (chunk) => {
           if (client.sequenced && (changed() || !matches(authorization, bearer))) upstream.destroy();
-          else if (!client.response.write(chunk)) client.response.destroy();
-          else lastWriteAt = Date.now();
+          else if (client.response.destroyed || client.response.writableEnded) upstream.destroy();
+          else {
+            lastWriteAt = Date.now();
+            if (!client.response.write(chunk)) {
+              res.pause();
+              client.response.once('drain', () => { if (!client.closed && !res.destroyed) res.resume(); });
+            }
+          }
         });
         res.on('end', finish);
         res.on('close', finish);
