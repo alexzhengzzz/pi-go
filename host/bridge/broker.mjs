@@ -1,11 +1,10 @@
-import { createHash, randomBytes, randomInt, timingSafeEqual } from 'node:crypto';
-import { lstatSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import { lstatSync, realpathSync, unlinkSync } from 'node:fs';
 import { createServer, request as ipcRequest } from 'node:http';
 import { createServer as createSecureServer } from 'node:https';
-import { homedir, tmpdir } from 'node:os';
+import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { pipeline } from 'node:stream/promises';
-import { gzipSync } from 'node:zlib';
 import { ipcDirectory, localRequest, localUpload } from './local-ipc.mjs';
 import { createSocketRegistry } from './socket-registry.mjs';
 import { newLanIdentity, newPublicIdentity, privateIPv4, publicAddress } from './lan-tls.mjs';
@@ -14,11 +13,12 @@ import { listFiles, previewFile, saveFile, openWorkspaceDownload, findWorkspaceF
 import { SessionMetadata, stateDirectory } from './session-metadata.mjs';
 import { readColdSnapshot } from './session-snapshot.mjs';
 import { computerSessions, findComputerSession } from './computer-sessions.mjs';
-import { archivedCodexSessionIds } from '../agents/codex/catalog.mjs';
-import { archivedAgySessionIds } from '../agents/agy/catalog.mjs';
+import { agentProviders } from '../agents/registry.mjs';
 import { readRuns, readRunPatch } from './run-results.mjs';
 import { RunPush } from './run-push.mjs';
 import { maxFileBytes, maxHistoryImageBase64, maxImageBytes, maxPromptBody, safeAttachmentName } from './attachments.mjs';
+import { body, createRemoteLimiter, digest, error, matches, rawBody, reply, workerPath as buildWorkerPath } from './broker-http.mjs';
+import { createTicketManager, loadPairingState, savePairingState } from './broker-pairing.mjs';
 
 const remote = process.argv[3] === '--remote';
 const lan = !remote && Boolean(process.argv[3]);
@@ -31,31 +31,10 @@ const ticketRoute = remote ? '/ticket-remote' : lan ? '/ticket-lan' : '/ticket';
 const metadata = new SessionMetadata(remote ? 18981 : port);
 const pairingFile = join(stateDirectory(), `pairing-${transport}-${port}.json`);
 const pairingProfile = resolve(process.env.PI_CODING_AGENT_DIR || join(homedir(), '.pi', 'agent'));
-const saved = loadPairing();
+const saved = loadPairingState({ pairingFile, host, pairingProfile, address, lan, remote });
 const tls = remote ? newPublicIdentity(process.argv[4], saved?.identity) : lan ? newLanIdentity(host, saved?.identity) : undefined;
 const sameIdentity = !tls || tls.cert === saved?.identity?.cert;
 const adminPath = join(ipcDirectory(), `bridge-${port}.sock`);
-const digest = (text) => createHash('sha256').update(text).digest();
-const matches = (text, expected) => typeof text === 'string' && expected !== undefined && timingSafeEqual(digest(text), expected);
-const reply = (response, status, value) => {
-  const payload = JSON.stringify(value);
-  const acceptEncoding = response.req?.headers?.['accept-encoding'];
-  if (typeof acceptEncoding === 'string' && acceptEncoding.includes('gzip') && payload.length >= 1024) {
-    const compressed = gzipSync(payload);
-    response.writeHead(status, {
-      'Content-Type': 'application/json',
-      'Cache-Control': 'no-store',
-      'Content-Encoding': 'gzip',
-      'Vary': 'Accept-Encoding',
-      'Content-Length': compressed.length,
-    });
-    response.end(compressed);
-    return;
-  }
-  response.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-  response.end(payload);
-};
-const error = (response, status, code) => reply(response, status, { error: code });
 const options = { requestTimeout: 5000, headersTimeout: 5000, connectionsCheckingInterval: 1000 };
 // Phone uploads can carry one 8 MiB file, so the public listener gets a longer
 // request budget; header/keepalive limits and maxConnections still apply.
@@ -63,10 +42,9 @@ const publicOptions = { ...options, requestTimeout: 60000, ...(remote ? { maxHea
 let bearer = sameIdentity && saved?.bearer ? Buffer.from(saved.bearer, 'hex') : undefined;
 let lastSeen;
 let computerAccess = remote || (saved?.computerAccess ?? false);
-let pairing;
+const tickets = createTicketManager({ tls, address, remote, transport });
 let selected;
 let chosen = false;
-let ticketTimer;
 let closing = false;
 let handoffPending = false;
 const warmingSessions = new Map();
@@ -76,9 +54,11 @@ let selectionVersion = 0;
 let lastCatalogRevision;
 const grants = new Map();
 const streams = new Set();
-let remoteRequests = 0;
-let remoteBudget = 40;
-let remoteBudgetAt = performance.now();
+const acceptRemoteRequest = createRemoteLimiter();
+const workerPath = (path, session, requireTarget = false) => buildWorkerPath(path, session, { remote, requireTarget });
+const savePairing = (nextBearer) => savePairingState({ pairingFile, host, pairingProfile, address, remote, tls, computerAccess, nextBearer });
+const clearTicket = () => tickets.clear();
+const issueTicket = () => tickets.issue();
 
 const runPush = new RunPush(pairingFile);
 let pushTimer;
@@ -92,56 +72,6 @@ const logTiming = (label, startMs, extra = '') => {
   if (!timingEnabled) return;
   process.stderr.write(`[pigo-timing] broker.${label}: ${(performance.now() - startMs).toFixed(1)}ms${extra ? ` ${extra}` : ''}\n`);
 };
-
-function acceptRemoteRequest(response) {
-  const now = performance.now();
-  remoteBudget = Math.min(40, remoteBudget + (now - remoteBudgetAt) * 0.012);
-  remoteBudgetAt = now;
-  if (remoteBudget < 1 || remoteRequests >= 10) {
-    response.setHeader('Retry-After', '1');
-    error(response, 429, 'too_many_requests');
-    return false;
-  }
-  remoteBudget -= 1;
-  remoteRequests += 1;
-  response.once('close', () => { remoteRequests -= 1; });
-  return true;
-}
-
-function workerPath(path, session, requireTarget = false) {
-  if (!remote && !requireTarget) return path;
-  const url = new URL(path, 'http://pi-go');
-  url.searchParams.set('_pigoSession', session.id);
-  url.searchParams.set('_pigoCwd', session.cwd);
-  return url.pathname + url.search;
-}
-
-function loadPairing() {
-  let info;
-  try { info = lstatSync(pairingFile); }
-  catch (error) { if (error.code === 'ENOENT') return; throw error; }
-  if (!info.isFile() || info.uid !== process.getuid() || (info.mode & 0o077) || info.size > 8192) {
-    throw new Error('unsafe_pairing_state');
-  }
-  const value = JSON.parse(readFileSync(pairingFile, 'utf8'));
-  if (value?.version !== 1 || typeof value.computerAccess !== 'boolean' || typeof value.profile !== 'string' ||
-    (value.bearer !== undefined && (typeof value.bearer !== 'string' || !/^[a-f0-9]{64}$/.test(value.bearer))) ||
-    ((lan || remote) && (typeof value.identity?.cert !== 'string' || typeof value.identity?.key !== 'string'))) {
-    throw new Error('invalid_pairing_state');
-  }
-  if (value.host === host && value.profile === pairingProfile && (!remote || value.address === address)) return value;
-}
-
-function savePairing(nextBearer) {
-  const identity = tls && { cert: tls.cert, key: tls.key };
-  const state = { version: 1, host, profile: pairingProfile, computerAccess, bearer: nextBearer?.toString('hex'), identity };
-  if (remote) Object.assign(state, { address });
-  const temporary = pairingFile + '.' + randomBytes(8).toString('hex');
-  try {
-    writeFileSync(temporary, JSON.stringify(state), { mode: 0o600, flag: 'wx' });
-    renameSync(temporary, pairingFile);
-  } finally { try { unlinkSync(temporary); } catch {} }
-}
 
 async function pumpEvents(client, authorization) {
   try {
@@ -214,60 +144,6 @@ async function pumpEvents(client, authorization) {
   } catch {} finally {
     try { client.response.end(); } catch {}
   }
-}
-
-function clearTicket() {
-  const directory = pairing?.directory;
-  pairing = undefined;
-  clearTimeout(ticketTimer);
-  if (directory) {
-    try { rmSync(directory, { recursive: true, force: true }); } catch { /* The ticket is already invalid. */ }
-  }
-}
-
-function issueTicket() {
-  clearTicket();
-  const directory = mkdtempSync(join(tmpdir(), 'pigo-bridge-'));
-  const ticket = randomBytes(32).toString('hex');
-  const code = tls ? undefined : String(randomInt(100_000_000)).padStart(8, '0');
-  const file = join(directory, 'pair.json');
-  pairing = { directory, ticket: digest(ticket), code: code && digest(code), attempts: 0, expiresAt: Date.now() + 120000 };
-  const url = `${tls ? 'https' : 'http'}://${address}`;
-  const config = tls ? { bundle: Buffer.from(JSON.stringify({ url, ticket, ca: tls.cert, pin: tls.pin,
-    ...(remote ? { transport } : {}) })).toString('base64url') } : { url, ticket, code };
-  writeFileSync(file, JSON.stringify(config), { mode: 0o600, flag: 'wx' });
-  ticketTimer = setTimeout(clearTicket, 120000).unref();
-  return file;
-}
-
-async function body(request, limit = 16384) {
-  if (request.headers['content-type'] !== 'application/json') throw new Error('invalid_content_type');
-  if (Number(request.headers['content-length']) > limit) throw new Error('oversized_body');
-  const chunks = [];
-  let size = 0;
-  for await (const chunk of request.iterator({ destroyOnReturn: false })) {
-    size += chunk.length;
-    if (size > limit) throw new Error('oversized_body');
-    chunks.push(chunk);
-  }
-  const value = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('invalid_body');
-  return value;
-}
-
-async function rawBody(request, limit) {
-  if (request.headers['content-type'] !== 'application/octet-stream') throw new Error('invalid_content_type');
-  if (Number(request.headers['content-length']) > limit) throw new Error('oversized_body');
-  const chunks = [];
-  let size = 0;
-  for await (const chunk of request.iterator({ destroyOnReturn: false })) {
-    size += chunk.length;
-    if (size > limit) throw new Error('oversized_body');
-    chunks.push(chunk);
-  }
-  const bytes = Buffer.concat(chunks);
-  if (bytes.length < 1 || bytes.length > limit) throw new Error('oversized_body');
-  return bytes;
 }
 
 function select(worker) {
@@ -346,10 +222,16 @@ async function catalog(live, hostSocket, granted = [], includeComputerHistory = 
     else if (!liveRow.modified && record.modified) liveRow.modified = record.modified;
   }
   const merged = [...rows.values()];
-  // A worker can keep reporting a thread after Codex moves its rollout to the archive.
-  const archivedCodex = merged.some(({ agent }) => agent === 'codex')
-    ? await archivedCodexSessionIds().catch(() => new Set()) : new Set();
-  return merged.filter(({ agent, id }) => agent !== 'codex' || !archivedCodex.has(id.toLowerCase())).sort((left, right) =>
+  // Drop sessions natively archived by providers whose archive semantics exclude them from listings.
+  const dropArchives = new Map();
+  await Promise.all(agentProviders.filter((p) => p.archiveBehavior === 'drop').map(async (provider) => {
+    const ids = merged.filter(({ agent }) => agent === provider.id).map(({ id }) => id);
+    if (ids.length) dropArchives.set(provider.id, await provider.archivedSessionIds(ids));
+  }));
+  return merged.filter(({ agent, id }) => {
+    const archived = dropArchives.get(agent);
+    return !archived || (!archived.has(id) && !archived.has(id.toLowerCase()));
+  }).sort((left, right) =>
     Number(right.active) - Number(left.active) || (right.modified ?? '').localeCompare(left.modified ?? '') ||
     left.id.localeCompare(right.id)).slice(0, computerAccess || workspace ? undefined : 250);
 }
@@ -633,11 +515,13 @@ const publicHandler = async (request, response) => {
     if (!remote && route === 'GET /health') return reply(response, 200, { protocol: 'pi-go-bridge/1' });
     if (route === 'POST /pair') {
       if (remote && !acceptRemoteRequest(response)) return;
-      if (remote && (!pairing || pairing.expiresAt <= Date.now())) return error(response, 401, 'invalid_ticket');
+      const activePairing = tickets.current;
+      if (remote && (!activePairing || activePairing.expiresAt <= Date.now())) return error(response, 401, 'invalid_ticket');
       const input = await body(request, remote ? 1024 : undefined);
-      if (remote && pairing?.expiresAt <= Date.now()) clearTicket();
-      if (!matches(input.ticket, pairing?.ticket) && !matches(input.ticket, pairing?.code)) {
-        if (pairing && ++pairing.attempts >= 5) clearTicket();
+      if (remote && tickets.current?.expiresAt <= Date.now()) clearTicket();
+      const currentPairing = tickets.current;
+      if (!matches(input.ticket, currentPairing?.ticket) && !matches(input.ticket, currentPairing?.code)) {
+        if (currentPairing && ++currentPairing.attempts >= 5) clearTicket();
         return error(response, 401, 'invalid_ticket');
       }
       const token = randomBytes(32).toString('hex');
@@ -892,11 +776,15 @@ const publicHandler = async (request, response) => {
       if (scope === 'workspace' && !catalogInfo.projects.includes(cwd)) return error(response, 403, 'desktop_workspace_unshared');
       const merged = await catalog(sessionLive, context.socket, context.granted, true, context.revision, cwd, parameters.get('refresh') === '1');
       // Read native archive flags after merging so cached rows and live workers respect desktop changes.
-      const archivedAgy = await archivedAgySessionIds(merged.filter(({ agent }) => agent === 'agy').map(({ id }) => id));
+      const markedArchives = new Map();
+      await Promise.all(agentProviders.filter((p) => p.archiveBehavior === 'mark').map(async (provider) => {
+        const ids = merged.filter(({ agent }) => agent === provider.id).map(({ id }) => id);
+        if (ids.length) markedArchives.set(provider.id, await provider.archivedSessionIds(ids));
+      }));
       if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
       const decorated = merged.map((row) => {
         const local = metadata.get(row);
-        if (row.agent === 'agy' && archivedAgy.has(row.id)) return { ...row, ...local, archived: true, nativeArchived: true };
+        if (markedArchives.get(row.agent)?.has(row.id)) return { ...row, ...local, archived: true, nativeArchived: true };
         return { ...row, ...local };
       });
       const visible = decorated.filter((row) => view === 'archived' ? row.archived :
@@ -1103,7 +991,7 @@ const admin = createServer(options, async (request, response) => {
   if (request.method === 'GET' && request.url === '/status') return reply(response, 200, {
     protocol: 'pi-go-pairing/1', workspaceLibrary: true, workspacePages: true, computerAccess, transport, host, port,
     ...(remote ? { address } : {}),
-    paired: Boolean(bearer), lastSeen: bearer ? lastSeen : undefined, expiresAt: pairing?.expiresAt,
+    paired: Boolean(bearer), lastSeen: bearer ? lastSeen : undefined, expiresAt: tickets.current?.expiresAt,
   });
   if (request.method !== 'POST') return error(response, 404, 'not_found');
   try {
@@ -1189,7 +1077,7 @@ try {
     const previous = lstatSync(adminPath);
     if (!previous.isSocket() || previous.uid !== process.getuid()) throw new Error('unsafe_admin_socket');
     try {
-      await localRequest(adminPath, 'GET', '/health', undefined, 700);
+      await localRequest(adminPath, 'GET', '/status', undefined, 700);
       throw new Error('bridge_port_already_managed');
     } catch (cause) {
       if (cause.code !== 'ECONNREFUSED') throw cause;

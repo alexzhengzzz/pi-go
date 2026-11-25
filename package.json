@@ -24,6 +24,8 @@
     "host/bridge/local-ipc.mjs",
     "host/bridge/socket-registry.mjs",
     "host/bridge/broker.mjs",
+    "host/bridge/broker-http.mjs",
+    "host/bridge/broker-pairing.mjs",
     "host/bridge/attachments.mjs",
     "host/bridge/screen-capture.mjs",
     "host/bridge/message-view.mjs",
