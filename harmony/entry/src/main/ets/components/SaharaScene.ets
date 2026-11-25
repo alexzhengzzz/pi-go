@@ -1,4 +1,5 @@
 import { image } from '@kit.ImageKit';
+import { decodeRawSceneBitmap } from './SceneCanvasHelper';
 
 interface EmberSpark {
   x: number;
@@ -138,36 +139,18 @@ export struct SaharaScene {
     const gen = ++this.loadGen;
     const context = this.getUIContext().getHostContext();
     if (!context) return;
-    let source: image.ImageSource | undefined;
-    try {
-      const bytes = await context.resourceManager.getRawFileContent(this.rawfileName());
-      const copy = new Uint8Array(bytes.byteLength);
-      copy.set(bytes);
-      source = image.createImageSource(copy.buffer as ArrayBuffer);
-      const loaded = await source.createPixelMap();
-      if (gen !== this.loadGen) {
-        void loaded.release();
-        return;
-      }
-      this.releaseBitmap();
-      this.sceneMap = loaded;
-      try {
-        const info = await loaded.getImageInfo();
-        this.imgWidth = info.size.width;
-        this.imgHeight = info.size.height;
-      } catch {
-        this.imgWidth = 768;
-        this.imgHeight = 1376;
-      }
-      this.pixelsReady = true;
-      this.ensureLoop();
-    } catch {
-      // 回退静态底层图
-    } finally {
-      if (source) {
-        try { await source.release(); } catch {}
-      }
+    const decoded = await decodeRawSceneBitmap(context, this.rawfileName(), this.compact);
+    if (!decoded) return;
+    if (gen !== this.loadGen) {
+      void decoded.pixelMap.release();
+      return;
     }
+    this.releaseBitmap();
+    this.sceneMap = decoded.pixelMap;
+    this.imgWidth = decoded.width;
+    this.imgHeight = decoded.height;
+    this.pixelsReady = true;
+    this.ensureLoop();
   }
 
   @Monitor('burstSeq')

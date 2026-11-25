@@ -159,7 +159,35 @@ export struct ChatTranscript {
     return this.optimisticMessages.find((item: OptimisticMessage): boolean => item.id === id);
   }
 
+  private resizeScrollTimer: number = -1;
+  private cachedTurns?: TranscriptTurn[];
+  private cachedTurnsMessages?: ChatMessage[];
+  private cachedTurnsOptimistic?: OptimisticMessage[];
+  private cachedTurnsTools?: LiveTool[];
+  private cachedTurnsThinking: string = '';
+  private cachedTurnsLiveText: string = '';
+  private cachedTurnsIdle: boolean = true;
+  private cachedTurnsSessionKey: string = '';
+
+  aboutToDisappear(): void {
+    if (this.resizeScrollTimer !== -1) {
+      clearTimeout(this.resizeScrollTimer);
+      this.resizeScrollTimer = -1;
+    }
+  }
+
   private displayTurns(): TranscriptTurn[] {
+    const sessionKey = this.draftKey(this.currentId);
+    if (this.cachedTurns &&
+      this.cachedTurnsMessages === this.messages &&
+      this.cachedTurnsOptimistic === this.optimisticMessages &&
+      this.cachedTurnsTools === this.liveTools &&
+      this.cachedTurnsThinking === this.liveThinking &&
+      this.cachedTurnsLiveText === this.liveText &&
+      this.cachedTurnsIdle === this.idle &&
+      this.cachedTurnsSessionKey === sessionKey) {
+      return this.cachedTurns;
+    }
     const optimistic = this.sessionOptimisticMessages();
     const messages = optimistic.length
       ? this.messages.concat(optimistic.map((item: OptimisticMessage): ChatMessage => ({
@@ -169,7 +197,16 @@ export struct ChatTranscript {
         imageCount: item.imageCount || undefined
       })))
       : this.messages;
-    return buildTranscriptTurns(messages, this.unlistedLiveTools(), this.liveThinking, this.liveText, this.idle);
+    const built = buildTranscriptTurns(messages, this.unlistedLiveTools(), this.liveThinking, this.liveText, this.idle);
+    this.cachedTurns = built;
+    this.cachedTurnsMessages = this.messages;
+    this.cachedTurnsOptimistic = this.optimisticMessages;
+    this.cachedTurnsTools = this.liveTools;
+    this.cachedTurnsThinking = this.liveThinking;
+    this.cachedTurnsLiveText = this.liveText;
+    this.cachedTurnsIdle = this.idle;
+    this.cachedTurnsSessionKey = sessionKey;
+    return built;
   }
 
   private needsWaitingPulse(): boolean {
@@ -279,7 +316,9 @@ export struct ChatTranscript {
                 this.transcript.scrollTo({ xOffset: 0, yOffset: this.readTranscriptHeight(), animation: false });
               } else {
                 // Wait for the transcript to finish wrapping at the new width before scrolling.
-                setTimeout(() => {
+                if (this.resizeScrollTimer !== -1) clearTimeout(this.resizeScrollTimer);
+                this.resizeScrollTimer = setTimeout(() => {
+                  this.resizeScrollTimer = -1;
                   if (this.currentId === transcriptId && this.transcriptFollow) {
                     this.transcript.scrollTo({ xOffset: 0, yOffset: this.readTranscriptHeight(), animation: false });
                   }
