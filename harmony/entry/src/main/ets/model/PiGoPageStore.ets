@@ -56,9 +56,39 @@ const PANE_ROUTES: string[] = [
 export class PiGoPageStore {
   @Trace appState: AppUiState;
   private uiContextGetter?: () => UIContext = undefined;
+  readonly runCenter: RunCenterController;
+  readonly scheduleController: ScheduleController;
+  readonly shareController: ShareAttachmentController;
+  @Trace session: SessionViewState = new SessionViewState();
+  readonly streamSync: StreamSyncController;
+  readonly split: SplitPaneController;
+  readonly toolCmd: ToolCommandController;
+  readonly sessionActions: SessionActions;
+  readonly inboxWidget: InboxWidget = new InboxWidget();
+  readonly chatState: ChatState = new ChatState();
+  readonly previewScroller: Scroller = new Scroller();
+  readonly fileController: WorkspaceFileController;
+  readonly client: PiGoClient = new PiGoClient();
+  readonly accountSync: AccountSyncController;
+  readonly voiceComposer: VoiceComposerController;
+  readonly connection: ConnectionManager = new ConnectionManager();
+  readonly sessionStore: SessionStore = new SessionStore();
+  readonly transcript: Scroller = new Scroller();
+  readonly library: Scroller = new Scroller();
+  readonly sidebarRows: SidebarRows = new SidebarRows();
 
   constructor(appState: AppUiState) {
     this.appState = appState;
+    this.runCenter = new RunCenterController(this.runCenterHost());
+    this.scheduleController = new ScheduleController(this.scheduleHost());
+    this.shareController = new ShareAttachmentController(this.shareAttachmentHost());
+    this.streamSync = new StreamSyncController(this.streamSyncHost());
+    this.sessionActions = new SessionActions(this.sessionActionsHost());
+    this.fileController = new WorkspaceFileController(this.workspaceFileHost());
+    this.accountSync = new AccountSyncController(this.accountSyncHost());
+    this.voiceComposer = new VoiceComposerController(this.voiceComposerHost());
+    this.split = new SplitPaneController(this.splitPaneHost());
+    this.toolCmd = new ToolCommandController(this.toolCommandHost());
   }
 
   attachUIContext(getter: () => UIContext): void {
@@ -77,15 +107,6 @@ export class PiGoPageStore {
   set liveLaunchSession(value: string) { this.appState.liveLaunchSession = value; }
   get liveLaunchAddress(): string { return this.appState.liveLaunchAddress; }
   set liveLaunchAddress(value: string) { this.appState.liveLaunchAddress = value; }
-  readonly runCenter: RunCenterController = new RunCenterController(this.runCenterHost());
-  readonly scheduleController: ScheduleController = new ScheduleController(this.scheduleHost());
-  readonly shareController: ShareAttachmentController = new ShareAttachmentController(this.shareAttachmentHost());
-  @Trace session: SessionViewState = new SessionViewState();
-  readonly streamSync: StreamSyncController = new StreamSyncController(this.streamSyncHost());
-  readonly split: SplitPaneController = new SplitPaneController(this.splitPaneHost());
-  readonly toolCmd: ToolCommandController = new ToolCommandController(this.toolCommandHost());
-  readonly sessionActions: SessionActions = new SessionActions(this.sessionActionsHost());
-  readonly inboxWidget: InboxWidget = new InboxWidget();
   networkTimer: number = -1;
   switchingNetwork: boolean = false;
   lastNetworkFailover: number = 0;
@@ -110,10 +131,6 @@ export class PiGoPageStore {
   @Trace moveConnectionAddress: string = '';
   @Trace pairingComputerId: string = '';
   @Trace showFiles: boolean = false;
-  readonly chatState: ChatState = new ChatState();
-  readonly previewScroller: Scroller = new Scroller();
-  readonly fileController: WorkspaceFileController = new WorkspaceFileController(this.workspaceFileHost());
-  readonly client: PiGoClient = new PiGoClient();
   @Trace sessions: SessionRow[] = [];
   @Trace runningSessionIds: string[] = [];
   @Trace runningSessions: RunningRow[] = [];
@@ -135,7 +152,6 @@ export class PiGoPageStore {
   @Trace liveViewsEnabled: boolean = true;
   @Trace liveViewStatus: string = '';
   @Trace appearanceNotice: string = '';
-  readonly accountSync: AccountSyncController = new AccountSyncController(this.accountSyncHost());
   @Trace avatarUnavailable: boolean = false;
   settings?: preferences.Preferences;
   settingsWrite: Promise<void> = Promise.resolve();
@@ -146,13 +162,11 @@ export class PiGoPageStore {
   @Trace hostAvailable: boolean = false;
   @Trace canCreateWorkspace: boolean = false;
   @Trace agents: AgentInfo[] = [];
-  readonly voiceComposer: VoiceComposerController = new VoiceComposerController(this.voiceComposerHost());
   @Trace projects: string[] = [];
   @Trace workspaces: WorkspaceRow[] = [];
   @Trace workspacePages: WorkspacePage[] = [];
   @Trace sessionNextCursor?: number = undefined;
   @Trace base: string = '';
-  readonly connection: ConnectionManager = new ConnectionManager();
   visible: boolean = false;
   @Trace sessionLoading: boolean = false;
   @Trace sessionCatalogFailed: boolean = false;
@@ -162,13 +176,9 @@ export class PiGoPageStore {
   sessionCatalogVersion: number = 0;
   catalogConnection: number = 0;
   workspacePageRequestId: number = 0;
-  readonly sessionStore: SessionStore = new SessionStore();
   vault?: CredentialVault;
-  readonly transcript: Scroller = new Scroller();
   transcriptContentHeight: number = 0;
   transcriptViewport: number = 0;
-  readonly library: Scroller = new Scroller();
-  readonly sidebarRows: SidebarRows = new SidebarRows();
   pendingLibraryReveal: boolean = false;
   disposed: boolean = false;
   unsubscribeVault?: () => void = undefined;
