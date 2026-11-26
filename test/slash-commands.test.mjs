@@ -20,7 +20,7 @@ function fixture(request) {
   };
 }
 
-const page = harmonyFile('pages/Index.ets');
+const commandUiSource = harmonyFile('model/ToolCommandController.ets');
 
 test('a failed command request clears the rendered loading state and can be retried', async () => {
   const state = fixture(async () => { throw new BridgeFailure(404, 'not_found'); });
@@ -28,7 +28,7 @@ test('a failed command request clears the rendered loading state and can be retr
   assert.equal(state.commandsLoading, true);
   await failed;
   assert.equal(state.commandsLoading, false);
-  assert.ok(/@Local private commandsLoading:/.test(page), 'ArkUI must observe loading changes');
+  assert.ok(/@Trace commandsLoading:/.test(commandUiSource), 'ArkUI must observe loading changes');
   assert.match(state.commandError, /电脑端/);
   state.request = async () => ({ session: { id: 'one' }, commands: [{ name: 'pi-go' }] });
   await state.loadCommands();

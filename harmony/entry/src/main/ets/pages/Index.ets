@@ -5,6 +5,8 @@ import { VoiceComposerController, VoiceComposerHost } from '../model/VoiceCompos
 import { ScheduleController, ScheduleHost } from '../model/ScheduleController';
 import { RunCenterController, RunCenterHost } from '../model/RunCenterController';
 import { WorkspaceFileController, WorkspaceFileHost } from '../model/WorkspaceFileController';
+import { SplitPaneController, SplitPaneHost } from '../model/SplitPaneController';
+import { ToolCommandController, ToolCommandHost } from '../model/ToolCommandController';
 import { AccountSyncController, AccountSyncHost } from '../model/AccountSyncController';
 import { IncomingShareBanner, NewSessionDialog, NewSpaceDialog, PendingInteractionCard, ToolDetailsSheet } from '../components/ChatDialogs';
 import { SakuraGirlHitZone, ThemeBackdrop } from '../components/ThemeBackdrop';
@@ -78,10 +80,6 @@ function headerAction() {
   .width(44).height(44).padding(0).borderRadius(22).backgroundColor(Color.Transparent)
 }
 
-interface TranscriptPosition {
-  follow: boolean;
-  offset: number;
-}
 
 const PANE_ACTIONS: string[] = ['/prompt', '/abort', '/answer', '/receipt'];
 const PANE_ROUTES: string[] = [
@@ -108,24 +106,8 @@ struct Index {
   private readonly shareController: ShareAttachmentController = new ShareAttachmentController(this.shareAttachmentHost());
   @Local private session: SessionViewState = new SessionViewState();
   private readonly streamSync: StreamSyncController = new StreamSyncController(this.streamSyncHost());
-  @Local private splitOpen: boolean = false;
-  @Local private splitNavigating: boolean = false;
-  private openingNativeWindow: boolean = false;
-  private launchedNativeWindow: boolean = false;
-  @Local private focusedPaneFirst: boolean = true;
-  @Local private otherId: string = '';
-  @Local private otherTitle: string = '';
-  private otherCwd: string = '';
-  @Local private otherSession: SessionViewState = new SessionViewState();
-  private readonly otherConnection: ConnectionManager = new ConnectionManager();
-  private readonly otherChat: ChatState = new ChatState();
-  private readonly otherStream: StreamSyncController = new StreamSyncController(this.otherStreamHost());
-  private readonly otherTranscript: Scroller = new Scroller();
-  private otherTranscriptHeight: number = 0;
-  private readonly splitPositions: Map<string, TranscriptPosition> = new Map<string, TranscriptPosition>();
-  private pendingFocusedPosition: string = '';
-  private pendingOtherPosition: string = '';
-  private wasSplitKeyboardCompact: boolean = false;
+  private readonly split: SplitPaneController = new SplitPaneController(this.splitPaneHost());
+  private readonly toolCmd: ToolCommandController = new ToolCommandController(this.toolCommandHost());
   private readonly sessionActions: SessionActions = new SessionActions(this.sessionActionsHost());
   private readonly inboxWidget: InboxWidget = new InboxWidget();
   private networkTimer: number = -1;
@@ -139,7 +121,6 @@ struct Index {
   private get windowWidth(): number { return this.appState.windowWidth; }
   private get windowHeight(): number { return this.appState.windowHeight; }
   get keyboardHeight(): number { return this.appState.keyboardHeight; }
-  @Local private showModelMenu: boolean = false;
   @Local private ticket: string = '';
   @Local private pairingMode: string = 'usb';
   @Local private pairingBundle: string = '';
@@ -152,15 +133,7 @@ struct Index {
   @Local private computerNameDraft: string = '';
   @Local private moveConnectionAddress: string = '';
   @Local private pairingComputerId: string = '';
-  @Local private showComposerMenu: boolean = false;
-  @Local private showSkillPicker: boolean = false;
   @Local private showFiles: boolean = false;
-  @Local private showToolDetails: boolean = false;
-  @Local private selectedTool?: LiveTool = undefined;
-  @Local private selectedToolDetails?: ToolDetails = undefined;
-  @Local private toolDetailError: string = '';
-  private selectedToolMessageId: string = '';
-  private toolDetailRevision: number = 0;
   private readonly chatState: ChatState = new ChatState();
   private readonly previewScroller: Scroller = new Scroller();
   private readonly fileController: WorkspaceFileController = new WorkspaceFileController(this.workspaceFileHost());
@@ -168,17 +141,7 @@ struct Index {
   @Local private sessions: SessionRow[] = [];
   @Local private runningSessionIds: string[] = [];
   @Local private runningSessions: RunningRow[] = [];
-  @Local private sakuraBurstSeq: number = 0;
-  @Local private sakuraBurstKind: string = 'send';
-  @Local private sakuraBloomSeq: number = 0;
-  @Local private sakuraBloomX: number = 0;
-  @Local private sakuraBloomY: number = 0;
-  @Local private sakuraGirlTapSeq: number = 0;
-  @Local private sakuraCelebrateSeq: number = 0;
-  private themeTapDownX: number = 0;
-  private themeTapDownY: number = 0;
-  private themeTapDownAt: number = 0;
-  private themeTapMoved: boolean = false;
+
   private sessionStatusAt: number = 0;
   private sessionStatusLoading: boolean = false;
   @Local private showSessions: boolean = false;
@@ -219,11 +182,7 @@ struct Index {
   @Local private sessionCatalogFailed: boolean = false;
   private sessionCatalogLoaded: boolean = false;
   private sessionCatalogUpdatedAt: number = 0;
-  @Local private commandRows: CommandRow[] = [];
-  @Local private commandPalette: boolean = false;
-  @Local private commandsLoading: boolean = false;
-  @Local private commandError: string = '';
-  private readonly commandState: CommandState = new CommandState();
+
   private sessionCatalogVersion: number = 0;
   private catalogConnection: number = 0;
   private workspacePageRequestId: number = 0;
@@ -251,16 +210,16 @@ struct Index {
     }
     if (this.voiceComposer.state.recording || this.voiceComposer.state.voicePreparing || this.voiceComposer.state.voiceFinishing) { this.voiceComposer.resetVoice(); return true; }
     if (this.scheduleController.state.schedulePage) { this.scheduleController.backFromSchedule(); return true; }
-    if (this.showToolDetails) { this.closeToolDetails(); return true; }
-    if (this.showModelMenu) { this.showModelMenu = false; return true; }
+    if (this.toolCmd.state.showToolDetails) { this.toolCmd.closeToolDetails(); return true; }
+    if (this.toolCmd.state.showModelMenu) { this.toolCmd.state.showModelMenu = false; return true; }
     if (this.sessionActions.creation.showNewSpace) { this.closeNewSpace(); return true; }
     if (this.sessionActions.creation.showNewSession) { this.closeNewSession(); return true; }
     if (this.showSessions) { this.setDrawer(false); return true; }
     if (this.session.showSettings) { this.session.showSettings = false; return true; }
     if (this.showFiles) { this.fileBack(); return true; }
-    if (this.splitOpen && this.activeTab === 'tasks') {
+    if (this.split.state.splitOpen && this.activeTab === 'tasks') {
       if (this.keyboardHeight) this.dismissKeyboard();
-      else if (!this.splitNavigating) this.clearSplit();
+      else if (!this.split.state.splitNavigating) this.split.clearSplit();
       return true;
     }
     if (this.activeTab === 'mine' && this.minePage) {
@@ -310,13 +269,13 @@ struct Index {
     this.streamSync.schedule(0);
     this.streamSync.startStream();
     this.streamSync.syncLiveActivity();
-    this.resumeOtherPane();
+    this.split.resumeOtherPane();
     void this.consumeLiveActivityLaunch();
     void this.accountSync.checkHuaweiProfile().then(() => { this.accountSync.scheduleCloudSync(0); });
   }
   onPageHide(): void {
     this.visible = false;
-    this.suspendOtherPane();
+    this.split.suspendOtherPane();
     this.voiceComposer.stopReplySpeech();
     this.stopNetworkMonitor();
     this.runCenter.startBackgroundRunNotices();
@@ -341,7 +300,7 @@ struct Index {
     this.voiceComposer.disposeReplySpeech();
     if (this.fileController.state.markdownTableReader) this.fileController.closeMarkdownTableReader();
     this.visible = false;
-    this.clearSplit();
+    this.split.clearSplit();
     this.runCenter.close();
     this.stopNetworkMonitor();
     this.scheduleController.stopScheduleSync();
@@ -566,9 +525,9 @@ struct Index {
       openReferencedFile: (cwd: string, path: string, lookupName: boolean): Promise<void> =>
         this.fileController.openReferencedFile(cwd, path, lookupName),
       celebrate: (): void => {
-        this.sakuraBurstKind = 'celebrate';
-        this.sakuraBurstSeq += 1;
-        if (this.themeId === 'sakura') this.sakuraCelebrateSeq += 1;
+        this.toolCmd.state.sakuraBurstKind = 'celebrate';
+        this.toolCmd.state.sakuraBurstSeq += 1;
+        if (this.themeId === 'sakura') this.toolCmd.state.sakuraCelebrateSeq += 1;
       }
     };
   }
@@ -788,13 +747,13 @@ struct Index {
           ? panePath(path, this.session.currentId, this.session.workspaceCwd)
           : path,
       liveViewsEnabled: (): boolean => this.liveViewsEnabled,
-      selectedTool: (): LiveTool | undefined => this.selectedTool,
-      selectedToolMessageId: (): string => this.selectedToolMessageId,
+      selectedTool: (): LiveTool | undefined => this.toolCmd.state.selectedTool,
+      selectedToolMessageId: (): string => this.toolCmd.selectedToolMessageId,
       request: (path: string, input?: Payload): Promise<BridgeReply> => this.request(path, input),
       leaveComputer: (forget: boolean): void => this.leaveComputer(forget),
-      refreshSelectedTool: (tool: LiveTool, message: string = ''): void => this.refreshSelectedTool(tool, message),
+      refreshSelectedTool: (tool: LiveTool, message: string = ''): void => this.toolCmd.refreshSelectedTool(tool, message),
       chatTitle: (): string => this.chatTitle(),
-      closeToolDetails: (): void => this.closeToolDetails(),
+      closeToolDetails: (): void => this.toolCmd.closeToolDetails(),
       resetVoice: (): void => this.voiceComposer.resetVoice(),
       updateCachedSessionTitle: (id: string, name?: string): void => this.updateCachedSessionTitle(id, name),
       workspaceChanged: (): void => {
@@ -805,9 +764,9 @@ struct Index {
         this.showFiles = false;
         this.activeTab = 'tasks';
       },
-      resetCommands: (): void => this.resetCommands(),
+      resetCommands: (): void => this.toolCmd.resetCommands(),
       observeSessionRun: (session: SessionState): void => this.observeSessionRun(session),
-      syncCommandPalette: (): void => this.syncCommandPalette(),
+      syncCommandPalette: (): void => this.toolCmd.syncCommandPalette(),
       setInteraction: (interaction?: PendingInteraction): void => this.setInteraction(interaction),
       reconcileSteering: (settled: boolean): void => this.sessionActions.reconcileSteering(settled),
       tryPublicConnection: (): Promise<void> => this.tryPublicConnection(),
@@ -824,275 +783,48 @@ struct Index {
     };
   }
 
-  private otherStreamHost(): StreamSyncHost {
-    const host = this.streamSyncHost();
-    host.session = this.otherSession;
-    host.connection = (): ConnectionManager => this.otherConnection;
-    host.chatState = (): ChatState => this.otherChat;
-    host.isPaired = (): boolean => this.isPaired && this.splitOpen && !!this.otherId;
-    host.streamEndpoint = (): BridgeEndpoint => this.connection.endpoint();
-    host.streamPath = (path: string): string => panePath(path, this.otherId, this.otherCwd);
-    host.request = (path: string): Promise<BridgeReply> => this.requestOtherPane(path);
-    host.liveViewsEnabled = (): boolean => false;
-    host.selectedTool = (): LiveTool | undefined => undefined;
-    host.selectedToolMessageId = (): string => '';
-    host.chatTitle = (): string => this.otherPaneTitle();
-    host.refreshSelectedTool = (): void => {};
-    host.closeToolDetails = (): void => {};
-    host.resetVoice = (): void => {};
-    host.resetCommands = (): void => {};
-    host.observeSessionRun = (): void => {};
-    host.observeRun = (): void => {};
-    host.updateCachedSessionTitle = (): void => {};
-    host.workspaceChanged = (): void => {};
-    host.showChat = (): void => {};
-    host.syncCommandPalette = (): void => {};
-    host.setInteraction = (interaction?: PendingInteraction): void => { this.otherSession.interaction = interaction; };
-    host.reconcileSteering = (): void => {};
-    host.tryPublicConnection = (): Promise<void> => Promise.resolve();
-    host.restoreOnlineNotice = (): void => {};
-    host.refreshVisibleCatalog = (): void => {};
-    host.sessionDeleted = (): void => {};
-    host.requestPermissionAfterDispatch = (): void => {};
-    host.publishLiveActivity = (): void => {};
-    return host;
-  }
-
-  private async requestOtherPane(path: string): Promise<BridgeReply> {
-    const id = this.otherId;
-    const cwd = this.otherCwd;
-    const result = await this.request(panePath(path, id, cwd));
-    if (result.session && (result.session.id !== id || result.session.cwd !== cwd)) {
-      throw new Error('session_changed');
-    }
-    return result;
-  }
-
-  private otherPaneTitle(): string {
-    return this.otherSession.sessionName || this.otherTitle || '未命名会话';
-  }
-
-  private suspendOtherPane(): void {
-    this.otherSession.epoch += 1;
-    this.otherStream.cancelSchedule();
-    this.otherStream.stopStream();
-  }
-
-  private resumeOtherPane(): void {
-    if (!this.splitOpen || !this.otherId) return;
-    this.otherStream.startStream();
-    this.otherStream.schedule(0);
-  }
-
-  private setOtherPane(snapshot?: BridgeReply): void {
-    this.suspendOtherPane();
-    this.otherId = snapshot?.session?.id ?? '';
-    this.otherCwd = snapshot?.session?.cwd ?? '';
-    this.otherTitle = snapshot?.session?.name ?? '';
-    this.otherSession.currentId = '';
-    this.otherSession.noSession = '';
-    this.otherSession.loadingMessageText = '';
-    this.otherSession.historyStream = '';
-    this.otherSession.historyLeaf = undefined;
-    this.otherSession.busy = false;
-    this.otherSession.status = '';
-    this.otherSession.reachable = !!snapshot?.session;
-    this.otherSession.syncMode = 'probe';
-    this.otherSession.interaction = undefined;
-    this.pendingOtherPosition = this.otherId;
-    if (!snapshot?.session) return;
-    this.otherStream.presentChat(snapshot, false);
-    this.otherSession.transcriptFollow = this.splitPositions.get(this.otherId)?.follow ?? true;
-    this.resumeOtherPane();
-  }
-
-  private clearSplit(): void {
-    if (!this.splitOpen && !this.otherId) return;
-    if (this.session.currentId && !this.session.transcriptFollow) {
-      this.saveSplitPosition(this.session, this.transcript);
-      this.pendingFocusedPosition = this.session.currentId;
-    }
-    this.splitOpen = false;
-    this.splitNavigating = false;
-    this.setOtherPane();
-    this.focusedPaneFirst = true;
-    this.wasSplitKeyboardCompact = false;
-    const retained = this.splitPositions.get(this.pendingFocusedPosition);
-    this.splitPositions.clear();
-    if (retained) this.splitPositions.set(this.pendingFocusedPosition, retained);
-  }
-
-  private saveSplitPosition(state: SessionViewState, scroller: Scroller): void {
-    if (!state.currentId) return;
-    if (state.transcriptFollow) {
-      this.splitPositions.delete(state.currentId);
-      return;
-    }
-    if ((scroller === this.transcript && this.pendingFocusedPosition === state.currentId) ||
-      (scroller === this.otherTranscript && this.pendingOtherPosition === state.currentId)) return;
-    try {
-      const offset = scroller.currentOffset().yOffset;
-      this.splitPositions.set(state.currentId, { follow: false, offset: offset });
-    } catch { /* The transcript may be between layouts. */ }
-  }
-
-  private captureFocusedPane(): BridgeReply | undefined {
-    if (!this.session.currentId) return undefined;
+  private splitPaneHost(): SplitPaneHost {
     return {
-      session: { id: this.session.currentId, cwd: this.session.workspaceCwd, name: this.chatTitle(),
-        agent: this.session.currentAgent, idle: this.session.idle, queued: this.session.queued, runId: this.session.runId },
-      messages: this.session.messages,
-      historyCursor: this.session.historyCursor,
-      liveText: this.session.liveText,
-      liveSeq: this.session.liveSeq,
-      liveThinking: this.session.liveThinking,
-      liveThinkSeq: this.session.liveThinkSeq,
-      tools: this.session.liveTools,
-      interaction: this.session.interaction
+      session: this.session,
+      transcript: this.transcript,
+      client: this.client,
+      chatState: this.chatState,
+      connection: this.connection,
+      sessionActions: this.sessionActions,
+      fileController: this.fileController,
+      base: (): string => this.base,
+      isPaired: (): boolean => this.isPaired,
+      windowWidth: (): number => this.windowWidth,
+      windowHeight: (): number => this.windowHeight,
+      keyboardHeight: (): number => this.keyboardHeight,
+      chatTitle: (): string => this.chatTitle(),
+      createBaseStreamHost: (): StreamSyncHost => this.streamSyncHost(),
+      request: (path: string, input?: Payload, endpoint?: BridgeEndpoint): Promise<BridgeReply> => this.request(path, input, endpoint),
+      getUIContext: (): UIContext => this.getUIContext(),
+      dismissKeyboard: (): void => this.dismissKeyboard(),
+      setDrawer: (open: boolean): void => this.setDrawer(open),
+      showTasksTab: (): void => {
+        this.activeTab = 'tasks';
+        this.minePage = '';
+        this.session.showSettings = false;
+        this.showFiles = false;
+      },
+      leaveComputer: (revoked?: boolean): void => this.leaveComputer(revoked)
     };
   }
 
-  private async chooseSplitSession(id: string, agent: string | undefined, keepFocused: boolean): Promise<boolean> {
-    if (!id || this.splitNavigating || this.openingNativeWindow || this.session.openingSession || this.session.busy) return false;
-    const existingWindow = this.launchedNativeWindow ? findConversationWindow(this.base, id) : undefined;
-    if (existingWindow && id === existingWindow.id) {
-      this.getUIContext().getPromptAction().showToast({ message: '此会话已在另一窗口打开。' });
-      return false;
-    }
-    this.activeTab = 'tasks';
-    this.minePage = '';
-    this.session.showSettings = false;
-    this.showFiles = false;
-    if (id === this.session.currentId) {
-      if (keepFocused && !this.splitOpen) {
-        this.saveSplitPosition(this.session, this.transcript);
-        this.pendingFocusedPosition = id;
-        this.splitOpen = true;
-      }
-      this.setDrawer(false);
-      return true;
-    }
-    if (!this.session.reachable) return false;
-    if (!keepFocused && !this.splitOpen) {
-      return await this.sessionActions.requestAction('/open', { id: id, agent: agent });
-    }
-    const wasSplit = this.splitOpen;
-    const previous = this.captureFocusedPane();
-    const previousOtherId = this.otherId;
-    const switchPanes = id === previousOtherId;
-    const placeInOtherPane = switchPanes || ((keepFocused || (wasSplit && !previousOtherId)) && !!previous?.session);
-    const base = this.base;
-    this.splitNavigating = true;
-    this.saveSplitPosition(this.session, this.transcript);
-    if (this.otherId) this.saveSplitPosition(this.otherSession, this.otherTranscript);
-    if (placeInOtherPane) this.dismissKeyboard();
-    try {
-      if (!await this.sessionActions.requestAction('/open', { id: id, agent: agent }) ||
-        this.session.currentId !== id || this.base !== base) return false;
-      if (keepFocused || wasSplit) {
-        this.splitOpen = true;
-        if (placeInOtherPane) {
-          this.focusedPaneFirst = !this.focusedPaneFirst;
-          this.setOtherPane(previous);
-        }
-        this.splitPositions.forEach((_value: TranscriptPosition, key: string): void => {
-          if (key !== id && key !== this.otherId) this.splitPositions.delete(key);
-        });
-        this.session.transcriptFollow = this.splitPositions.get(id)?.follow ?? true;
-        this.pendingFocusedPosition = id;
-      }
-      this.setDrawer(false);
-      return true;
-    } finally {
-      this.splitNavigating = false;
-    }
-  }
-
-  private openSidebarSession(row: SessionRow, split: boolean): void {
-    void this.chooseSplitSession(row.id, row.agent, split);
-  }
-
-  private async openInSystemSplit(row: SessionRow): Promise<void> {
-    if (this.openingNativeWindow || this.splitNavigating || this.session.busy ||
-      this.session.openingSession || !this.session.reachable) return;
-    const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
-    if (!context) return;
-    const toast = (message: string): void => { this.getUIContext().getPromptAction().showToast({ message: message }); };
-    if (row.id === this.session.currentId) {
-      toast('请选择另一条会话在系统分屏中打开。');
-      return;
-    }
-    if (findConversationWindow(this.base, row.id)) return;
-    const endpoint = this.connection.endpoint();
-    const epoch = this.session.epoch;
-    let launchKey = '';
-    this.openingNativeWindow = true;
-    try {
-      const snapshot = await this.request('/session/open', { id: row.id, agent: row.agent, history: true }, endpoint);
-      if (this.session.epoch !== epoch || endpoint.token !== this.connection.endpoint().token ||
-        endpoint.address !== this.connection.endpoint().address) return;
-      if (snapshot.session?.id !== row.id || !snapshot.session.cwd) throw new Error('session_changed');
-      const cwd = snapshot.session.cwd;
-      const model = new WindowConversation(snapshot, endpoint, this.client, this.chatState, toast,
-        (): void => {
-          this.clearSplit();
-          this.setDrawer(false);
-        },
-        (message: string, index: number, tool: string): Promise<string> =>
-          this.fileController.loadHistoryImage(row.id, message, index, tool, cwd,
-            (path: string): Promise<BridgeReply> => this.request(panePath(path, row.id, cwd), undefined, endpoint)),
-        (target: string, workspace: string, document: string): Promise<string> =>
-          this.fileController.loadMarkdownImage(target, workspace, document));
-      launchKey = prepareConversationWindow(model);
-      this.dismissKeyboard();
-      await context.startAbility({
-        bundleName: context.abilityInfo.bundleName,
-        moduleName: context.abilityInfo.moduleName,
-        abilityName: 'ConversationAbility',
-        parameters: { conversationKey: launchKey }
-      }, { windowMode: AbilityConstant.WindowMode.WINDOW_MODE_SPLIT });
-      this.launchedNativeWindow = true;
-    } catch (error) {
-      if (launchKey) takeConversationWindow(launchKey)?.dispose();
-      if (error instanceof BridgeFailure && error.status === 401) this.leaveComputer(true);
-      else toast(error instanceof BridgeFailure && error.status === 404
-        ? '请更新电脑端 Pi Go 后再打开系统分屏。' : '暂时无法打开系统分屏，请检查设备窗口模式和会话连接。');
-    } finally {
-      this.openingNativeWindow = false;
-    }
-  }
-
-  private async focusOtherPane(): Promise<boolean> {
-    return await this.chooseSplitSession(this.otherId, this.otherSession.currentAgent, false);
-  }
-
-  private async closeSplitPane(focused: boolean): Promise<void> {
-    if (this.splitNavigating || this.session.openingSession || this.session.busy) return;
-    if (focused && this.otherId && !await this.focusOtherPane()) return;
-    this.clearSplit();
-  }
-
-  private restoreSplitPosition(id: string, scroller: Scroller): boolean {
-    const position = this.splitPositions.get(id);
-    if (!position || position.follow) return false;
-    scroller.scrollTo({ xOffset: 0, yOffset: position.offset, animation: false });
-    return true;
-  }
-
-  private positionOtherTranscript(id: string, contentHeight: number): void {
-    if (id !== this.otherId || contentHeight <= 0) return;
-    this.otherTranscriptHeight = contentHeight;
-    if (this.pendingOtherPosition === id) {
-      this.pendingOtherPosition = '';
-      if (this.restoreSplitPosition(id, this.otherTranscript)) {
-        this.otherSession.pendingBottom = false;
-        return;
-      }
-    }
-    if (this.otherSession.pendingBottom && this.otherSession.transcriptFollow) {
-      this.otherTranscript.scrollTo({ xOffset: 0, yOffset: contentHeight, animation: false });
-    }
-    this.otherSession.pendingBottom = false;
+  private toolCommandHost(): ToolCommandHost {
+    return {
+      session: this.session,
+      voiceState: this.voiceComposer.state,
+      sessionActions: this.sessionActions,
+      request: (path: string, input?: Payload): Promise<BridgeReply> => this.request(path, input),
+      dismissKeyboard: (): void => this.dismissKeyboard(),
+      leaveComputer: (revoked?: boolean): void => this.leaveComputer(revoked),
+      themeId: (): string => this.themeId,
+      themeMotionEnabled: (): boolean => this.themeMotionEnabled,
+      canObserveSakuraTap: (): boolean => !this.voiceComposer.state.recording && !this.voiceComposer.holding() && !this.sessionPaneDragging && !this.drawerOpen()
+    };
   }
 
   private refreshVisibleCatalog(connected: boolean): void {
@@ -1213,11 +945,11 @@ struct Index {
   }
 
   private leaveComputer(revoked: boolean = false, next?: Companion): void {
-    if (this.launchedNativeWindow || this.openingNativeWindow) closeConversationWindows(this.base);
-    if (this.splitOpen) this.clearSplit();
+    if (this.split.launchedNativeWindow || this.split.openingNativeWindow) closeConversationWindows(this.base);
+    if (this.split.state.splitOpen) this.split.clearSplit();
     if (this.fileController.state.markdownTableReader) this.fileController.closeMarkdownTableReader();
     this.fileController.state.textFilePreview = undefined;
-    this.closeToolDetails();
+    this.toolCmd.closeToolDetails();
     const address = this.base;
     if (this.session.currentId) this.streamSync.rememberDraft(this.session.currentId);
     this.session.epoch += 1;
@@ -1228,7 +960,7 @@ struct Index {
     this.connection.disconnect();
     this.pairingBundle = '';
     this.session.currentId = '';
-    this.resetCommands();
+    this.toolCmd.resetCommands();
     this.session.pendingSessionReveal = '';
     this.session.noSession = '';
     this.session.project = '';
@@ -1545,7 +1277,7 @@ struct Index {
       downloadFile: (endpoint: BridgeEndpoint, cwd: string, path: string, local: string, lookupName: boolean,
         limit: number): Promise<void> => this.client.downloadFile(endpoint, cwd, path, local, lookupName, limit),
       dismissKeyboard: (): void => this.dismissKeyboard(),
-      closeToolDetails: (): void => this.closeToolDetails(),
+      closeToolDetails: (): void => this.toolCmd.closeToolDetails(),
       scrollPreviewToTop: (): void => this.previewScroller.scrollEdge(Edge.Top)
     };
   }
@@ -1588,64 +1320,6 @@ struct Index {
     }, (index: number): string => `${sessionId}-${messageId}-${toolId}-${index}`)
   }
 
-  private toolFile(tool: LiveTool): string {
-    if (tool.state === 'run' || !['write', 'edit', 'read'].includes(tool.name)) return '';
-    return normalizeWorkspacePath(this.session.workspaceCwd, this.selectedToolDetails?.path ?? tool.detail);
-  }
-
-  private toolIcon(tool: LiveTool): Resource {
-    if (tool.name === 'computer_screenshot') return $r('sys.symbol.camera');
-    if (tool.name === 'bash') return $r('sys.symbol.code_square');
-    if (tool.name === 'grep' || tool.name === 'find' || tool.name === 'web_search') return $r('sys.symbol.magnifyingglass');
-    if (tool.name === 'write' || tool.name === 'edit') return $r('sys.symbol.square_and_pencil');
-    return $r('sys.symbol.folder');
-  }
-
-  private openToolDetails(tool: LiveTool, messageId: string): void {
-    this.dismissKeyboard();
-    this.selectedTool = tool;
-    this.selectedToolMessageId = messageId;
-    this.selectedToolDetails = undefined;
-    this.showToolDetails = true;
-    void this.loadToolDetails();
-  }
-
-  private closeToolDetails(): void {
-    this.toolDetailRevision++;
-    this.showToolDetails = false;
-    this.selectedTool = undefined;
-    this.selectedToolDetails = undefined;
-    this.selectedToolMessageId = '';
-    this.toolDetailError = '';
-  }
-
-  private refreshSelectedTool(tool: LiveTool, messageId: string = ''): void {
-    if (this.selectedTool?.id !== tool.id || this.selectedTool.state === 'ok' || this.selectedTool.state === 'fail' ||
-      this.selectedTool.state === tool.state ||
-      (messageId && this.selectedToolMessageId && messageId !== this.selectedToolMessageId)) return;
-    this.selectedTool = tool;
-    if (messageId) this.selectedToolMessageId = messageId;
-    void this.loadToolDetails();
-  }
-
-  private async loadToolDetails(): Promise<void> {
-    const tool = this.selectedTool;
-    if (!tool || !this.session.currentId) return;
-    const revision = ++this.toolDetailRevision;
-    this.toolDetailError = '';
-    const message = this.selectedToolMessageId ? `&message=${encodeURIComponent(this.selectedToolMessageId)}` : '';
-    try {
-      const reply = await this.request(`/tool-detail?id=${encodeURIComponent(this.session.currentId)}&tool=${encodeURIComponent(tool.id)}${message}&images=1`);
-      if (revision !== this.toolDetailRevision) return;
-      this.selectedToolDetails = reply.toolDetail;
-      if (!reply.toolDetail) this.toolDetailError = '没有可用的工具详情';
-    } catch (error) {
-      if (revision !== this.toolDetailRevision) return;
-      this.toolDetailError = error instanceof BridgeFailure && error.message === 'not_found'
-        ? '请更新电脑端 Pi Go 以查看完整详情' : '暂时无法加载工具详情';
-    }
-  }
-
   private async copyText(value: string): Promise<void> {
     let message = '已复制';
     try {
@@ -1672,7 +1346,7 @@ struct Index {
       fetchFullMessageText: (sessionId: string, messageId: string, epoch: number, current?: () => boolean): Promise<string | undefined> =>
         this.streamSync.fetchFullMessageText(sessionId, messageId, epoch, current),
       replySpeechText: (source: string): string => replySpeechText(source),
-      syncCommandPalette: (): void => this.syncCommandPalette(),
+      syncCommandPalette: (): void => this.toolCmd.syncCommandPalette(),
       send: (): Promise<void> => this.sessionActions.send()
     };
   }
@@ -1713,7 +1387,7 @@ struct Index {
       leaveComputer: (forget: boolean): void => this.leaveComputer(forget),
       observeSessionRun: (session: SessionState): void => this.observeSessionRun(session),
       setInteraction: (interaction?: PendingInteraction): void => this.setInteraction(interaction),
-      syncCommandPalette: (): void => this.syncCommandPalette(),
+      syncCommandPalette: (): void => this.toolCmd.syncCommandPalette(),
       getUIContext: (): UIContext => this.getUIContext(),
       accent: (): string => this.accent(),
       resetVoice: (): void => this.voiceComposer.resetVoice(),
@@ -1738,8 +1412,8 @@ struct Index {
       },
       showTasks: (): void => { this.activeTab = 'tasks'; },
       animateSend: (): void => {
-        this.sakuraBurstKind = 'send';
-        this.sakuraBurstSeq += 1;
+        this.toolCmd.state.sakuraBurstKind = 'send';
+        this.toolCmd.state.sakuraBurstSeq += 1;
       },
       uploadAttachment: (kind: string, name: string, bytes: Uint8Array): Promise<UploadedAttachment> =>
         this.client.uploadAttachment(this.connection.endpoint(), kind, name, bytes,
@@ -1865,74 +1539,6 @@ struct Index {
     else if (!open) state.thinkingOpenIds = state.thinkingOpenIds.filter((item: string): boolean => item !== id);
   }
 
-  private commandPaletteActive(): boolean {
-    if (this.voiceComposer.state.voiceMode || !this.session.draft) return false;
-    const text = this.session.draft.trimStart();
-    return text.startsWith('/') && !/\s/.test(text);
-  }
-
-  private commandMatches(): CommandRow[] {
-    const text = this.session.draft.trimStart();
-    const token = text.length > 1 ? text.slice(1) : '';
-    const needle = token.toLowerCase();
-    return this.commandRows.filter((row: CommandRow): boolean =>
-      !needle || row.name.toLowerCase().includes(needle)).slice(0, 12);
-  }
-
-  private syncCommandPalette(): void {
-    if (!this.commandPaletteActive()) { this.commandPalette = false; return; }
-    this.commandPalette = true;
-    if (this.commandState.stale()) void this.loadCommands();
-  }
-
-  private resetCommands(): void {
-    this.commandState.reset();
-    this.commandsLoading = false;
-    this.commandError = '';
-    this.commandPalette = false;
-    this.commandRows = [];
-    this.showComposerMenu = false;
-  }
-
-  private async loadCommands(): Promise<void> {
-    if (!this.session.reachable || !this.session.currentId || this.session.openingSession) return;
-    await this.commandState.load(this.session.currentId, (): Promise<BridgeReply> => this.request('/commands'), (list: CommandList): void => {
-      this.commandError = list.error;
-      if (list.rows) this.commandRows = list.rows;
-      this.commandsLoading = list.loading;
-    });
-  }
-
-  private pickCommand(row: CommandRow, prompt: string = ''): void {
-    this.session.draft = commandDraft(row, prompt);
-    this.commandPalette = false;
-  }
-
-  private openComposerMenu(): void {
-    this.dismissKeyboard();
-    this.showSkillPicker = false;
-    this.showComposerMenu = true;
-  }
-
-  private openSkillPicker(): void {
-    this.showSkillPicker = true;
-    if (this.commandState.stale()) void this.loadCommands();
-  }
-
-  private pickSkill(row: CommandRow): void {
-    this.session.draft = skillDraft(row, this.session.draft);
-    this.commandPalette = false;
-    this.voiceComposer.state.voiceMode = false;
-    this.showComposerMenu = false;
-  }
-
-  private commandSourceLabel(source: string): string {
-    if (source === 'skill') return '技能';
-    if (source === 'prompt') return '模板';
-    if (source === 'extension') return '扩展';
-    return source;
-  }
-
   private shareAttachmentHost(): ShareAttachmentHost {
     return {
       appState: this.appState,
@@ -2005,60 +1611,6 @@ struct Index {
     return this.isPaired && !!this.session.currentId && this.activeTab === 'tasks' && !this.showFiles && !this.session.showSettings &&
       !this.scheduleController.state.schedulePage && !this.runCenter.state.reviewedRun && !this.fileController.state.markdownTableReader && !this.fileController.state.textFilePreview &&
       !this.shareTargetLocked() && !this.drawerOpen();
-  }
-
-  private async openModelMenu(): Promise<void> {
-    if (!this.session.reachable || !this.session.currentId || this.session.busy || this.session.openingSession) return;
-    if (!this.session.idle || this.session.queued) { this.session.status = '等待当前任务和队列结束后可切换模型。'; return; }
-    const epoch = this.session.epoch;
-    this.session.busy = true;
-    this.session.status = '';
-    this.dismissKeyboard();
-    try {
-      const result = await this.request('/models');
-      if (epoch !== this.session.epoch || result.session?.id !== this.session.currentId) return;
-      this.session.models = result.models ?? [];
-      if (!this.session.models.length) { this.session.status = '没有可用模型，请在电脑上检查 Pi CLI 的模型配置。'; return; }
-      this.showModelMenu = true;
-    } catch (error) {
-      if (epoch !== this.session.epoch) return;
-      if (error instanceof BridgeFailure && error.status === 401) this.leaveComputer(true);
-      else if (error instanceof BridgeFailure && error.message === 'session_busy') this.session.status = '等待当前任务和队列结束后可切换模型。';
-      else if (error instanceof BridgeFailure && error.message === 'model_not_found') this.session.status = '模型已不可用，请重新打开。';
-      else this.session.status = '模型列表加载失败，请重试。';
-    } finally { this.session.busy = false; }
-  }
-
-  private async applyModelFromMenu(index: number): Promise<void> {
-    const model = this.session.models[index];
-    if (!model) return;
-    const level = model.levels.includes(this.session.currentLevel) ? this.session.currentLevel : model.levels[0] ?? 'off';
-    await this.sessionActions.requestAction('/model', { id: this.session.currentId, provider: model.provider,
-      modelId: model.id, thinkingLevel: level });
-  }
-
-  private async applyThinkingLevelFromMenu(level: string): Promise<void> {
-    const model = this.session.currentModel ?? this.session.models.find((item: ModelOption): boolean => this.isCurrentModel(item));
-    if (!model || level === this.session.currentLevel) return;
-    await this.sessionActions.requestAction('/model', { id: this.session.currentId, provider: model.provider,
-      modelId: model.id, thinkingLevel: level });
-  }
-
-  private thinkingLevelLabel(level: string): string {
-    switch (level) {
-      case 'off': return '关闭';
-      case 'minimal': return '极简';
-      case 'low': return '低';
-      case 'medium': return '中';
-      case 'high': return '高';
-      case 'xhigh': return '极高';
-      case 'max': return '最高';
-      default: return level;
-    }
-  }
-
-  private isCurrentModel(model: ModelOption): boolean {
-    return this.session.currentModel?.provider === model.provider && this.session.currentModel?.id === model.id;
   }
 
   private bottomPad(): number {
@@ -2435,25 +1987,25 @@ struct Index {
 
   @Builder
   toolDetailImages() {
-    if (this.selectedTool && this.selectedToolDetails?.imageCount) {
-      this.historyImages(this.selectedToolDetails.imageCount, this.session.currentId, this.selectedToolMessageId, this.selectedTool.id)
+    if (this.toolCmd.state.selectedTool && this.toolCmd.state.selectedToolDetails?.imageCount) {
+      this.historyImages(this.toolCmd.state.selectedToolDetails.imageCount, this.session.currentId, this.toolCmd.selectedToolMessageId, this.toolCmd.state.selectedTool.id)
     }
   }
 
   @Builder
   toolDetailsSheet() {
     ToolDetailsSheet({
-      selectedTool: this.selectedTool,
-      selectedToolDetails: this.selectedToolDetails,
+      selectedTool: this.toolCmd.state.selectedTool,
+      selectedToolDetails: this.toolCmd.state.selectedToolDetails,
       idle: this.session.idle,
-      toolDetailError: this.toolDetailError,
+      toolDetailError: this.toolCmd.state.toolDetailError,
       accent: this.accent(),
-      icon: this.selectedTool ? this.toolIcon(this.selectedTool) : $r('sys.symbol.doc'),
-      path: this.selectedTool ? this.toolFile(this.selectedTool) : '',
+      icon: this.toolCmd.state.selectedTool ? this.toolCmd.toolIcon(this.toolCmd.state.selectedTool) : $r('sys.symbol.doc'),
+      path: this.toolCmd.state.selectedTool ? this.toolCmd.toolFile(this.toolCmd.state.selectedTool) : '',
       openingFile: this.fileController.state.openingFile,
       openFile: (path: string): Promise<void> => this.fileController.openReferencedFile(this.session.workspaceCwd, path, false),
       copyText: (value: string): Promise<void> => this.copyText(value),
-      loadToolDetails: (): Promise<void> => this.loadToolDetails(),
+      loadToolDetails: (): Promise<void> => this.toolCmd.loadToolDetails(),
       images: (): void => this.toolDetailImages()
     })
   }
@@ -2473,7 +2025,7 @@ struct Index {
           .onClick(() => { this.setDrawer(true); })
       }
       Column({ space: 3 }) {
-        Text(this.showFiles ? '工作区文件' : this.session.showSettings ? '会话设置' : this.activeTab === 'pending' ? '任务' : this.splitOpen ? '分屏会话' : this.chatTitle())
+        Text(this.showFiles ? '工作区文件' : this.session.showSettings ? '会话设置' : this.activeTab === 'pending' ? '任务' : this.split.state.splitOpen ? '分屏会话' : this.chatTitle())
           .fontSize(this.showFiles || this.session.showSettings ? 20 : 18).fontWeight(FontWeight.Bold).fontColor($r('app.color.pigo_text')).maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis }).width('100%')
         if (!this.session.showSettings) {
@@ -2552,7 +2104,7 @@ struct Index {
       speakingReply: focused ? this.voiceComposer.state.speakingReply : '',
       toggleReplySpeech: (message: ChatMessage): void => {
         if (focused) void this.voiceComposer.toggleReplySpeech(message);
-        else void this.focusOtherPane().then((ready: boolean): void => {
+        else void this.split.focusOtherPane().then((ready: boolean): void => {
           if (ready) void this.voiceComposer.toggleReplySpeech(message);
         });
       },
@@ -2567,7 +2119,7 @@ struct Index {
       liveThinking: state.liveThinking,
       liveThinkingOpen: state.liveThinkingOpen,
       liveTools: state.liveTools,
-      loadHistory: (): Promise<void> => (focused ? this.streamSync : this.otherStream).loadHistory(),
+      loadHistory: (): Promise<void> => (focused ? this.streamSync : this.split.otherStream).loadHistory(),
       loadHistoryImage: (sessionId: string, messageId: string, index: number, toolId: string): Promise<string> => focused ? this.fileController.loadHistoryImage(sessionId, messageId, index, toolId) :
         this.fileController.loadHistoryImage(sessionId, messageId, index, toolId, state.workspaceCwd,
           (path: string): Promise<BridgeReply> => this.request(panePath(path, sessionId, state.workspaceCwd))),
@@ -2580,24 +2132,24 @@ struct Index {
       openMarkdownTableReader: (source: string, cwd: string, documentPath: string): void => this.fileController.openMarkdownTableReader(source, cwd, documentPath),
       openReferencedFile: (cwd: string, path: string, lookupName: boolean): Promise<void> => this.fileController.openReferencedFile(cwd, path, lookupName),
       openToolDetails: (tool: LiveTool, messageId: string): void => {
-        if (focused) this.openToolDetails(tool, messageId);
-        else void this.focusOtherPane().then((ready: boolean): void => {
-          if (ready) this.openToolDetails(tool, messageId);
+        if (focused) this.toolCmd.openToolDetails(tool, messageId);
+        else void this.split.focusOtherPane().then((ready: boolean): void => {
+          if (ready) this.toolCmd.openToolDetails(tool, messageId);
         });
       },
       openingFile: this.fileController.state.openingFile,
       positionTranscript: (id: string, contentHeight: number): void => {
         if (focused) this.positionTranscript(id, contentHeight);
-        else this.positionOtherTranscript(id, contentHeight);
+        else this.split.positionOtherTranscript(id, contentHeight);
       },
       queuedSteering: state.queuedSteering,
       optimisticMessages: state.optimisticMessages,
       reachable: state.reachable,
       showChatImage: (source: string, label: string): void => this.fileController.showChatImage(source, label),
-      showFullReply: (messageId: string): Promise<void> => (focused ? this.streamSync : this.otherStream).showFullReply(messageId),
+      showFullReply: (messageId: string): Promise<void> => (focused ? this.streamSync : this.split.otherStream).showFullReply(messageId),
       thinkingOpenIds: state.thinkingOpenIds,
       toggleThinking: (id: string, open: boolean): void => this.toggleThinking(id, open, state),
-      transcript: focused ? this.transcript : this.otherTranscript,
+      transcript: focused ? this.transcript : this.split.otherTranscript,
       transcriptFollow: state.transcriptFollow,
       $transcriptFollow: (follow: boolean): void => { state.transcriptFollow = follow; },
       workspaceCwd: state.workspaceCwd,
@@ -2608,7 +2160,7 @@ struct Index {
       topPadding: inSplit || this.chatHasTopCards() ? 10 : this.topContentClearance(),
       bottomPadding: inSplit ? 10 : this.chatBottomClearance(),
       scrollBottomOffset: inSplit ? 8 : this.chatScrollBottomOffset(),
-      readTranscriptHeight: (): number => focused ? this.transcriptContentHeight : this.otherTranscriptHeight,
+      readTranscriptHeight: (): number => focused ? this.transcriptContentHeight : this.split.otherTranscriptHeight,
       setTranscriptViewport: (height: number): void => { if (focused) this.transcriptViewport = height; }
     })
   }
@@ -2636,44 +2188,37 @@ struct Index {
       .width('100%').textAlign(TextAlign.Center).padding({ top: 16, bottom: 16 })
   }
 
-  private splitPaneStatus(state: SessionViewState): string {
-    if (!state.reachable) return '等待连接';
-    if (state.interaction) return '待处理';
-    if (state.queued) return '排队中';
-    return state.idle ? '' : '运行中';
-  }
-
   @Builder
   splitPane(state: SessionViewState, focused: boolean) {
     Column() {
       Row({ space: 4 }) {
         Button({ type: ButtonType.Normal }) {
           Row({ space: 6 }) {
-            Text(focused ? this.chatTitle() : this.otherId ? this.otherPaneTitle() : '选择第二个会话')
+            Text(focused ? this.chatTitle() : this.split.state.otherId ? this.split.otherPaneTitle() : '选择第二个会话')
               .fontSize(14).fontWeight(FontWeight.Medium).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
               .fontColor(focused ? this.accent() : $r('app.color.pigo_text')).layoutWeight(1)
-            if ((focused || this.otherId) && this.splitPaneStatus(state)) {
-              Text(this.splitPaneStatus(state)).fontSize(11).maxLines(1)
+            if ((focused || this.split.state.otherId) && this.split.splitPaneStatus(state)) {
+              Text(this.split.splitPaneStatus(state)).fontSize(11).maxLines(1)
                 .fontColor(state.interaction || !state.reachable ? $r('app.color.pigo_warning') : this.accent())
             }
           }.width('100%')
         }.id(focused ? 'split-focused-title' : 'split-other-title').height(44).layoutWeight(1)
           .padding({ left: 12, right: 3 }).backgroundColor(Color.Transparent)
           .accessibilitySelected(focused)
-          .enabled(!this.splitNavigating && !this.session.openingSession && !this.session.busy)
+          .enabled(!this.split.state.splitNavigating && !this.session.openingSession && !this.session.busy)
           .onClick(() => {
             if (focused) return;
-            if (this.otherId) void this.focusOtherPane();
+            if (this.split.state.otherId) void this.split.focusOtherPane();
             else this.setDrawer(true);
           })
         Button({ type: ButtonType.Normal }) {
           headerSymbol($r('sys.symbol.xmark'), $r('app.color.pigo_muted'), 17)
         }.id(focused ? 'split-close-focused' : 'split-close-other').width(44).height(44)
           .padding(0).backgroundColor(Color.Transparent).accessibilityText(focused ? '关闭当前会话面板' : '关闭另一会话面板')
-          .enabled(!this.splitNavigating && !this.session.openingSession && !this.session.busy)
-          .onClick(() => { void this.closeSplitPane(focused); })
+          .enabled(!this.split.state.splitNavigating && !this.session.openingSession && !this.session.busy)
+          .onClick(() => { void this.split.closeSplitPane(focused); })
       }.width('100%').backgroundColor(focused ? this.accentTint() : $r('app.color.pigo_control'))
-      if ((focused && state.currentId) || (!focused && this.otherId && state.currentId)) {
+      if ((focused && state.currentId) || (!focused && this.split.state.otherId && state.currentId)) {
         if (focused && state.interaction) {
           Scroll() {
             PendingInteractionCard({
@@ -2702,7 +2247,7 @@ struct Index {
         this.chatTranscript(state, focused, true)
       } else {
         Column() {
-          if (focused || this.otherId) {
+          if (focused || this.split.state.otherId) {
             Text(state.noSession || '等待会话连接').fontSize(13).fontColor($r('app.color.pigo_muted'))
               .textAlign(TextAlign.Center)
           } else {
@@ -2717,16 +2262,12 @@ struct Index {
       .borderRadius(12).border({ width: 1, color: focused ? this.accent() : $r('app.color.pigo_line') }).clip(true)
   }
 
-  private mainPaneWidth(sidebar: number): number {
-    return this.windowWidth - this.leftInset - this.rightInset - sidebar;
-  }
-
   private splitHorizontal(): boolean {
-    return this.mainPaneWidth(this.dockedSessions() ? this.sessionPaneWidth() : 0) >= 640;
+    return this.split.splitHorizontal(this.dockedSessions(), this.sessionPaneWidth());
   }
 
   private splitKeyboardCompact(): boolean {
-    return !this.splitHorizontal() && this.keyboardHeight > 0 && this.windowHeight - this.keyboardHeight < 650;
+    return this.split.splitKeyboardCompact(this.dockedSessions(), this.sessionPaneWidth());
   }
 
   @Builder
@@ -2734,12 +2275,12 @@ struct Index {
     Flex({ direction: this.splitHorizontal() && !this.splitKeyboardCompact() ? FlexDirection.Row : FlexDirection.Column }) {
       if (this.splitKeyboardCompact()) {
         this.splitPane(this.session, true)
-      } else if (this.focusedPaneFirst) {
+      } else if (this.split.state.focusedPaneFirst) {
         this.splitPane(this.session, true)
         Blank().width(this.splitHorizontal() ? 8 : '100%').height(this.splitHorizontal() ? '100%' : 8)
-        this.splitPane(this.otherSession, false)
+        this.splitPane(this.split.state.otherSession, false)
       } else {
-        this.splitPane(this.otherSession, false)
+        this.splitPane(this.split.state.otherSession, false)
         Blank().width(this.splitHorizontal() ? 8 : '100%').height(this.splitHorizontal() ? '100%' : 8)
         this.splitPane(this.session, true)
       }
@@ -2842,36 +2383,36 @@ struct Index {
             modelId: model.id, thinkingLevel: this.session.selectedLevel });
         },
         share: (): void => { void this.shareController.shareCurrentSession('session-share'); },
-        thinkingLevelLabel: (level: string): string => this.thinkingLevelLabel(level)
+        thinkingLevelLabel: (level: string): string => this.toolCmd.thinkingLevelLabel(level)
       })
       } else if (this.activeTab === 'pending') {
         Column() {
           this.taskView()
         }.width('100%').height('100%').transition(modalFadeTransition())
-      } else if (this.session.noSession && !this.splitOpen) {
+      } else if (this.session.noSession && !this.split.state.splitOpen) {
         Column() {
           this.welcome()
         }.width('100%').height('100%').transition(modalFadeTransition())
       } else {
         Stack({ alignContent: Alignment.Bottom }) {
-        if (this.splitOpen) {
+        if (this.split.state.splitOpen) {
           this.splitConversation()
         } else {
           this.singleConversation()
         }
         Column({ space: 6 }) {
-          if (this.commandPalette && this.commandPaletteActive()) {
+          if (this.toolCmd.state.commandPalette && this.toolCmd.commandPaletteActive()) {
             CommandPaletteCard({
               darkMode: this.darkMode,
               reachable: this.session.reachable,
-              commandsLoading: this.commandsLoading,
-              commandError: this.commandError,
-              hasCommands: this.commandRows.length > 0,
-              matches: this.commandMatches(),
+              commandsLoading: this.toolCmd.state.commandsLoading,
+              commandError: this.toolCmd.state.commandError,
+              hasCommands: this.toolCmd.state.commandRows.length > 0,
+              matches: this.toolCmd.commandMatches(),
               maxHeight: this.keyboardHeight || this.windowHeight < SHORT_WINDOW_HEIGHT ? 132 : 216,
-              commandSourceLabel: (source: string): string => this.commandSourceLabel(source),
-              reloadCommands: (): Promise<void> => this.loadCommands(),
-              pickCommand: (row: CommandRow): void => this.pickCommand(row)
+              commandSourceLabel: (source: string): string => this.toolCmd.commandSourceLabel(source),
+              reloadCommands: (): Promise<void> => this.toolCmd.loadCommands(),
+              pickCommand: (row: CommandRow): void => this.toolCmd.pickCommand(row)
             })
           }
           this.composer()
@@ -2890,35 +2431,35 @@ struct Index {
     ChatComposer({
       darkMode: this.darkMode,
       acceptsImage: this.session.acceptsImage,
-      applyModelFromMenu: (index: number): Promise<void> => this.applyModelFromMenu(index),
-      applyThinkingLevelFromMenu: (level: string): Promise<void> => this.applyThinkingLevelFromMenu(level),
+      applyModelFromMenu: (index: number): Promise<void> => this.toolCmd.applyModelFromMenu(index),
+      applyThinkingLevelFromMenu: (level: string): Promise<void> => this.toolCmd.applyThinkingLevelFromMenu(level),
       armTranscriptFollow: (): void => this.armTranscriptFollow(),
       attachFile: (): Promise<void> => this.shareController.attachFile(),
       attachImage: (source: string): Promise<void> => this.shareController.attachImage(source),
       attachments: this.session.attachments,
       busy: this.session.busy,
-      commandError: this.commandError,
-      commandRows: this.commandRows,
-      commandsLoading: this.commandsLoading,
+      commandError: this.toolCmd.state.commandError,
+      commandRows: this.toolCmd.state.commandRows,
+      commandsLoading: this.toolCmd.state.commandsLoading,
       currentId: this.session.currentId,
       currentLevel: this.session.currentLevel,
       currentModel: this.session.currentModel,
       dismissKeyboard: (): void => this.dismissKeyboard(),
       draft: this.session.draft!!,
-      sendTarget: this.splitOpen ? this.chatTitle() : '',
+      sendTarget: this.split.state.splitOpen ? this.chatTitle() : '',
       holdCancel: this.voiceComposer.state.holdCancel,
       holdTouch: (event: TouchEvent): void => this.voiceComposer.holdTouch(event),
       idle: this.session.idle,
       liveVoiceText: this.voiceComposer.state.liveVoiceText!!,
-      loadCommands: (): Promise<void> => this.loadCommands(),
+      loadCommands: (): Promise<void> => this.toolCmd.loadCommands(),
       modelLabel: this.session.modelLabel,
       models: this.session.models,
-      openComposerMenu: (): void => this.openComposerMenu(),
-      openModelMenu: (): Promise<void> => this.openModelMenu(),
-      openSkillPicker: (): void => this.openSkillPicker(),
-      openingSession: this.session.openingSession || this.splitNavigating,
+      openComposerMenu: (): void => this.toolCmd.openComposerMenu(),
+      openModelMenu: (): Promise<void> => this.toolCmd.openModelMenu(),
+      openSkillPicker: (): void => this.toolCmd.openSkillPicker(),
+      openingSession: this.session.openingSession || this.split.state.splitNavigating,
       hasPendingSend: this.session.pendingSend !== undefined,
-      pickSkill: (row: CommandRow): void => this.pickSkill(row),
+      pickSkill: (row: CommandRow): void => this.toolCmd.pickSkill(row),
       queued: this.session.queued,
       reachable: this.session.reachable,
       recording: this.voiceComposer.state.recording,
@@ -2926,11 +2467,11 @@ struct Index {
       requestAction: (path: string, input?: Payload): Promise<boolean> => this.sessionActions.requestAction(path, input),
       runId: this.session.runId,
       send: (): Promise<void> => this.sessionActions.send(),
-      showComposerMenu: this.showComposerMenu!!,
-      showModelMenu: this.showModelMenu!!,
-      showSkillPicker: this.showSkillPicker!!,
+      showComposerMenu: this.toolCmd.state.showComposerMenu!!,
+      showModelMenu: this.toolCmd.state.showModelMenu!!,
+      showSkillPicker: this.toolCmd.state.showSkillPicker!!,
       status: this.session.status!!,
-      syncCommandPalette: (): void => this.syncCommandPalette(),
+      syncCommandPalette: (): void => this.toolCmd.syncCommandPalette(),
       voiceCancelling: this.voiceComposer.state.voiceCancelling,
       voiceFinishing: this.voiceComposer.state.voiceFinishing,
       voiceMode: this.voiceComposer.state.voiceMode!!,
@@ -2946,9 +2487,9 @@ struct Index {
   private positionTranscript(id: string, contentHeight: number): void {
     if (id !== this.session.currentId || contentHeight <= 0) return;
     this.transcriptContentHeight = contentHeight;
-    if (this.pendingFocusedPosition === id) {
-      this.pendingFocusedPosition = '';
-      if (this.restoreSplitPosition(id, this.transcript)) {
+    if (this.split.pendingFocusedPosition === id) {
+      this.split.pendingFocusedPosition = '';
+      if (this.split.restoreSplitPosition(id, this.transcript)) {
         this.session.transcriptFollow = false;
         this.session.pendingBottom = false;
         this.session.pendingSessionReveal = '';
@@ -2993,7 +2534,7 @@ struct Index {
 
   private dockedSessions(): boolean {
     return this.isPaired && this.windowWidth >= SPLIT_WINDOW_WIDTH &&
-      (!this.splitOpen || this.mainPaneWidth(this.sessionPaneWidth()) >= 640);
+      (!this.split.state.splitOpen || this.split.mainPaneWidth(this.sessionPaneWidth()) >= 640);
   }
 
   private drawerOpen(): boolean {
@@ -3022,23 +2563,23 @@ struct Index {
 
   @SyncMonitor('appState.keyboardHeight', 'appState.windowWidth', 'appState.windowHeight')
   private onSplitViewportChange(): void {
-    if (!this.splitOpen) return;
+    if (!this.split.state.splitOpen) return;
     const compact = this.splitKeyboardCompact();
-    if (compact === this.wasSplitKeyboardCompact) return;
-    this.saveSplitPosition(this.session, this.transcript);
-    this.pendingFocusedPosition = this.session.currentId;
-    if (compact) this.saveSplitPosition(this.otherSession, this.otherTranscript);
-    else this.pendingOtherPosition = this.otherId;
-    this.wasSplitKeyboardCompact = compact;
+    if (compact === this.split.wasSplitKeyboardCompact) return;
+    this.split.saveSplitPosition(this.session, this.transcript);
+    this.split.pendingFocusedPosition = this.session.currentId;
+    if (compact) this.split.saveSplitPosition(this.split.state.otherSession, this.split.otherTranscript);
+    else this.split.pendingOtherPosition = this.split.state.otherId;
+    this.split.wasSplitKeyboardCompact = compact;
   }
 
   @SyncMonitor('session.currentId')
   private onFocusedSessionChange(): void {
-    if (this.launchedNativeWindow) {
+    if (this.split.launchedNativeWindow) {
       findConversationWindow(this.base, this.session.currentId)?.close();
     }
-    if (this.splitOpen && !this.splitNavigating && this.otherId && this.session.currentId === this.otherId) {
-      this.clearSplit();
+    if (this.split.state.splitOpen && !this.split.state.splitNavigating && this.split.state.otherId && this.session.currentId === this.split.state.otherId) {
+      this.split.clearSplit();
     }
   }
 
@@ -3302,11 +2843,11 @@ struct Index {
       queued: this.session.queued,
       reachable: this.session.reachable,
       refreshSessions: (): Promise<void> => this.session.reachable ? this.loadSessions(false, true) : Promise.resolve(),
-      splitSessionId: this.otherId,
-      choosingSplitSession: this.splitOpen && !this.otherId,
-      openSession: (row: SessionRow): void => this.openSidebarSession(row, false),
-      openInSplit: (row: SessionRow): void => this.openSidebarSession(row, true),
-      openInSystemSplit: (row: SessionRow): void => { void this.openInSystemSplit(row); },
+      splitSessionId: this.split.state.otherId,
+      choosingSplitSession: this.split.state.splitOpen && !this.split.state.otherId,
+      openSession: (row: SessionRow): void => this.split.openSidebarSession(row, false),
+      openInSplit: (row: SessionRow): void => this.split.openSidebarSession(row, true),
+      openInSystemSplit: (row: SessionRow): void => { void this.split.openInSystemSplit(row); },
       revealLibraryAnchor: (): void => this.revealLibraryAnchor(),
       runningSessionIds: this.runningSessionIds,
       runningSessions: this.runningSessions,
@@ -3597,38 +3138,6 @@ struct Index {
       !this.sakuraConversationFocus() && !this.drawerOpen() && this.keyboardHeight <= 0;
   }
 
-  private triggerSakuraBloom(x: number, y: number): void {
-    this.sakuraBloomX = x;
-    this.sakuraBloomY = y;
-    this.sakuraBloomSeq += 1;
-  }
-
-  private tapSakuraGirl(): void {
-    this.sakuraGirlTapSeq += 1;
-  }
-
-  private observeThemeTap(event: TouchEvent): void {
-    if (!this.themeMotionEnabled || this.voiceComposer.state.recording || this.voiceComposer.holding() || this.sessionPaneDragging || this.drawerOpen()) return;
-    const touch = event.changedTouches.length ? event.changedTouches[0] : (event.touches.length ? event.touches[0] : undefined);
-    if (!touch) return;
-    if (event.type === TouchType.Down) {
-      this.themeTapDownX = touch.x;
-      this.themeTapDownY = touch.y;
-      this.themeTapDownAt = Date.now();
-      this.themeTapMoved = false;
-    } else if (event.type === TouchType.Move) {
-      if (Math.abs(touch.x - this.themeTapDownX) > 12 || Math.abs(touch.y - this.themeTapDownY) > 12) {
-        this.themeTapMoved = true;
-      }
-    } else if (event.type === TouchType.Up) {
-      if (!this.themeTapMoved && Date.now() - this.themeTapDownAt < 320) {
-        this.triggerSakuraBloom(touch.x, touch.y);
-      }
-    } else if (event.type === TouchType.Cancel) {
-      this.themeTapMoved = true;
-    }
-  }
-
   build() {
     Stack({ alignContent: Alignment.TopStart }) {
       Row() {
@@ -3643,25 +3152,25 @@ struct Index {
             visible: this.visible,
             motionEnabled: this.themeMotionEnabled,
             windowHeight: this.windowHeight,
-            girlTapSeq: this.sakuraGirlTapSeq,
-            celebrateSeq: this.sakuraCelebrateSeq,
-            burstSeq: this.sakuraBurstSeq,
-            burstKind: this.sakuraBurstKind,
-            bloomSeq: this.sakuraBloomSeq,
-            bloomX: this.sakuraBloomX,
-            bloomY: this.sakuraBloomY
+            girlTapSeq: this.toolCmd.state.sakuraGirlTapSeq,
+            celebrateSeq: this.toolCmd.state.sakuraCelebrateSeq,
+            burstSeq: this.toolCmd.state.sakuraBurstSeq,
+            burstKind: this.toolCmd.state.sakuraBurstKind,
+            bloomSeq: this.toolCmd.state.sakuraBloomSeq,
+            bloomX: this.toolCmd.state.sakuraBloomX,
+            bloomY: this.toolCmd.state.sakuraBloomY
           })
           this.mainNavigation()
           if (this.sakuraGirlInteractive()) {
             Row() {
               SakuraGirlHitZone({
                 bottomInset: this.session.noSession ? this.bottomContentClearance() : this.chatBottomClearance(),
-                tap: (): void => this.tapSakuraGirl()
+                tap: (): void => this.toolCmd.tapSakuraGirl()
               })
             }.width('100%').justifyContent(FlexAlign.End).hitTestBehavior(HitTestMode.Transparent)
           }
         }.height('100%').layoutWeight(1)
-          .onTouch((event: TouchEvent) => { this.observeThemeTap(event); })
+          .onTouch((event: TouchEvent) => { this.toolCmd.observeThemeTap(event); })
           .onGestureJudgeBegin(() => this.dockedSessions() || this.showSessions || this.voiceComposer.holding() || this.voiceComposer.state.recording ||
             this.voiceComposer.state.voicePreparing || this.voiceComposer.state.voiceFinishing || !this.isPaired ||
             this.session.showSettings || (this.activeTab === 'mine' && !!this.minePage)
@@ -3862,12 +3371,12 @@ struct Index {
     }.width('100%').height('100%').padding({ left: this.leftInset, right: this.rightInset })
       .backgroundColor(this.themeCanvas())
       .clip(true)
-      .bindSheet(this.showToolDetails, this.toolDetailsSheet(), {
+      .bindSheet(this.toolCmd.state.showToolDetails, this.toolDetailsSheet(), {
         detents: ['65%', SheetSize.LARGE], dragBar: true, showClose: true,
         backgroundColor: hasImmersiveMaterial() ? undefined : $r('app.color.pigo_panel'),
         systemMaterial: immersiveSheetMaterial(),
         maskColor: '#52000000',
-        onDisappear: () => { this.closeToolDetails(); }
+        onDisappear: () => { this.toolCmd.closeToolDetails(); }
       })
   }
 }

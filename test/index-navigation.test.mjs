@@ -91,7 +91,20 @@ function fixture() {
   Object.assign(state, {
     sidebarRows: new SidebarRows(), chatState: new ChatState(), connection: new ConnectionManager(),
     sessionStore: new SessionStore(), client: new PiGoClient(),
-    voiceComposer: { state: {}, resetVoice() {}, stopReplySpeech() {} }, resetCommands: () => {}, syncCommandPalette: () => {},
+    voiceComposer: { state: {}, resetVoice() {}, stopReplySpeech() {} },
+    split: {
+      state: { splitOpen: false, splitNavigating: false, focusedPaneFirst: true, otherId: '', otherTitle: '', otherSession: new SessionViewState() },
+      openingNativeWindow: false, launchedNativeWindow: false, pendingFocusedPosition: '', pendingOtherPosition: '',
+      clearSplit() {}, restoreSplitPosition: () => false, mainPaneWidth: (s) => Math.max(0, (state.appState?.windowWidth ?? 0) - s)
+    },
+    toolCmd: {
+      state: { showToolDetails: false, selectedTool: undefined, selectedToolDetails: undefined, toolDetailError: '',
+        commandRows: [], commandPalette: false, commandsLoading: false, commandError: '', showComposerMenu: false, showSkillPicker: false, showModelMenu: false,
+        sakuraBurstSeq: 0, sakuraBurstKind: 'send', sakuraBloomSeq: 0, sakuraBloomX: 0, sakuraBloomY: 0, sakuraGirlTapSeq: 0, sakuraCelebrateSeq: 0 },
+      selectedToolMessageId: '',
+      resetCommands() {}, syncCommandPalette() {}, closeToolDetails() {}, refreshSelectedTool() {}
+    },
+    resetCommands: () => {}, syncCommandPalette: () => {},
     tryPublicConnection: async () => {},
     scheduleEndpoint: (item) => item, scheduleComputerName: () => 'Desktop',
     accountSync: { state: {} },
