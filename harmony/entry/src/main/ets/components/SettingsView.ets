@@ -1,10 +1,10 @@
+import { PiGoPageStore } from '../model/PiGoPageStore';
 import { glassCardSurface, themedCardSurface } from '../Immersive';
 import { SakuraPetals } from './SakuraPetals';
 import { DeepSeaScene } from './DeepSeaScene';
 import { InkScene } from './InkScene';
 import { SaharaScene } from './SaharaScene';
 import { SunsetScene } from './SunsetScene';
-import { unboundAction } from './ComponentAction';
 import { Companion } from '../CredentialVault';
 import { APPEARANCE_MODES, AppearanceMode, THEME_STYLES, ThemePalette, ThemeStyle, appearanceMode, themePalette, themeStyle } from '../Appearance';
 import { HuaweiProfile } from '../HuaweiProfile';
@@ -25,118 +25,50 @@ function chatAction() {
 
 @ComponentV2
 export struct SettingsView {
-  @Param @Require accountBusy: boolean;
+  @Param @Require store: PiGoPageStore;
   @Param active: boolean = true;
-  @Param @Require accountNotice: string;
-  @Event addComputerConnection: (id?: string) => void = unboundAction;
-  @Param @Require addingComputer: boolean;
-  @Param @Require address: string;
-  @Event $address: (value: string) => void = unboundAction;
-  @Param @Require appearanceNotice: string;
-  @Event assignComputerConnection: (address: string, group?: ComputerGroup) => void = unboundAction;
-  @Param @Require avatarUnavailable: boolean;
-  @Event $avatarUnavailable: (value: boolean) => void = unboundAction;
-  @Param @Require base: string;
-  @Param @Require bottomContentClearance: number;
-  @Param @Require busy: boolean;
-  @Event chooseComputer: (record: Companion) => void = unboundAction;
-  @Event closeComputerEditors: () => void = unboundAction;
-  @Param @Require cloudComputers: CloudComputer[];
-  @Param @Require cloudSyncBusy: boolean;
-  @Param @Require cloudSyncStatus: string;
-  @Event computerConnectionMenu: (record: Companion) => MenuElement[] = unboundAction;
-  @Param @Require computerNameDraft: string;
-  @Event $computerNameDraft: (value: string) => void = unboundAction;
-  @Param @Require computers: Companion[];
-  @Param @Require darkMode: boolean;
-  @Event dismissKeyboard: () => void = unboundAction;
-  @Event findLanCompanions: () => Promise<void> = unboundAction;
-  @Param @Require huaweiProfile?: HuaweiProfile;
-  @Param @Require isPaired: boolean;
-  @Param @Require lanCandidates: string[];
-  @Param @Require liveViewStatus: string;
-  @Param @Require liveViewsEnabled: boolean;
-  @Param @Require minePage: string;
-  @Event $minePage: (value: string) => void = unboundAction;
-  @Param @Require modeId: string;
-  @Param @Require moveConnectionAddress: string;
-  @Param @Require openingSession: boolean;
-  @Event pair: () => Promise<void> = unboundAction;
-  @Param @Require pairingBundle: string;
-  @Event $pairingBundle: (value: string) => void = unboundAction;
-  @Param @Require pairingComputerId: string;
-  @Param @Require pairingMode: string;
-  @Param @Require reachable: boolean;
-  @Event removeCloudComputer: (computer: CloudComputer) => void = unboundAction;
-  @Event removeComputer: (address: string) => void = unboundAction;
-  @Param @Require removeTarget: string;
-  @Event $removeTarget: (value: string) => void = unboundAction;
-  @Param @Require renameComputerId: string;
-  @Event $renameComputerId: (value: string) => void = unboundAction;
-  @Event restoreCloudComputer: (computer: CloudComputer) => void = unboundAction;
-  @Param @Require restoringComputer?: CloudComputer;
-  @Param @Require runNoticesEnabled: boolean;
-  @Event saveComputerName: (id: string) => void = unboundAction;
-  @Event scanPairingBundle: () => Promise<void> = unboundAction;
-  @Event scheduleCloudSync: (delay?: number) => void = unboundAction;
-  @Event selectAppearanceMode: (mode: AppearanceMode) => void = unboundAction;
-  @Event selectPairingMode: (mode: string) => void = unboundAction;
-  @Event selectTheme: (id: string) => void = unboundAction;
-  @Event setThemeMotionEnabled: (enabled: boolean) => Promise<void> = unboundAction;
-  @Param themeMotionEnabled: boolean = true;
-  @Event setLiveViewsEnabled: (enabled: boolean) => Promise<void> = unboundAction;
-  @Event setRunNoticesEnabled: (enabled: boolean) => Promise<void> = unboundAction;
-  @Event signInHuawei: () => Promise<void> = unboundAction;
-  @Event signOutHuawei: () => Promise<void> = unboundAction;
-  @Param @Require themeId: string;
-  @Param @Require ticket: string;
-  @Event $ticket: (value: string) => void = unboundAction;
-  @Param @Require topContentClearance: number;
-  @Param @Require accent: string;
-  @Param @Require accentForeground: string;
-  @Param @Require accentTint: string;
 
   build() {
     Stack({ alignContent: Alignment.TopStart }) {
-      if (this.minePage === 'computers') {
+      if (this.store.minePage === 'computers') {
         Scroll() {
           Column({ space: 12 }) {
-            if (!this.addingComputer) {
+            if (!this.store.addingComputer) {
               this.computerList()
               this.cloudComputerList()
             }
-            if (this.addingComputer || !this.computers.length) {
+            if (this.store.addingComputer || !this.store.computers.length) {
               this.pairingForm()
             } else {
               Button('添加电脑').chatAction().id('add-computer').width('100%').height(46)
-                .backgroundColor(this.accent).fontColor(this.accentForeground)
-                .enabled(!this.busy && !this.openingSession && !this.removeTarget)
-                .onClick(() => { this.addComputerConnection(); })
+                .backgroundColor(this.store.accent()).fontColor(this.store.accentForeground())
+                .enabled(!this.store.session.busy && !this.store.session.openingSession && !this.store.removeTarget)
+                .onClick(() => { this.store.addComputerConnection(); })
             }
           }.width('100%').alignItems(HorizontalAlign.Start)
-            .padding({ left: 16, right: 16, top: this.topContentClearance, bottom: this.bottomContentClearance })
+            .padding({ left: 16, right: 16, top: this.store.topContentClearance(), bottom: this.store.bottomContentClearance() })
         }.width('100%').height('100%').align(Alignment.TopStart).scrollBar(BarState.Off)
           .edgeEffect(EdgeEffect.Spring).transition(subPageTransition())
-      } else if (this.minePage === 'theme') {
+      } else if (this.store.minePage === 'theme') {
         Scroll() {
           Column({ space: 12 }) {
             this.themeSettings()
           }.width('100%').alignItems(HorizontalAlign.Start)
-            .padding({ left: 16, right: 16, top: this.topContentClearance, bottom: this.bottomContentClearance })
+            .padding({ left: 16, right: 16, top: this.store.topContentClearance(), bottom: this.store.bottomContentClearance() })
         }.width('100%').height('100%').align(Alignment.TopStart).scrollBar(BarState.Off)
           .edgeEffect(EdgeEffect.Spring).transition(subPageTransition())
       } else {
         Scroll() {
           Column({ space: 12 }) {
             this.profileCard()
-            this.mineEntry('computers', '电脑管理', this.isPaired ?
-              `${this.computerTitle()} · ${this.reachable ? '已连接' : '离线'}` :
-              (this.computers.length ? `${computerGroups(this.computers).length} 台电脑` : '配对并连接电脑'))
-            this.mineEntry('theme', '系统主题', `${themeStyle(this.themeId).label} · ${appearanceMode(this.modeId).label}`)
+            this.mineEntry('computers', '电脑管理', this.store.isPaired ?
+              `${this.computerTitle()} · ${this.store.session.reachable ? '已连接' : '离线'}` :
+              (this.store.computers.length ? `${computerGroups(this.store.computers).length} 台电脑` : '配对并连接电脑'))
+            this.mineEntry('theme', '系统主题', `${themeStyle(this.store.themeId).label} · ${appearanceMode(this.store.modeId).label}`)
             this.runNoticeSettings()
             this.liveViewSettings()
           }.width('100%').alignItems(HorizontalAlign.Start)
-            .padding({ left: 16, right: 16, top: this.topContentClearance, bottom: this.bottomContentClearance })
+            .padding({ left: 16, right: 16, top: this.store.topContentClearance(), bottom: this.store.bottomContentClearance() })
         }.width('100%').height('100%').align(Alignment.TopStart).scrollBar(BarState.Off)
           .edgeEffect(EdgeEffect.Spring).transition(parentPageTransition())
       }
@@ -150,71 +82,71 @@ export struct SettingsView {
           Row({ space: 10 }) {
             Column({ space: 3 }) {
               Row({ space: 6 }) {
-                if (this.isPaired && this.base === record.address) {
+                if (this.store.isPaired && this.store.base === record.address) {
                   Blank().width(7).height(7).borderRadius(4)
-                    .backgroundColor(this.reachable ? $r('app.color.pigo_success') : $r('app.color.pigo_warning'))
+                    .backgroundColor(this.store.session.reachable ? $r('app.color.pigo_success') : $r('app.color.pigo_warning'))
                 }
                 Text(connectionLabel(record))
                   .fontSize(14).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
-                if (this.isPaired && this.base === record.address) {
-                  Text(this.reachable ? '当前 · 已连接' : '当前 · 离线')
+                if (this.store.isPaired && this.store.base === record.address) {
+                  Text(this.store.session.reachable ? '当前 · 已连接' : '当前 · 离线')
                     .fontSize(11).fontWeight(FontWeight.Medium)
-                    .fontColor(this.reachable ? $r('app.color.pigo_success') : $r('app.color.pigo_warning'))
+                    .fontColor(this.store.session.reachable ? $r('app.color.pigo_success') : $r('app.color.pigo_warning'))
                 }
               }
               Text(record.address.split('://')[1]).fontSize(12).fontColor($r('app.color.pigo_muted'))
                 .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
             }.layoutWeight(1).alignItems(HorizontalAlign.Start)
-            if (this.isPaired && this.base === record.address) {
-              SymbolGlyph($r('sys.symbol.checkmark')).fontSize(16).fontColor([this.accent])
+            if (this.store.isPaired && this.store.base === record.address) {
+              SymbolGlyph($r('sys.symbol.checkmark')).fontSize(16).fontColor([this.store.accent()])
             }
           }.width('100%')
         }.id(`computer-${record.address}`).accessibilityText(`${connectionLabel(record)} ${record.address.split('://')[1]}`)
           .layoutWeight(1).padding({ left: 12, right: 12, top: 10, bottom: 10 })
-          .backgroundColor(this.isPaired && this.base === record.address ? this.accentTint : $r('app.color.pigo_control'))
-          .border({ width: this.isPaired && this.base === record.address ? 1 : 0, radius: 12, color: this.accent })
-          .enabled(!this.busy && !this.openingSession && !this.removeTarget)
+          .backgroundColor(this.store.isPaired && this.store.base === record.address ? this.store.accentTint() : $r('app.color.pigo_control'))
+          .border({ width: this.store.isPaired && this.store.base === record.address ? 1 : 0, radius: 12, color: this.store.accent() })
+          .enabled(!this.store.session.busy && !this.store.session.openingSession && !this.store.removeTarget)
           .onClick(() => {
-            if (!this.isPaired || this.base !== record.address) this.chooseComputer(record);
+            if (!this.store.isPaired || this.store.base !== record.address) this.store.chooseComputer(record);
           })
-        if (this.removeTarget === record.address) {
-          Button('确认移除').chatAction().id('confirm-remove').height(40).enabled(!this.busy)
+        if (this.store.removeTarget === record.address) {
+          Button('确认移除').chatAction().id('confirm-remove').height(40).enabled(!this.store.session.busy)
             .backgroundColor($r('app.color.pigo_error_panel')).fontColor($r('app.color.pigo_error'))
-            .onClick(() => { this.removeComputer(record.address); })
-          Button('取消').chatAction().height(40).enabled(!this.busy).onClick(() => { this.$removeTarget(''); })
+            .onClick(() => { this.store.removeComputer(record.address); })
+          Button('取消').chatAction().height(40).enabled(!this.store.session.busy).onClick(() => { this.store.removeTarget = ''; })
         } else {
           Button({ type: ButtonType.Normal }) {
             Image($r('app.media.ic_more')).width(18).height(18).fillColor($r('app.color.pigo_muted'))
           }.id(`remove-${record.address}`).width(40).height(44).padding(0).borderRadius(12)
             .backgroundColor(Color.Transparent)
             .accessibilityText('连接操作')
-            .enabled(!this.busy && !this.openingSession && !this.removeTarget)
-            .bindMenu(this.computerConnectionMenu(record))
+            .enabled(!this.store.session.busy && !this.store.session.openingSession && !this.store.removeTarget)
+            .bindMenu(this.store.computerConnectionMenu(record))
         }
       }.width('100%')
-      if (this.moveConnectionAddress === record.address) {
+      if (this.store.moveConnectionAddress === record.address) {
         Column({ space: 6 }) {
           Text('将此连接归到哪台电脑？').fontSize(13).fontColor($r('app.color.pigo_muted')).width('100%')
-          ForEach(computerGroups(this.computers).filter((other: ComputerGroup): boolean => other.id !== group.id),
+          ForEach(computerGroups(this.store.computers).filter((other: ComputerGroup): boolean => other.id !== group.id),
             (other: ComputerGroup) => {
               Button(computerGroupTitle(other)).chatAction().id(`move-to-${other.id}`).width('100%').height(40)
-                .onClick(() => { this.assignComputerConnection(record.address, other); })
+                .onClick(() => { this.store.assignComputerConnection(record.address, other); })
             }, (other: ComputerGroup) => `${other.id}|${other.name}`)
           if (group.connections.length > 1) {
             Button('设为独立电脑').chatAction().id('separate-connection').width('100%').height(40)
-              .onClick(() => { this.assignComputerConnection(record.address); })
+              .onClick(() => { this.store.assignComputerConnection(record.address); })
           }
-          Button('取消').chatAction().width('100%').height(38).onClick(() => { this.closeComputerEditors(); })
+          Button('取消').chatAction().width('100%').height(38).onClick(() => { this.store.closeComputerEditors(); })
         }.width('100%').padding(10).borderRadius(12).backgroundColor($r('app.color.launch_background'))
       }
     }.width('100%').alignItems(HorizontalAlign.Start)
   }
   @Builder
   computerList() {
-    ForEach(computerGroups(this.computers), (group: ComputerGroup) => {
+    ForEach(computerGroups(this.store.computers), (group: ComputerGroup) => {
       Column({ space: 10 }) {
         Row({ space: 8 }) {
-          SymbolGlyph($r('sys.symbol.computer')).fontSize(20).fontColor([this.accent])
+          SymbolGlyph($r('sys.symbol.computer')).fontSize(20).fontColor([this.store.accent()])
           Text(computerGroupTitle(group)).fontSize(16).fontWeight(FontWeight.Bold).fontColor($r('app.color.pigo_text'))
             .layoutWeight(1).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
           Button({ type: ButtonType.Normal }) {
@@ -222,39 +154,39 @@ export struct SettingsView {
           }.id(`add-connection-${group.id}`).width(36).height(36).padding(0).borderRadius(10)
             .backgroundColor($r('app.color.pigo_control'))
             .accessibilityText(`为${computerGroupTitle(group)}添加连接`)
-            .enabled(!this.busy && !this.openingSession && !this.removeTarget)
-            .onClick(() => { this.addComputerConnection(group.id); })
+            .enabled(!this.store.session.busy && !this.store.session.openingSession && !this.store.removeTarget)
+            .onClick(() => { this.store.addComputerConnection(group.id); })
           Button({ type: ButtonType.Normal }) {
             SymbolGlyph($r('sys.symbol.pencil_line')).fontSize(17).fontColor([$r('app.color.pigo_muted')])
           }.id(`rename-computer-${group.id}`).width(36).height(36).padding(0).borderRadius(10)
             .backgroundColor(Color.Transparent)
             .accessibilityText(`修改${computerGroupTitle(group)}备注`)
-            .enabled(!this.busy && !this.removeTarget)
+            .enabled(!this.store.session.busy && !this.store.removeTarget)
             .onClick(() => {
-              this.closeComputerEditors();
-              this.$computerNameDraft(group.name);
-              this.$renameComputerId(group.id);
+              this.store.closeComputerEditors();
+              this.store.computerNameDraft = group.name;
+              this.store.renameComputerId = group.id;
             })
         }.width('100%')
-        if (this.renameComputerId === group.id) {
-          TextInput({ placeholder: '电脑备注名', text: this.computerNameDraft }).id('computer-name-input')
+        if (this.store.renameComputerId === group.id) {
+          TextInput({ placeholder: '电脑备注名', text: this.store.computerNameDraft }).id('computer-name-input')
             .backgroundColor($r('app.color.pigo_control')).fontColor($r('app.color.pigo_text'))
             .placeholderColor($r('app.color.pigo_muted'))
-            .maxLength(40).onChange((value: string) => { this.$computerNameDraft(value); }).width('100%')
+            .maxLength(40).onChange((value: string) => { this.store.computerNameDraft = value; }).width('100%')
           Row({ space: 8 }) {
             Button('保存').chatAction().id('save-computer-name').height(38)
-              .backgroundColor(this.accent).fontColor(this.accentForeground)
-              .onClick(() => { this.saveComputerName(group.id); })
-            Button('取消').chatAction().height(38).onClick(() => { this.closeComputerEditors(); this.dismissKeyboard(); })
+              .backgroundColor(this.store.accent()).fontColor(this.store.accentForeground())
+              .onClick(() => { this.store.saveComputerName(group.id); })
+            Button('取消').chatAction().height(38).onClick(() => { this.store.closeComputerEditors(); this.store.dismissKeyboard(); })
           }.width('100%')
         }
         ForEach(group.connections, (record: Companion) => {
           this.computerConnection(record, group)
         }, (record: Companion) => record.address)
-      }.width('100%').padding(14).attributeModifier(themedCardSurface(this.darkMode, this.themeId))
+      }.width('100%').padding(14).attributeModifier(themedCardSurface(this.store.darkMode, this.store.themeId))
     }, (group: ComputerGroup) => `${group.id}|${group.name}|${group.connections.map((record: Companion): string => record.address).join('|')}`)
-    if (this.removeTarget) {
-      Text(this.huaweiProfile ? '移除手机上的配对和账号列表中的连接记录。' : '移除手机上的这条配对记录。')
+    if (this.store.removeTarget) {
+      Text(this.store.accountSync.state.huaweiProfile ? '移除手机上的配对和账号列表中的连接记录。' : '移除手机上的这条配对记录。')
         .fontSize(12).fontColor($r('app.color.pigo_muted')).width('100%')
     }
   }
@@ -267,141 +199,141 @@ export struct SettingsView {
           Text(`${computer.mode === 'usb' ? 'USB' : computer.mode === 'lan' ? '局域网' : '公网'} · ${computer.address.split('://')[1]}`)
             .fontSize(15).fontColor($r('app.color.pigo_text')).width('100%')
           Row({ space: 8 }) {
-            if (this.removeTarget === computer.address) {
-              Button('从账号移除').chatAction().enabled(!this.busy)
+            if (this.store.removeTarget === computer.address) {
+              Button('从账号移除').chatAction().enabled(!this.store.session.busy)
                 .backgroundColor($r('app.color.pigo_error_panel')).fontColor($r('app.color.pigo_error'))
-                .onClick(() => { this.removeCloudComputer(computer); })
-              Button('取消').chatAction().onClick(() => { this.$removeTarget(''); })
+                .onClick(() => { this.store.removeCloudComputer(computer); })
+              Button('取消').chatAction().onClick(() => { this.store.removeTarget = ''; })
             } else {
-              Button('在本机配对').chatAction().backgroundColor(this.accent).fontColor(this.accentForeground)
-                .enabled(!this.busy && !this.openingSession && !this.removeTarget)
-                .onClick(() => { this.restoreCloudComputer(computer); })
-              Button('移除').chatAction().enabled(!this.busy && !this.removeTarget)
-                .onClick(() => { this.$removeTarget(computer.address); })
+              Button('在本机配对').chatAction().backgroundColor(this.store.accent()).fontColor(this.store.accentForeground())
+                .enabled(!this.store.session.busy && !this.store.session.openingSession && !this.store.removeTarget)
+                .onClick(() => { this.store.restoreCloudComputer(computer); })
+              Button('移除').chatAction().enabled(!this.store.session.busy && !this.store.removeTarget)
+                .onClick(() => { this.store.removeTarget = computer.address; })
             }
           }.width('100%')
-        }.width('100%').padding(14).attributeModifier(themedCardSurface(this.darkMode, this.themeId))
+        }.width('100%').padding(14).attributeModifier(themedCardSurface(this.store.darkMode, this.store.themeId))
       }, (computer: CloudComputer) => computer.address)
     }
   }
   @Builder
   pairingForm() {
     Column({ space: 14 }) {
-      if (this.pairingComputerId) {
+      if (this.store.pairingComputerId) {
         Text(this.pairingComputerTitle()).fontSize(16).fontWeight(FontWeight.Medium)
           .fontColor($r('app.color.pigo_text')).width('100%')
       }
-      if (this.restoringComputer) {
+      if (this.store.restoringComputer) {
         Text('请从这台电脑获取新的配对码或配对包。')
           .fontSize(14).fontColor($r('app.color.pigo_text')).width('100%')
       }
       Row({ space: 4 }) {
         Button('USB', { type: ButtonType.Normal }).chatAction().id('usb-transport').layoutWeight(1).height(38).borderRadius(10)
-          .accessibilitySelected(this.pairingMode === 'usb')
-          .backgroundColor(this.pairingMode === 'usb' ? this.accent : Color.Transparent)
-          .fontColor(this.pairingMode === 'usb' ? this.accentForeground : $r('app.color.pigo_muted'))
-          .onClick(() => { this.selectPairingMode('usb'); })
+          .accessibilitySelected(this.store.pairingMode === 'usb')
+          .backgroundColor(this.store.pairingMode === 'usb' ? this.store.accent() : Color.Transparent)
+          .fontColor(this.store.pairingMode === 'usb' ? this.store.accentForeground() : $r('app.color.pigo_muted'))
+          .onClick(() => { this.store.selectPairingMode('usb'); })
         Button('局域网', { type: ButtonType.Normal }).chatAction().id('transport').layoutWeight(1).height(38).borderRadius(10)
-          .accessibilitySelected(this.pairingMode === 'lan')
-          .backgroundColor(this.pairingMode === 'lan' ? this.accent : Color.Transparent)
-          .fontColor(this.pairingMode === 'lan' ? this.accentForeground : $r('app.color.pigo_muted'))
-          .onClick(() => { this.selectPairingMode('lan'); })
+          .accessibilitySelected(this.store.pairingMode === 'lan')
+          .backgroundColor(this.store.pairingMode === 'lan' ? this.store.accent() : Color.Transparent)
+          .fontColor(this.store.pairingMode === 'lan' ? this.store.accentForeground() : $r('app.color.pigo_muted'))
+          .onClick(() => { this.store.selectPairingMode('lan'); })
         Button('公网', { type: ButtonType.Normal }).chatAction().id('remote-transport').layoutWeight(1).height(38).borderRadius(10)
-          .accessibilitySelected(this.pairingMode === 'remote')
-          .backgroundColor(this.pairingMode === 'remote' ? this.accent : Color.Transparent)
-          .fontColor(this.pairingMode === 'remote' ? this.accentForeground : $r('app.color.pigo_muted'))
-          .onClick(() => { this.selectPairingMode('remote'); })
+          .accessibilitySelected(this.store.pairingMode === 'remote')
+          .backgroundColor(this.store.pairingMode === 'remote' ? this.store.accent() : Color.Transparent)
+          .fontColor(this.store.pairingMode === 'remote' ? this.store.accentForeground() : $r('app.color.pigo_muted'))
+          .onClick(() => { this.store.selectPairingMode('remote'); })
       }.width('100%').padding(4).borderRadius(14).backgroundColor($r('app.color.pigo_control'))
-        .enabled(!this.busy && !this.removeTarget)
-      if (this.pairingMode !== 'usb') {
-        Text(this.pairingMode === 'remote' ? '扫描或粘贴 Pi Go.app「公网」生成的配对包。' :
+        .enabled(!this.store.session.busy && !this.store.removeTarget)
+      if (this.store.pairingMode !== 'usb') {
+        Text(this.store.pairingMode === 'remote' ? '扫描或粘贴 Pi Go.app「公网」生成的配对包。' :
           '扫描或粘贴 Pi Go.app「局域网扫码」生成的配对包。').fontSize(14).fontColor($r('app.color.pigo_muted')).width('100%')
         Row({ space: 8 }) {
-          if (this.pairingMode === 'lan') {
-            Button('发现电脑').chatAction().id('lan-discover').enabled(!this.busy && !this.removeTarget).onClick(() => { void this.findLanCompanions(); })
+          if (this.store.pairingMode === 'lan') {
+            Button('发现电脑').chatAction().id('lan-discover').enabled(!this.store.session.busy && !this.store.removeTarget).onClick(() => { void this.store.findLanCompanions(); })
           }
-          Button('扫码导入').chatAction().id(this.pairingMode === 'remote' ? 'remote-scan' : 'lan-scan')
-            .enabled(!this.busy && !this.removeTarget).onClick(() => { void this.scanPairingBundle(); })
+          Button('扫码导入').chatAction().id(this.store.pairingMode === 'remote' ? 'remote-scan' : 'lan-scan')
+            .enabled(!this.store.session.busy && !this.store.removeTarget).onClick(() => { void this.store.scanPairingBundle(); })
         }.width('100%')
-        if (this.lanCandidates.length) {
+        if (this.store.lanCandidates.length) {
           Text('附近地址（未验证）').fontSize(12).fontColor($r('app.color.pigo_muted')).width('100%')
           Scroll() {
             Column({ space: 4 }) {
-              ForEach(this.lanCandidates, (candidate: string) => {
+              ForEach(this.store.lanCandidates, (candidate: string) => {
                 Text(candidate).width('100%').fontSize(14).fontColor($r('app.color.pigo_text'))
               }, (candidate: string) => candidate)
             }.width('100%')
           }.constraintSize({ maxHeight: 100 }).width('100%').scrollBar(BarState.Off)
         }
-        TextInput({ placeholder: this.pairingMode === 'remote' ? '公网配对包' : '局域网配对包', text: this.pairingBundle })
-          .id(this.pairingMode === 'remote' ? 'remote-bundle' : 'lan-bundle').type(InputType.Password).maxLength(4096)
+        TextInput({ placeholder: this.store.pairingMode === 'remote' ? '公网配对包' : '局域网配对包', text: this.store.pairingBundle })
+          .id(this.store.pairingMode === 'remote' ? 'remote-bundle' : 'lan-bundle').type(InputType.Password).maxLength(4096)
           .backgroundColor($r('app.color.pigo_control')).fontColor($r('app.color.pigo_text'))
           .placeholderColor($r('app.color.pigo_muted'))
-          .onChange((value: string) => { this.$pairingBundle(value); }).width('100%')
+          .onChange((value: string) => { this.store.pairingBundle = value; }).width('100%')
       } else {
         Text('用 USB 连接电脑并允许调试，再在 Pi Go.app 选择「USB」并点「连接手机」。').fontSize(14).fontColor($r('app.color.pigo_muted')).width('100%')
-        TextInput({ placeholder: 'USB 地址', text: this.address }).id('address')
+        TextInput({ placeholder: 'USB 地址', text: this.store.appState.address }).id('address')
           .backgroundColor($r('app.color.pigo_control')).fontColor($r('app.color.pigo_text'))
           .placeholderColor($r('app.color.pigo_muted'))
-          .onChange((value: string) => { this.$address(value); }).width('100%')
-        TextInput({ placeholder: '8 位配对码或一次性票据', text: this.ticket }).id('ticket').type(InputType.Password)
+          .onChange((value: string) => { this.store.appState.address = value; }).width('100%')
+        TextInput({ placeholder: '8 位配对码或一次性票据', text: this.store.ticket }).id('ticket').type(InputType.Password)
           .backgroundColor($r('app.color.pigo_control')).fontColor($r('app.color.pigo_text'))
           .placeholderColor($r('app.color.pigo_muted'))
-          .onChange((value: string) => { this.$ticket(value); }).width('100%')
+          .onChange((value: string) => { this.store.ticket = value; }).width('100%')
       }
-      Button('配对并连接').chatAction().id('pair').enabled(!this.busy && !this.openingSession && !this.removeTarget)
-        .backgroundColor(this.accent).fontColor(this.accentForeground).width('100%').height(46)
-        .onClick(() => { void this.pair(); })
-    }.padding(16).width('100%').attributeModifier(glassCardSurface(this.darkMode, 16))
+      Button('配对并连接').chatAction().id('pair').enabled(!this.store.session.busy && !this.store.session.openingSession && !this.store.removeTarget)
+        .backgroundColor(this.store.accent()).fontColor(this.store.accentForeground()).width('100%').height(46)
+        .onClick(() => { void this.store.pair(); })
+    }.padding(16).width('100%').attributeModifier(glassCardSurface(this.store.darkMode, 16))
   }
   @Builder
   profileCard() {
     Column({ space: 12 }) {
       Row({ space: 14 }) {
         Stack() {
-          if (this.huaweiProfile?.avatar && !this.avatarUnavailable) {
-            Image(this.huaweiProfile.avatar).width(50).height(50).objectFit(ImageFit.Cover)
-              .onError(() => { this.$avatarUnavailable(true); })
+          if (this.store.accountSync.state.huaweiProfile?.avatar && !this.store.avatarUnavailable) {
+            Image(this.store.accountSync.state.huaweiProfile.avatar).width(50).height(50).objectFit(ImageFit.Cover)
+              .onError(() => { this.store.avatarUnavailable = true; })
           } else {
-            SymbolGlyph($r('sys.symbol.person')).fontSize(24).fontColor([this.accent])
+            SymbolGlyph($r('sys.symbol.person')).fontSize(24).fontColor([this.store.accent()])
           }
-        }.width(50).height(50).backgroundColor(this.accentTint).borderRadius(25).clip(true)
+        }.width(50).height(50).backgroundColor(this.store.accentTint()).borderRadius(25).clip(true)
         Column({ space: 4 }) {
-          Text(this.huaweiProfile?.name || '个人资料').fontSize(19).fontWeight(FontWeight.Bold)
+          Text(this.store.accountSync.state.huaweiProfile?.name || '个人资料').fontSize(19).fontWeight(FontWeight.Bold)
             .fontColor($r('app.color.pigo_text')).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
-          Text(this.huaweiProfile ? '华为账号已登录' : '华为账号未登录').fontSize(13).fontColor($r('app.color.pigo_muted'))
+          Text(this.store.accountSync.state.huaweiProfile ? '华为账号已登录' : '华为账号未登录').fontSize(13).fontColor($r('app.color.pigo_muted'))
         }.layoutWeight(1).alignItems(HorizontalAlign.Start)
-        if (this.huaweiProfile) {
-          Button(this.accountBusy ? '请稍候…' : '退出', { type: ButtonType.Normal })
+        if (this.store.accountSync.state.huaweiProfile) {
+          Button(this.store.accountSync.state.accountBusy ? '请稍候…' : '退出', { type: ButtonType.Normal })
             .id('huawei-signout').height(34).padding({ left: 12, right: 12 }).borderRadius(10)
             .fontSize(13).fontWeight(FontWeight.Medium)
             .backgroundColor(Color.Transparent).fontColor($r('app.color.pigo_muted'))
-            .enabled(!this.accountBusy)
-            .onClick(() => { void this.signOutHuawei(); })
+            .enabled(!this.store.accountSync.state.accountBusy)
+            .onClick(() => { void this.store.accountSync.signOutHuawei(); })
         }
       }.width('100%')
-      if (!this.huaweiProfile) {
-        Button(this.accountBusy ? '请稍候…' : '使用华为账号登录')
-          .chatAction().id('huawei-account').width('100%').height(44).enabled(!this.accountBusy)
-          .backgroundColor(this.accent).fontColor(this.accentForeground)
-          .onClick(() => { void this.signInHuawei(); })
+      if (!this.store.accountSync.state.huaweiProfile) {
+        Button(this.store.accountSync.state.accountBusy ? '请稍候…' : '使用华为账号登录')
+          .chatAction().id('huawei-account').width('100%').height(44).enabled(!this.store.accountSync.state.accountBusy)
+          .backgroundColor(this.store.accent()).fontColor(this.store.accentForeground())
+          .onClick(() => { void this.store.accountSync.signInHuawei(); })
       }
-      if (this.accountNotice) {
-        Text(this.accountNotice).fontSize(13).fontColor($r('app.color.pigo_warning')).width('100%')
+      if (this.store.accountSync.state.accountNotice) {
+        Text(this.store.accountSync.state.accountNotice).fontSize(13).fontColor($r('app.color.pigo_warning')).width('100%')
       }
-      if (this.huaweiProfile) {
+      if (this.store.accountSync.state.huaweiProfile) {
         Divider().color($r('app.color.pigo_line'))
         Row({ space: 10 }) {
-          Text(this.cloudSyncStatus || '通过华为云空间同步电脑列表和主题偏好。')
+          Text(this.store.accountSync.state.cloudSyncStatus || '通过华为云空间同步电脑列表和主题偏好。')
             .fontSize(13).fontColor($r('app.color.pigo_muted')).layoutWeight(1)
             .maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis })
-          Button(this.cloudSyncBusy ? '同步中…' : '立即同步').chatAction().id('sync-account-settings')
+          Button(this.store.accountSync.state.cloudSyncBusy ? '同步中…' : '立即同步').chatAction().id('sync-account-settings')
             .height(34).fontSize(13).padding({ left: 12, right: 12 })
-            .enabled(!this.cloudSyncBusy && !this.accountBusy)
-            .onClick(() => { this.scheduleCloudSync(0); })
+            .enabled(!this.store.accountSync.state.cloudSyncBusy && !this.store.accountSync.state.accountBusy)
+            .onClick(() => { this.store.accountSync.scheduleCloudSync(0); })
         }.width('100%')
       }
-    }.width('100%').padding(16).attributeModifier(themedCardSurface(this.darkMode, this.themeId))
+    }.width('100%').padding(16).attributeModifier(themedCardSurface(this.store.darkMode, this.store.themeId))
   }
   @Builder
   mineEntry(page: string, label: string, summary: string) {
@@ -409,7 +341,7 @@ export struct SettingsView {
       Row({ space: 12 }) {
         Stack() {
           if (page === 'computers') {
-            SymbolGlyph($r('sys.symbol.computer')).fontSize(21).fontColor([this.accent])
+            SymbolGlyph($r('sys.symbol.computer')).fontSize(21).fontColor([this.store.accent()])
           } else {
             Row({ space: 3 }) {
               Blank().width(6).height(6).borderRadius(3).backgroundColor(this.paletteFor(themeStyle('sakura')).accent)
@@ -417,7 +349,7 @@ export struct SettingsView {
               Blank().width(6).height(6).borderRadius(3).backgroundColor(this.paletteFor(themeStyle('graphite')).accent)
             }
           }
-        }.width(40).height(40).backgroundColor(this.accentTint).borderRadius(12)
+        }.width(40).height(40).backgroundColor(this.store.accentTint()).borderRadius(12)
         Column({ space: 4 }) {
           Text(label).fontSize(16).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
           Text(summary).fontSize(13).fontColor($r('app.color.pigo_muted')).maxLines(1)
@@ -426,16 +358,16 @@ export struct SettingsView {
         SymbolGlyph($r('sys.symbol.chevron_right')).fontSize(15).fontColor([$r('app.color.pigo_muted')])
       }.width('100%').padding(14)
     }.id(`mine-${page}`).width('100%').padding(0)
-      .attributeModifier(themedCardSurface(this.darkMode, this.themeId))
-      .onClick(() => { this.$minePage(page); })
+      .attributeModifier(themedCardSurface(this.store.darkMode, this.store.themeId))
+      .onClick(() => { this.store.minePage = page; })
   }
   @Builder
   themePreviewCard() {
     Column({ space: 10 }) {
       Row({ space: 8 }) {
         Text('效果预览').fontSize(14).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_muted')).layoutWeight(1)
-        Text(`${themeStyle(this.themeId).label} · ${themeStyle(this.themeId).styleTag}`)
-          .fontSize(12).fontWeight(FontWeight.Medium).fontColor(this.accent)
+        Text(`${themeStyle(this.store.themeId).label} · ${themeStyle(this.store.themeId).styleTag}`)
+          .fontSize(12).fontWeight(FontWeight.Medium).fontColor(this.store.accent())
       }.width('100%')
       Stack() {
         Column()
@@ -452,96 +384,96 @@ export struct SettingsView {
             radius: '78%',
             colors: [[this.activePalette().auraBottom, 0], ['#00000000', 1]]
           })
-        if (this.themeId === 'graphite') {
-          if (this.themeMotionEnabled) {
-            InkScene({ darkMode: this.darkMode, compact: true, active: this.active && this.minePage === 'theme' })
+        if (this.store.themeId === 'graphite') {
+          if (this.store.themeMotionEnabled) {
+            InkScene({ darkMode: this.store.darkMode, compact: true, active: this.active && this.store.minePage === 'theme' })
           } else {
-            Image($rawfile(this.darkMode ? 'ink_dark.jpg' : 'ink_light.jpg'))
-              .width('100%').height('100%').objectFit(ImageFit.Cover).opacity(this.darkMode ? 0.78 : 0.85)
+            Image($rawfile(this.store.darkMode ? 'ink_dark.jpg' : 'ink_light.jpg'))
+              .width('100%').height('100%').objectFit(ImageFit.Cover).opacity(this.store.darkMode ? 0.78 : 0.85)
           }
-        } else if (this.themeId === 'sunset') {
-          if (this.themeMotionEnabled) {
-            SunsetScene({ darkMode: this.darkMode, compact: true, active: this.active && this.minePage === 'theme' })
+        } else if (this.store.themeId === 'sunset') {
+          if (this.store.themeMotionEnabled) {
+            SunsetScene({ darkMode: this.store.darkMode, compact: true, active: this.active && this.store.minePage === 'theme' })
           } else {
-            Image($rawfile(this.darkMode ? 'sunset_dark.jpg' : 'sunset_light.jpg'))
-              .width('100%').height('100%').objectFit(ImageFit.Cover).opacity(this.darkMode ? 0.78 : 0.85)
+            Image($rawfile(this.store.darkMode ? 'sunset_dark.jpg' : 'sunset_light.jpg'))
+              .width('100%').height('100%').objectFit(ImageFit.Cover).opacity(this.store.darkMode ? 0.78 : 0.85)
           }
-        } else if (this.themeId === 'jellyfish') {
-          if (this.themeMotionEnabled) {
-            DeepSeaScene({ darkMode: this.darkMode, compact: true, active: this.active && this.minePage === 'theme' })
+        } else if (this.store.themeId === 'jellyfish') {
+          if (this.store.themeMotionEnabled) {
+            DeepSeaScene({ darkMode: this.store.darkMode, compact: true, active: this.active && this.store.minePage === 'theme' })
           } else {
-            Image($rawfile(this.darkMode ? 'jellyfish_dark.jpg' : 'jellyfish_light.jpg'))
-              .width('100%').height('100%').objectFit(ImageFit.Cover).opacity(this.darkMode ? 0.78 : 0.85)
+            Image($rawfile(this.store.darkMode ? 'jellyfish_dark.jpg' : 'jellyfish_light.jpg'))
+              .width('100%').height('100%').objectFit(ImageFit.Cover).opacity(this.store.darkMode ? 0.78 : 0.85)
           }
-        } else if (this.themeId === 'sahara') {
-          if (this.themeMotionEnabled) {
-            SaharaScene({ darkMode: this.darkMode, compact: true, active: this.active && this.minePage === 'theme' })
+        } else if (this.store.themeId === 'sahara') {
+          if (this.store.themeMotionEnabled) {
+            SaharaScene({ darkMode: this.store.darkMode, compact: true, active: this.active && this.store.minePage === 'theme' })
           } else {
-            Image($rawfile(this.darkMode ? 'sahara_dark.jpg' : 'sahara_light.jpg'))
-              .width('100%').height('100%').objectFit(ImageFit.Cover).opacity(this.darkMode ? 0.78 : 0.85)
+            Image($rawfile(this.store.darkMode ? 'sahara_dark.jpg' : 'sahara_light.jpg'))
+              .width('100%').height('100%').objectFit(ImageFit.Cover).opacity(this.store.darkMode ? 0.78 : 0.85)
           }
         } else {
-          Image($rawfile(this.darkMode ? 'sakura_dark.jpg' : 'sakura_light.jpg'))
+          Image($rawfile(this.store.darkMode ? 'sakura_dark.jpg' : 'sakura_light.jpg'))
             .width('100%').height('100%')
             .objectFit(ImageFit.Cover)
-            .opacity(this.darkMode ? 0.72 : 0.78)
-          if (this.themeMotionEnabled && this.active && this.minePage === 'theme') SakuraPetals({ darkMode: this.darkMode, compact: true })
+            .opacity(this.store.darkMode ? 0.72 : 0.78)
+          if (this.store.themeMotionEnabled && this.active && this.store.minePage === 'theme') SakuraPetals({ darkMode: this.store.darkMode, compact: true })
         }
         Column({ space: 8 }) {
           Row() {
-            Text(this.themeId === 'sakura' ? '今天也要像樱花一样元气满满 ✿' : '帮我切换到一个更有氛围的主题')
+            Text(this.store.themeId === 'sakura' ? '今天也要像樱花一样元气满满 ✿' : '帮我切换到一个更有氛围的主题')
               .fontSize(13).fontColor($r('app.color.pigo_text'))
               .padding({ left: 12, right: 12, top: 7, bottom: 7 })
-              .backgroundColor(themeStyle(this.themeId).bubble === 'gradient' ? Color.Transparent : this.activePalette().bubbleStart)
-              .linearGradient(themeStyle(this.themeId).bubble === 'gradient' ? {
+              .backgroundColor(themeStyle(this.store.themeId).bubble === 'gradient' ? Color.Transparent : this.activePalette().bubbleStart)
+              .linearGradient(themeStyle(this.store.themeId).bubble === 'gradient' ? {
                 angle: 135,
                 colors: [[this.activePalette().bubbleStart, 0], [this.activePalette().bubbleEnd, 1]]
               } : undefined)
               .borderRadius({
-                topLeft: themeStyle(this.themeId).bubbleRadius,
-                topRight: Math.max(4, Math.round(themeStyle(this.themeId).bubbleRadius * 0.35)),
-                bottomLeft: themeStyle(this.themeId).bubbleRadius,
-                bottomRight: themeStyle(this.themeId).bubbleRadius
+                topLeft: themeStyle(this.store.themeId).bubbleRadius,
+                topRight: Math.max(4, Math.round(themeStyle(this.store.themeId).bubbleRadius * 0.35)),
+                bottomLeft: themeStyle(this.store.themeId).bubbleRadius,
+                bottomRight: themeStyle(this.store.themeId).bubbleRadius
               })
               .border({
-                width: themeStyle(this.themeId).bubble === 'outline' ? 1.2 : (this.themeId === 'sakura' ? 1 : 0.6),
+                width: themeStyle(this.store.themeId).bubble === 'outline' ? 1.2 : (this.store.themeId === 'sakura' ? 1 : 0.6),
                 radius: {
-                  topLeft: themeStyle(this.themeId).bubbleRadius,
-                  topRight: Math.max(4, Math.round(themeStyle(this.themeId).bubbleRadius * 0.35)),
-                  bottomLeft: themeStyle(this.themeId).bubbleRadius,
-                  bottomRight: themeStyle(this.themeId).bubbleRadius
+                  topLeft: themeStyle(this.store.themeId).bubbleRadius,
+                  topRight: Math.max(4, Math.round(themeStyle(this.store.themeId).bubbleRadius * 0.35)),
+                  bottomLeft: themeStyle(this.store.themeId).bubbleRadius,
+                  bottomRight: themeStyle(this.store.themeId).bubbleRadius
                 },
                 color: this.activePalette().bubbleBorder
               })
-              .shadow(this.themeId === 'sakura'
-                ? { radius: 10, offsetY: 2, color: this.darkMode ? '#33FF7EB3' : '#2CE86A98' }
+              .shadow(this.store.themeId === 'sakura'
+                ? { radius: 10, offsetY: 2, color: this.store.darkMode ? '#33FF7EB3' : '#2CE86A98' }
                 : undefined)
           }.width('100%').justifyContent(FlexAlign.End)
           Column() {
             Row() {
-              Text('ts').fontSize(10).fontWeight(FontWeight.Medium).fontColor(this.accent).layoutWeight(1)
-              Text(themeStyle(this.themeId).subtitle).fontSize(10).fontColor($r('app.color.pigo_muted'))
+              Text('ts').fontSize(10).fontWeight(FontWeight.Medium).fontColor(this.store.accent()).layoutWeight(1)
+              Text(themeStyle(this.store.themeId).subtitle).fontSize(10).fontColor($r('app.color.pigo_muted'))
             }.width('100%').padding({ left: 10, right: 10, top: 4, bottom: 4 })
               .backgroundColor(this.activePalette().codeHeaderBg)
               .border({ width: { bottom: 0.5 }, color: this.activePalette().codeBorder })
             Row({ space: 8 }) {
-              Text(`const theme = "${themeStyle(this.themeId).id}";`)
+              Text(`const theme = "${themeStyle(this.store.themeId).id}";`)
                 .fontSize(12).fontFamily('monospace').fontColor($r('app.color.pigo_text')).layoutWeight(1)
                 .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
-              Text('发送').fontSize(11).fontWeight(FontWeight.Medium).fontColor(this.accentForeground)
+              Text('发送').fontSize(11).fontWeight(FontWeight.Medium).fontColor(this.store.accentForeground())
                 .padding({ left: 9, right: 9, top: 3, bottom: 3 })
-                .backgroundColor(this.accent).borderRadius(Math.min(10, themeStyle(this.themeId).codeRadius))
+                .backgroundColor(this.store.accent()).borderRadius(Math.min(10, themeStyle(this.store.themeId).codeRadius))
             }.width('100%').alignItems(VerticalAlign.Center).padding({ left: 10, right: 8, top: 7, bottom: 7 })
           }.width('100%').clip(true)
             .backgroundColor(this.activePalette().codeBg)
-            .borderRadius(themeStyle(this.themeId).codeRadius)
-            .border({ width: 1, radius: themeStyle(this.themeId).codeRadius, color: this.activePalette().codeBorder })
+            .borderRadius(themeStyle(this.store.themeId).codeRadius)
+            .border({ width: 1, radius: themeStyle(this.store.themeId).codeRadius, color: this.activePalette().codeBorder })
         }.width('100%').padding(12)
       }.width('100%').clip(true)
         .backgroundColor(this.activePalette().canvas)
-        .borderRadius(themeStyle(this.themeId).cardRadius)
-        .border({ width: 1, radius: themeStyle(this.themeId).cardRadius, color: this.activePalette().cardBorder })
-    }.width('100%').padding(16).attributeModifier(themedCardSurface(this.darkMode, this.themeId))
+        .borderRadius(themeStyle(this.store.themeId).cardRadius)
+        .border({ width: 1, radius: themeStyle(this.store.themeId).cardRadius, color: this.activePalette().cardBorder })
+    }.width('100%').padding(16).attributeModifier(themedCardSurface(this.store.darkMode, this.store.themeId))
   }
   @Builder
   themeOption(style: ThemeStyle) {
@@ -563,25 +495,25 @@ export struct SettingsView {
               colors: [[this.paletteFor(style).auraBottom, 0], ['#00000000', 1]]
             })
           if (style.id === 'sakura') {
-            Image($rawfile(this.darkMode ? 'sakura_dark.jpg' : 'sakura_light.jpg'))
+            Image($rawfile(this.store.darkMode ? 'sakura_dark.jpg' : 'sakura_light.jpg'))
               .width('100%').height('100%')
               .objectFit(ImageFit.Cover)
-              .opacity(this.darkMode ? 0.78 : 0.85)
+              .opacity(this.store.darkMode ? 0.78 : 0.85)
           } else if (style.id === 'graphite') {
-            Image($rawfile(this.darkMode ? 'ink_dark.jpg' : 'ink_light.jpg'))
+            Image($rawfile(this.store.darkMode ? 'ink_dark.jpg' : 'ink_light.jpg'))
               .width('100%').height('100%')
               .objectFit(ImageFit.Cover)
-              .opacity(this.darkMode ? 0.80 : 0.88)
+              .opacity(this.store.darkMode ? 0.80 : 0.88)
           } else if (style.id === 'sunset') {
-            Image($rawfile(this.darkMode ? 'sunset_dark.jpg' : 'sunset_light.jpg'))
+            Image($rawfile(this.store.darkMode ? 'sunset_dark.jpg' : 'sunset_light.jpg'))
               .width('100%').height('100%')
               .objectFit(ImageFit.Cover)
-              .opacity(this.darkMode ? 0.82 : 0.90)
+              .opacity(this.store.darkMode ? 0.82 : 0.90)
           } else {
-            Image($rawfile(`${style.id}_${this.darkMode ? 'dark' : 'light'}.jpg`))
+            Image($rawfile(`${style.id}_${this.store.darkMode ? 'dark' : 'light'}.jpg`))
               .width('100%').height('100%')
               .objectFit(ImageFit.Cover)
-              .opacity(this.darkMode ? 0.82 : 0.90)
+              .opacity(this.store.darkMode ? 0.82 : 0.90)
           }
           Column({ space: 5 }) {
             Row() {
@@ -609,7 +541,7 @@ export struct SettingsView {
               .borderRadius(Math.min(8, style.codeRadius))
               .border({ width: 0.6, radius: Math.min(8, style.codeRadius), color: this.paletteFor(style).codeBorder })
           }.width('100%').height('100%').padding(8).justifyContent(FlexAlign.SpaceBetween)
-          if (this.themeId === style.id) {
+          if (this.store.themeId === style.id) {
             SymbolGlyph($r('sys.symbol.checkmark_circle_fill')).fontSize(17)
               .fontColor([this.paletteFor(style).accent])
               .margin({ top: 6, right: 6 })
@@ -632,14 +564,14 @@ export struct SettingsView {
         }.width('100%').padding({ left: 10, right: 10, top: 8, bottom: 9 }).alignItems(HorizontalAlign.Start)
       }.width('100%')
     }.id(`theme-${style.id}`).width('100%').padding(0).clip(true).borderRadius(16)
-      .accessibilitySelected(this.themeId === style.id)
-      .backgroundColor(this.themeId === style.id ? this.paletteFor(style).accentTint : this.paletteFor(style).cardBg)
+      .accessibilitySelected(this.store.themeId === style.id)
+      .backgroundColor(this.store.themeId === style.id ? this.paletteFor(style).accentTint : this.paletteFor(style).cardBg)
       .border({
-        width: this.themeId === style.id ? 1.8 : 1,
+        width: this.store.themeId === style.id ? 1.8 : 1,
         radius: 14,
-        color: this.themeId === style.id ? this.paletteFor(style).accent : this.paletteFor(style).cardBorder
+        color: this.store.themeId === style.id ? this.paletteFor(style).accent : this.paletteFor(style).cardBorder
       })
-      .onClick(() => { this.selectTheme(style.id); })
+      .onClick(() => { this.store.selectTheme(style.id); })
   }
   @Builder
   themeSettings() {
@@ -648,22 +580,22 @@ export struct SettingsView {
       Row({ space: 4 }) {
         ForEach(APPEARANCE_MODES, (mode: AppearanceMode) => {
           Button(mode.label, { type: ButtonType.Normal }).chatAction().layoutWeight(1).height(38).padding(4).borderRadius(10)
-            .id(`appearance-${mode.id}`).accessibilitySelected(this.modeId === mode.id)
-            .backgroundColor(this.modeId === mode.id ? this.accent : Color.Transparent)
-            .fontColor(this.modeId === mode.id ? this.accentForeground : $r('app.color.pigo_muted'))
-            .onClick(() => { this.selectAppearanceMode(mode); })
+            .id(`appearance-${mode.id}`).accessibilitySelected(this.store.modeId === mode.id)
+            .backgroundColor(this.store.modeId === mode.id ? this.store.accent() : Color.Transparent)
+            .fontColor(this.store.modeId === mode.id ? this.store.accentForeground() : $r('app.color.pigo_muted'))
+            .onClick(() => { this.store.selectAppearanceMode(mode); })
         }, (mode: AppearanceMode) => mode.id)
       }.width('100%').padding(4).borderRadius(14).backgroundColor($r('app.color.pigo_control'))
-    }.width('100%').padding(16).attributeModifier(themedCardSurface(this.darkMode, this.themeId))
+    }.width('100%').padding(16).attributeModifier(themedCardSurface(this.store.darkMode, this.store.themeId))
     Row({ space: 12 }) {
       Column({ space: 4 }) {
         Text('动态主题效果').fontSize(16).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
         Text('开启微风动效与轻点互动，关闭后切换为省电静态壁纸').fontSize(13).fontColor($r('app.color.pigo_muted'))
       }.layoutWeight(1).alignItems(HorizontalAlign.Start)
-      Toggle({ type: ToggleType.Switch, isOn: this.themeMotionEnabled })
-        .id('theme-motion-setting').selectedColor(this.accent).accessibilityText('动态主题效果')
-        .onChange((enabled: boolean) => { void this.setThemeMotionEnabled(enabled); })
-    }.width('100%').padding(14).attributeModifier(themedCardSurface(this.darkMode, this.themeId))
+      Toggle({ type: ToggleType.Switch, isOn: this.store.themeMotionEnabled })
+        .id('theme-motion-setting').selectedColor(this.store.accent()).accessibilityText('动态主题效果')
+        .onChange((enabled: boolean) => { void this.store.setThemeMotionEnabled(enabled); })
+    }.width('100%').padding(14).attributeModifier(themedCardSurface(this.store.darkMode, this.store.themeId))
     this.themePreviewCard()
     Column({ space: 10 }) {
       Row() {
@@ -673,8 +605,8 @@ export struct SettingsView {
       ForEach(THEME_STYLES, (style: ThemeStyle) => {
         this.themeOption(style)
       }, (style: ThemeStyle) => style.id)
-    }.width('100%').padding(16).attributeModifier(themedCardSurface(this.darkMode, this.themeId))
-    if (this.appearanceNotice) Text(this.appearanceNotice).fontSize(13).fontColor($r('app.color.pigo_warning'))
+    }.width('100%').padding(16).attributeModifier(themedCardSurface(this.store.darkMode, this.store.themeId))
+    if (this.store.appearanceNotice) Text(this.store.appearanceNotice).fontSize(13).fontColor($r('app.color.pigo_warning'))
   }
   @Builder
   runNoticeSettings() {
@@ -683,10 +615,10 @@ export struct SettingsView {
         Text('运行结束通知').fontSize(16).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
         Text('应用内显示横幅，退到后台后显示手机通知').fontSize(13).fontColor($r('app.color.pigo_muted'))
       }.layoutWeight(1).alignItems(HorizontalAlign.Start)
-      Toggle({ type: ToggleType.Switch, isOn: this.runNoticesEnabled })
-        .id('run-notice-setting').selectedColor(this.accent).accessibilityText('运行结束通知')
-        .onChange((enabled: boolean) => { void this.setRunNoticesEnabled(enabled); })
-    }.width('100%').padding(14).attributeModifier(themedCardSurface(this.darkMode, this.themeId))
+      Toggle({ type: ToggleType.Switch, isOn: this.store.runCenter.state.runNoticesEnabled })
+        .id('run-notice-setting').selectedColor(this.store.accent()).accessibilityText('运行结束通知')
+        .onChange((enabled: boolean) => { void this.store.runCenter.setRunNoticesEnabled(enabled); })
+    }.width('100%').padding(14).attributeModifier(themedCardSurface(this.store.darkMode, this.store.themeId))
   }
   @Builder
   liveViewSettings() {
@@ -695,33 +627,33 @@ export struct SettingsView {
         Text('任务实况窗').fontSize(16).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
         Text(this.liveViewSummary()).fontSize(13).fontColor($r('app.color.pigo_muted'))
       }.layoutWeight(1).alignItems(HorizontalAlign.Start)
-      Toggle({ type: ToggleType.Switch, isOn: this.liveViewsEnabled })
-        .id('live-view-setting').selectedColor(this.accent).accessibilityText('任务实况窗')
-        .onChange((enabled: boolean) => { void this.setLiveViewsEnabled(enabled); })
-    }.width('100%').padding(14).attributeModifier(themedCardSurface(this.darkMode, this.themeId))
+      Toggle({ type: ToggleType.Switch, isOn: this.store.liveViewsEnabled })
+        .id('live-view-setting').selectedColor(this.store.accent()).accessibilityText('任务实况窗')
+        .onChange((enabled: boolean) => { void this.store.setLiveViewsEnabled(enabled); })
+    }.width('100%').padding(14).attributeModifier(themedCardSurface(this.store.darkMode, this.store.themeId))
   }
   private paletteFor(style: ThemeStyle): ThemePalette {
-    return this.darkMode ? style.dark : style.light;
+    return this.store.darkMode ? style.dark : style.light;
   }
   private activePalette(): ThemePalette {
-    return themePalette(this.themeId, this.darkMode);
+    return themePalette(this.store.themeId, this.store.darkMode);
   }
   private cloudOnlyComputers(): CloudComputer[] {
-    return this.cloudComputers.filter((row: CloudComputer): boolean =>
-      !this.computers.some((local: Companion): boolean => local.address === row.address));
+    return this.store.accountSync.state.cloudComputers.filter((row: CloudComputer): boolean =>
+      !this.store.computers.some((local: Companion): boolean => local.address === row.address));
   }
   private pairingComputerTitle(): string {
-    const group = computerGroups(this.computers).find((item: ComputerGroup): boolean => item.id === this.pairingComputerId);
+    const group = computerGroups(this.store.computers).find((item: ComputerGroup): boolean => item.id === this.store.pairingComputerId);
     return group ? computerGroupTitle(group) : '';
   }
   private computerTitle(): string {
-    const record = this.computers.find((item: Companion): boolean => item.address === this.base);
-    return record?.computerName || (validUsb(this.base) ? 'USB 电脑' : (this.base.split('://')[1] || '我的电脑'));
+    const record = this.store.computers.find((item: Companion): boolean => item.address === this.store.base);
+    return record?.computerName || (validUsb(this.store.base) ? 'USB 电脑' : (this.store.base.split('://')[1] || '我的电脑'));
   }
   private liveViewSummary(): string {
-    if (this.liveViewStatus === 'rights') return '当前设备或应用版本暂无实况窗权益';
-    if (this.liveViewStatus === 'disabled') return '系统实况窗开关未开启，请在系统应用设置中开启';
-    if (this.liveViewStatus === 'error') return '实况窗暂时不可用，将在运行期间自动重试';
+    if (this.store.liveViewStatus === 'rights') return '当前设备或应用版本暂无实况窗权益';
+    if (this.store.liveViewStatus === 'disabled') return '系统实况窗开关未开启，请在系统应用设置中开启';
+    if (this.store.liveViewStatus === 'error') return '实况窗暂时不可用，将在运行期间自动重试';
     return '在状态栏、锁屏和通知中心显示从手机发起的任务状态';
   }
 }

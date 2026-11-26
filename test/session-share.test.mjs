@@ -243,10 +243,10 @@ test('shareSessionViaSystem shares plain text directly and falls back to file wh
 test('Index page collects paginated history and full truncated replies before invoking system share', async () => {
   const page = pageSource();
   function method(name) {
-    const start = page.search(new RegExp(`  private (?:async )?${name}\\(`));
+    const start = page.search(new RegExp(`\\n  (?:private )?(?:async )?${name}\\(`));
     assert.ok(start >= 0, `Missing page method: ${name}`);
-    const end = page.indexOf('\n  }', start) + 4;
-    return page.slice(start, end);
+    const end = page.indexOf('\n  }', start + 1) + 4;
+    return page.slice(start + 1, end);
   }
   const { files, api } = createMemoryFiles();
   const shareCalls = [];

@@ -1,71 +1,32 @@
-import { SessionActions, SessionActionsHost } from '../model/SessionActions';
-import { SessionViewState, StreamSyncController, StreamSyncHost } from '../model/StreamSyncController';
-import { ShareAttachmentController, ShareAttachmentHost } from '../model/ShareAttachmentController';
-import { VoiceComposerController, VoiceComposerHost } from '../model/VoiceComposerController';
-import { ScheduleController, ScheduleHost } from '../model/ScheduleController';
-import { RunCenterController, RunCenterHost } from '../model/RunCenterController';
-import { WorkspaceFileController, WorkspaceFileHost } from '../model/WorkspaceFileController';
-import { SplitPaneController, SplitPaneHost } from '../model/SplitPaneController';
-import { ToolCommandController, ToolCommandHost } from '../model/ToolCommandController';
-import { AccountSyncController, AccountSyncHost } from '../model/AccountSyncController';
-import { IncomingShareBanner, NewSessionDialog, NewSpaceDialog, PendingInteractionCard, ToolDetailsSheet } from '../components/ChatDialogs';
-import { SakuraGirlHitZone, ThemeBackdrop } from '../components/ThemeBackdrop';
-import { MarkdownTableReaderPage, TextFilePreviewPage, WorkspaceFileEditor } from '../components/FilePreviewPages';
-import { OfflineNotice, RunCompletionBanner, RunningSessionPill, RunningSessionStrip, ScheduledRunBanner,
-  SessionSettings } from '../components/SessionOverlays';
-import { AppUiState, appUiState, windowAppUiState } from '../AppUiState';
-import { entryInstances } from '../EntryInstanceRegistry';
-import { CommandList, CommandState, commandDraft, skillDraft } from '../model/CommandState';
-import { ConnectionManager, PairingRequest } from '../model/ConnectionManager';
-import { ChatState } from '../model/ChatState';
-import type { TranscriptCacheBook } from '../model/ChatState';
-import { SessionCatalog, SessionStore, SIDEBAR_VIEWS, WorkspacePage, workspaceName } from '../model/SessionStore';
-import { headerSymbol } from '../components/HeaderSymbol';
-import { PiGoClient } from '../model/PiGoClient';
-import { ScheduleOverlay } from '../components/ScheduleOverlay';
-import { TaskPanel } from '../components/TaskPanel';
-import { SettingsView } from '../components/SettingsView';
-import { WorkspaceFiles } from '../components/WorkspaceFiles';
-import { SessionSidebar } from '../components/SessionSidebar';
-import { ChatComposer } from '../components/ChatComposer';
-import { ChatTranscript } from '../components/ChatTranscript';
-import { RunResultView } from '../components/RunResultView';
-import { bannerTransition, drawerSlideTransition, modalFadeTransition, pagePushTransition, subPageTransition } from '../components/PageTransitions';
-import { CommandPaletteCard, VoiceFeedbackOverlay } from '../components/ChatSubViews';
-import { DiffLine, InboxRun, RunEvent, RunFile, RunScreenshot } from '../RunResults';
-import { KeyboardAvoidMode, UIContext } from '@kit.ArkUI';
-import { inputMethod } from '@kit.IMEKit';
-import { ChatContent, replySpeechText } from '../ChatContent';
+import { UIContext } from '@kit.ArkUI';
+import { windowAppUiState } from '../AppUiState';
+import { canvasFadeStops, themeStyle } from '../Appearance';
+import { ChatContent } from '../ChatContent';
 import { ChatImage } from '../ChatImage';
-import { util } from '@kit.ArkTS';
-import { scanBarcode, scanCore } from '@kit.ScanKit';
-import { AbilityConstant, common } from '@kit.AbilityKit';
-import { closeConversationWindows, findConversationWindow, prepareConversationWindow, takeConversationWindow } from '../ConversationWindowLaunch';
-import { panePath, paneQuery, WindowConversation } from '../model/WindowConversation';
-import { preferences } from '@kit.ArkData';
-import { pasteboard } from '@kit.BasicServicesKit';
-import { Companion, ComputerBook, CredentialVault, subscribeComputerBook } from '../CredentialVault';
-import { AppearanceMode, THEME_MOTION_SETTING, ThemePalette, appearanceMode, canvasFadeStops, openSettings, themePalette, themeStyle } from '../Appearance';
-import { HuaweiProfile } from '../HuaweiProfile';
-import { CloudComputer, SYNC_MODE, SYNC_THEME } from '../AccountSync';
-import { immersiveSurface, glassComposerSurface, glassCardSurface, immersiveFloatingTabs, hasImmersiveMaterial, immersiveSheetMaterial } from '../Immersive';
-import { markdownWorkspacePath, normalizeWorkspacePath } from '../ChatPaths';
-import { decodePairingBundle, validUsb } from '../PairingCode';
-import { connectionLabel, validCompanion } from '../CompanionCheck';
-import { ComputerGroup, computerGroupId, computerGroups, computerGroupTitle, moveComputerConnection, renameComputerGroup } from '../ComputerGroups';
-import { LiveActivitySnapshot, liveActivity } from '../LiveActivity';
-import { ScheduleJob, RunMessage, scheduleTime, parseScheduleTime, isCurrentScheduleComputer } from '../ScheduledRuns';
-
-import { ModelOption, BridgeEndpoint, SessionState, SessionRow, ChatMessage, DraftAttachment,
-  UploadedAttachment, LiveTool, ToolDetails, CommandRow, ReceivedFilePreview,
-  PendingInteraction, RunningRow, WorkspaceRow, BridgeReply,
-  AgentInfo, OptimisticMessage, Payload, QueuedSteering, BridgeFailure } from '../model/PiGoTypes';
-import { USB_ADDRESS,
-  SPLIT_WINDOW_WIDTH,
-  SHORT_WINDOW_HEIGHT, LIVE_VIEW_SETTING } from '../model/PiGoConstants';
-import { SidebarRows } from '../model/SidebarRows';
-import { buildWidgetSnapshot, InboxWidget } from '../InboxWidget';
+import { markdownWorkspacePath } from '../ChatPaths';
+import { glassCardSurface, hasImmersiveMaterial, immersiveFloatingTabs, immersiveSheetMaterial, immersiveSurface } from '../Immersive';
+import { DiffLine, InboxRun, RunEvent, RunFile, RunScreenshot } from '../RunResults';
+import { RunMessage, ScheduleJob } from '../ScheduledRuns';
+import { ChatComposer } from '../components/ChatComposer';
+import { IncomingShareBanner, NewSessionDialog, NewSpaceDialog, PendingInteractionCard, ToolDetailsSheet } from '../components/ChatDialogs';
+import { CommandPaletteCard, VoiceFeedbackOverlay } from '../components/ChatSubViews';
+import { ChatTranscript } from '../components/ChatTranscript';
+import { MarkdownTableReaderPage, TextFilePreviewPage, WorkspaceFileEditor } from '../components/FilePreviewPages';
+import { headerSymbol } from '../components/HeaderSymbol';
+import { bannerTransition, drawerSlideTransition, modalFadeTransition, pagePushTransition, subPageTransition } from '../components/PageTransitions';
+import { RunResultView } from '../components/RunResultView';
+import { ScheduleOverlay } from '../components/ScheduleOverlay';
+import { OfflineNotice, RunCompletionBanner, RunningSessionStrip, ScheduledRunBanner, SessionSettings } from '../components/SessionOverlays';
+import { SessionSidebar } from '../components/SessionSidebar';
+import { SettingsView } from '../components/SettingsView';
+import { TaskPanel } from '../components/TaskPanel';
+import { SakuraGirlHitZone, ThemeBackdrop } from '../components/ThemeBackdrop';
+import { WorkspaceFiles } from '../components/WorkspaceFiles';
+import { SHORT_WINDOW_HEIGHT } from '../model/PiGoConstants';
 import { PiGoPageStore } from '../model/PiGoPageStore';
+import { BridgeReply, ChatMessage, CommandRow, LiveTool, Payload, ReceivedFilePreview } from '../model/PiGoTypes';
+import { SessionViewState } from '../model/StreamSyncController';
+import { panePath } from '../model/WindowConversation';
 
 @Extend(Button)
 function chatAction() {
@@ -186,70 +147,7 @@ struct Index {
 
   @Builder
   mineView() {
-    SettingsView({
-      accountBusy: this.store.accountSync.state.accountBusy,
-      active: this.store.visible && this.store.activeTab === 'mine',
-      accountNotice: this.store.accountSync.state.accountNotice,
-      addComputerConnection: (id?: string): void => this.store.addComputerConnection(id),
-      addingComputer: this.store.addingComputer,
-      address: this.store.appState.address!!,
-      appearanceNotice: this.store.appearanceNotice,
-      assignComputerConnection: (address: string, group?: ComputerGroup): void => this.store.assignComputerConnection(address, group),
-      avatarUnavailable: this.store.avatarUnavailable!!,
-      base: this.store.base,
-      bottomContentClearance: this.store.bottomContentClearance(),
-      busy: this.store.session.busy,
-      chooseComputer: (record: Companion): void => this.store.chooseComputer(record),
-      closeComputerEditors: (): void => this.store.closeComputerEditors(),
-      cloudComputers: this.store.accountSync.state.cloudComputers,
-      cloudSyncBusy: this.store.accountSync.state.cloudSyncBusy,
-      cloudSyncStatus: this.store.accountSync.state.cloudSyncStatus,
-      computerConnectionMenu: (record: Companion): MenuElement[] => this.store.computerConnectionMenu(record),
-      computerNameDraft: this.store.computerNameDraft!!,
-      computers: this.store.computers,
-      darkMode: this.store.darkMode,
-      dismissKeyboard: (): void => this.store.dismissKeyboard(),
-      findLanCompanions: (): Promise<void> => this.store.findLanCompanions(),
-      huaweiProfile: this.store.accountSync.state.huaweiProfile,
-      isPaired: this.store.isPaired,
-      lanCandidates: this.store.lanCandidates,
-      liveViewStatus: this.store.liveViewStatus,
-      liveViewsEnabled: this.store.liveViewsEnabled,
-      minePage: this.store.minePage!!,
-      modeId: this.store.modeId,
-      moveConnectionAddress: this.store.moveConnectionAddress,
-      openingSession: this.store.session.openingSession,
-      pair: (): Promise<void> => this.store.pair(),
-      pairingBundle: this.store.pairingBundle!!,
-      pairingComputerId: this.store.pairingComputerId,
-      pairingMode: this.store.pairingMode,
-      reachable: this.store.session.reachable,
-      removeCloudComputer: (computer: CloudComputer): void => this.store.removeCloudComputer(computer),
-      removeComputer: (address: string): void => this.store.removeComputer(address),
-      removeTarget: this.store.removeTarget!!,
-      renameComputerId: this.store.renameComputerId!!,
-      restoreCloudComputer: (computer: CloudComputer): void => this.store.restoreCloudComputer(computer),
-      restoringComputer: this.store.restoringComputer,
-      runNoticesEnabled: this.store.runCenter.state.runNoticesEnabled,
-      saveComputerName: (id: string): void => this.store.saveComputerName(id),
-      scanPairingBundle: (): Promise<void> => this.store.scanPairingBundle(),
-      scheduleCloudSync: (delay?: number): void => this.store.accountSync.scheduleCloudSync(delay),
-      selectAppearanceMode: (mode: AppearanceMode): void => this.store.selectAppearanceMode(mode),
-      selectPairingMode: (mode: string): void => this.store.selectPairingMode(mode),
-      selectTheme: (id: string): void => this.store.selectTheme(id),
-      setThemeMotionEnabled: (enabled: boolean): Promise<void> => this.store.setThemeMotionEnabled(enabled),
-      themeMotionEnabled: this.store.themeMotionEnabled,
-      setLiveViewsEnabled: (enabled: boolean): Promise<void> => this.store.setLiveViewsEnabled(enabled),
-      setRunNoticesEnabled: (enabled: boolean): Promise<void> => this.store.runCenter.setRunNoticesEnabled(enabled),
-      signInHuawei: (): Promise<void> => this.store.accountSync.signInHuawei(),
-      signOutHuawei: (): Promise<void> => this.store.accountSync.signOutHuawei(),
-      themeId: this.store.themeId,
-      ticket: this.store.ticket!!,
-      topContentClearance: this.store.topContentClearance(),
-      accent: this.store.accent(),
-      accentForeground: this.store.accentForeground(),
-      accentTint: this.store.accentTint()
-    })
+    SettingsView({ store: this.store, active: this.store.visible && this.store.activeTab === 'mine' })
   }
 
   @Builder
@@ -694,60 +592,7 @@ struct Index {
 
   @Builder
   composer() {
-    ChatComposer({
-      darkMode: this.store.darkMode,
-      acceptsImage: this.store.session.acceptsImage,
-      applyModelFromMenu: (index: number): Promise<void> => this.store.toolCmd.applyModelFromMenu(index),
-      applyThinkingLevelFromMenu: (level: string): Promise<void> => this.store.toolCmd.applyThinkingLevelFromMenu(level),
-      armTranscriptFollow: (): void => this.store.armTranscriptFollow(),
-      attachFile: (): Promise<void> => this.store.shareController.attachFile(),
-      attachImage: (source: string): Promise<void> => this.store.shareController.attachImage(source),
-      attachments: this.store.session.attachments,
-      busy: this.store.session.busy,
-      commandError: this.store.toolCmd.state.commandError,
-      commandRows: this.store.toolCmd.state.commandRows,
-      commandsLoading: this.store.toolCmd.state.commandsLoading,
-      currentId: this.store.session.currentId,
-      currentLevel: this.store.session.currentLevel,
-      currentModel: this.store.session.currentModel,
-      dismissKeyboard: (): void => this.store.dismissKeyboard(),
-      draft: this.store.session.draft!!,
-      sendTarget: this.store.split.state.splitOpen ? this.store.chatTitle() : '',
-      holdCancel: this.store.voiceComposer.state.holdCancel,
-      holdTouch: (event: TouchEvent): void => this.store.voiceComposer.holdTouch(event),
-      idle: this.store.session.idle,
-      liveVoiceText: this.store.voiceComposer.state.liveVoiceText!!,
-      loadCommands: (): Promise<void> => this.store.toolCmd.loadCommands(),
-      modelLabel: this.store.session.modelLabel,
-      models: this.store.session.models,
-      openComposerMenu: (): void => this.store.toolCmd.openComposerMenu(),
-      openModelMenu: (): Promise<void> => this.store.toolCmd.openModelMenu(),
-      openSkillPicker: (): void => this.store.toolCmd.openSkillPicker(),
-      openingSession: this.store.session.openingSession || this.store.split.state.splitNavigating,
-      hasPendingSend: this.store.session.pendingSend !== undefined,
-      pickSkill: (row: CommandRow): void => this.store.toolCmd.pickSkill(row),
-      queued: this.store.session.queued,
-      reachable: this.store.session.reachable,
-      recording: this.store.voiceComposer.state.recording,
-      removeAttachment: (index: number): void => this.store.shareController.removeAttachment(index),
-      requestAction: (path: string, input?: Payload): Promise<boolean> => this.store.sessionActions.requestAction(path, input),
-      runId: this.store.session.runId,
-      send: (): Promise<void> => this.store.sessionActions.send(),
-      showComposerMenu: this.store.toolCmd.state.showComposerMenu!!,
-      showModelMenu: this.store.toolCmd.state.showModelMenu!!,
-      showSkillPicker: this.store.toolCmd.state.showSkillPicker!!,
-      status: this.store.session.status!!,
-      syncCommandPalette: (): void => this.store.toolCmd.syncCommandPalette(),
-      voiceCancelling: this.store.voiceComposer.state.voiceCancelling,
-      voiceFinishing: this.store.voiceComposer.state.voiceFinishing,
-      voiceMode: this.store.voiceComposer.state.voiceMode!!,
-      voicePreparing: this.store.voiceComposer.state.voicePreparing,
-      windowHeight: this.store.windowHeight,
-      windowWidth: this.store.windowWidth,
-      accent: this.store.accent(),
-      accentForeground: this.store.accentForeground(),
-      accentTint: this.store.accentTint()
-    })
+    ChatComposer({ store: this.store })
   }
 
   @Builder
@@ -833,72 +678,7 @@ struct Index {
 
   @Builder
   sessionDrawer() {
-    SessionSidebar({
-      darkMode: this.store.darkMode,
-      base: this.store.base,
-      busy: this.store.session.busy,
-      canCreateWorkspace: this.store.canCreateWorkspace,
-      confirmCloseSpace: (path: string, epoch: number): void => this.store.confirmCloseSpace(path, epoch),
-      openNewSession: (path?: string): void => this.store.openNewSession(path),
-      currentId: this.store.session.currentId,
-      expandedSpaces: this.store.expandedSpaces,
-      hostAvailable: this.store.hostAvailable,
-      idle: this.store.session.idle,
-      interaction: this.store.session.interaction,
-      library: this.store.library,
-      loadMoreSessions: (path: string): void => {
-        if (!path) void this.store.loadSessions(true);
-        else {
-          const page = this.store.workspacePages.find((item: WorkspacePage): boolean => item.path === path);
-          const retryRefresh = page?.retryRefresh === true;
-          void this.store.loadWorkspacePage(path, !retryRefresh && page?.nextCursor !== undefined, retryRefresh);
-        }
-      },
-      loadedView: this.store.loadedView,
-      offlineDismissed: this.store.offlineDismissed!!,
-      openComputers: (): void => this.store.openComputers(),
-      openingSession: this.store.session.openingSession,
-      openingSessionId: this.store.session.openingSessionId,
-      projects: this.store.projects,
-      queued: this.store.session.queued,
-      reachable: this.store.session.reachable,
-      refreshSessions: (): Promise<void> => this.store.session.reachable ? this.store.loadSessions(false, true) : Promise.resolve(),
-      splitSessionId: this.store.split.state.otherId,
-      choosingSplitSession: this.store.split.state.splitOpen && !this.store.split.state.otherId,
-      openSession: (row: SessionRow): void => this.store.split.openSidebarSession(row, false),
-      openInSplit: (row: SessionRow): void => this.store.split.openSidebarSession(row, true),
-      openInSystemSplit: (row: SessionRow): void => { void this.store.split.openInSystemSplit(row); },
-      revealLibraryAnchor: (): void => this.store.revealLibraryAnchor(),
-      runningSessionIds: this.store.runningSessionIds,
-      runningSessions: this.store.runningSessions,
-      schedule: (delay: number): void => this.store.streamSync.schedule(delay),
-      selectSessionView: (view: string): void => this.store.selectSessionView(view),
-      sessionCatalogFailed: this.store.sessionCatalogFailed,
-      sessionCatalogLoaded: this.store.sessionCatalogLoaded,
-      sessionLoading: this.store.sessionLoading,
-      sessionView: this.store.sessionView,
-      sessions: this.store.sessions,
-      setDrawer: (open: boolean): void => this.store.setDrawer(open),
-      sidebarRows: this.store.sidebarRows,
-      statusBarHeight: this.store.statusBarHeight,
-      swipeDrawer: (event: GestureEvent): void => this.store.swipeDrawer(event),
-      toggleSpace: (path: string): void => this.store.toggleSpace(path),
-      updateSessionMeta: (session: SessionRow, pin: boolean): Promise<void> => this.store.updateSessionMeta(session, pin),
-      shareSession: (session: SessionRow): Promise<void> => this.store.shareController.shareSidebarSession(session),
-      windowHeight: this.store.windowHeight,
-      workspaces: this.store.workspaces,
-      accent: this.store.accent(),
-      accentForeground: this.store.accentForeground(),
-      accentTint: this.store.accentTint(),
-      bottomPad: this.store.bottomPad(),
-      compactSessionPane: this.store.compactSessionPane(),
-      computerTitle: this.store.computerTitle(),
-      dockedSessions: this.store.dockedSessions(),
-      drawerWidth: this.store.drawerWidth(),
-      sessionPaneWidth: this.store.sessionPaneWidth(),
-      onDrawerAppear: (): void => { this.store.onSidebarAppear(); },
-      connectionEpoch: (): number => this.store.session.epoch
-    })
+    SessionSidebar({ store: this.store })
   }
 
   @Builder
@@ -1027,53 +807,7 @@ struct Index {
 
   @Builder
   scheduleOverlay() {
-    ScheduleOverlay({
-      darkMode: this.store.darkMode,
-      backFromSchedule: (): void => this.store.scheduleController.backFromSchedule(),
-      base: this.store.base,
-      busy: this.store.session.busy,
-      computers: this.store.computers,
-      deleteScheduleRuns: (messages: RunMessage[]): Promise<boolean> => this.store.scheduleController.deleteScheduleRuns(messages),
-      dismissInboxRuns: (ids: string[]): Promise<boolean> => this.store.runCenter.dismissInboxRuns(ids),
-      dismissScheduleMessage: (message: RunMessage): void => this.store.scheduleController.dismissScheduleMessage(message),
-      isPaired: this.store.isPaired,
-      openScheduleTimePicker: (): void => this.store.openScheduleTimePicker(),
-      openScheduledSession: (message: RunMessage): Promise<void> => this.store.openScheduledSession(message),
-      openingSession: this.store.session.openingSession,
-      inboxRuns: this.store.runCenter.displayedInboxRuns(),
-      openInboxRun: (row: InboxRun): Promise<void> => this.store.runCenter.openInboxRun(row),
-      pushEnabled: this.store.runCenter.state.pushEnabled,
-      pushSaving: this.store.runCenter.state.pushSaving,
-      pushStatus: this.store.runCenter.state.pushStatus,
-      setPushEnabled: (enabled: boolean): Promise<void> => this.store.runCenter.setPushEnabled(enabled),
-      projects: this.store.projects,
-      scheduleCatchUp: this.store.scheduleController.state.scheduleCatchUp!!,
-      scheduleCwd: this.store.scheduleController.state.scheduleCwd!!,
-      scheduleDetail: this.store.scheduleController.state.scheduleDetail,
-      scheduleEditing: this.store.scheduleController.state.scheduleEditing,
-      scheduleError: this.store.scheduleController.state.scheduleError,
-      scheduleKind: this.store.scheduleController.state.scheduleKind!!,
-      scheduleMessages: this.store.scheduleController.state.scheduleMessages,
-      scheduleName: this.store.scheduleController.state.scheduleName!!,
-      scheduleOffline: this.store.scheduleController.state.scheduleOffline,
-      schedulePage: this.store.scheduleController.state.schedulePage,
-      schedulePrompt: this.store.scheduleController.state.schedulePrompt!!,
-      scheduleSaving: this.store.scheduleController.state.scheduleSaving || this.store.runCenter.state.inboxCleaning,
-      scheduleWhen: this.store.scheduleController.state.scheduleWhen!!,
-      scheduleZone: this.store.scheduleController.state.scheduleZone,
-      showScheduleDetail: (message: RunMessage): void => this.store.scheduleController.showScheduleDetail(message),
-      statusBarHeight: this.store.statusBarHeight,
-      updateSchedule: (operation: string, job?: ScheduleJob): Promise<void> => this.store.scheduleController.updateSchedule(operation, job),
-      workspaces: this.store.workspaces,
-      accent: this.store.accent(),
-      accentForeground: this.store.accentForeground(),
-      accentTint: this.store.accentTint(),
-      canvasBg: this.store.themeCanvas(),
-      themeId: this.store.themeId,
-      headerHeight: this.store.headerHeight(),
-      bottomPad: this.store.bottomPad(),
-      computerTitle: this.store.computerTitle()
-    })
+    ScheduleOverlay({ store: this.store })
   }
 
   build() {

@@ -1200,6 +1200,15 @@ export class PiGoPageStore {
     this.workspacePages = this.workspacePages.filter((item: WorkspacePage): boolean => item.path !== page.path).concat([page]);
   }
 
+  loadMoreSidebarSessions(path: string): void {
+    if (!path) void this.loadSessions(true);
+    else {
+      const page = this.workspacePages.find((item: WorkspacePage): boolean => item.path === path);
+      const retryRefresh = page?.retryRefresh === true;
+      void this.loadWorkspacePage(path, !retryRefresh && page?.nextCursor !== undefined, retryRefresh);
+    }
+  }
+
   async loadWorkspacePage(path: string, more: boolean = false, refresh: boolean = false): Promise<void> {
     const previous = this.workspacePages.find((page: WorkspacePage): boolean => page.path === path);
     if (!this.session.reachable || (previous?.loading && !refresh) || (more && previous?.nextCursor === undefined)) return;
