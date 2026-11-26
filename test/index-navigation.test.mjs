@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { stripTypeScriptTypes } from 'node:module';
 import { test } from 'node:test';
 import './harmony-modules.mjs';
-import { pageSource } from './harmony-source.mjs';
+import { harmonyFile } from './harmony-source.mjs';
 const { computerGroupId, computerGroups, computerGroupTitle, moveComputerConnection, renameComputerGroup } = await import('../harmony/entry/src/main/ets/ComputerGroups.ets');
 const { connectionLabel, validCompanion } = await import('../harmony/entry/src/main/ets/CompanionCheck.ets');
 const { SessionActions } = await import('../harmony/entry/src/main/ets/model/SessionActions.ets');
@@ -21,12 +21,12 @@ const { SessionStore, workspaceName } = await import('../harmony/entry/src/main/
 const { SPLIT_WINDOW_WIDTH, LIVE_VIEW_SETTING } = await import('../harmony/entry/src/main/ets/model/PiGoConstants.ets');
 
 // These cases cover page orchestration across the imported stores and ArkUI callbacks.
-const page = pageSource();
+const page = harmonyFile('model/PiGoPageStore.ets');
 function method(name) {
-  const start = page.search(new RegExp(`  private (?:async )?${name}\\(`));
+  const start = page.search(new RegExp(`\\n  (?:private )?(?:async )?${name}\\(`));
   assert.ok(start >= 0, `Missing page method: ${name}`);
-  const end = page.indexOf('\n  }', start) + 4;
-  return page.slice(start, end);
+  const end = page.indexOf('\n  }', start + 1) + 4;
+  return page.slice(start + 1, end);
 }
 const { runNotificationText } = await import('../harmony/entry/src/main/ets/RunResults.ets');
 const methods = ['setDrawer', 'swipeDrawer', 'loadSessions', 'applyCatalog', 'positionTranscript', 'loadSessionStatus', 'applyRunningStatus',
