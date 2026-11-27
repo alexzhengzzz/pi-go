@@ -449,7 +449,9 @@ async function handleRequest(id, method, params = {}) {
       const steeredSuffix = turn.steeredTexts.length ? ` [steered: ${turn.steeredTexts.join(', ')}]` : '';
       const skillPrefix = hasSkill ? '[skill:review] ' : '';
       const imagePrefix = hasImage ? '[image] ' : '';
-      const replyText = `Codex 回复: ${skillPrefix}${imagePrefix}${promptText}${steeredSuffix}`;
+      const replyText = promptText === 'Long scheduled report'
+        ? '# Report\n\n' + '一行 Markdown 内容。\n'.repeat(8500) + '\n**End of report**\n'
+        : `Codex 回复: ${skillPrefix}${imagePrefix}${promptText}${steeredSuffix}`;
       const msgItem = {
         type: 'agentMessage',
         id: `msg-${randomUUID()}`,

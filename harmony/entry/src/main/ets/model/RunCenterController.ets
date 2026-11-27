@@ -46,6 +46,23 @@ export interface RunCenterHost {
   celebrate: () => void;
 }
 
+export interface AlertSourcePref {
+  source: string;
+  muted: boolean;
+  defaultAgent: string;
+}
+
+export interface AlertSourceSummary {
+  source: string;
+  count: number;
+  unreadCount: number;
+  latestAt: number;
+  latestTitle: string;
+  computer: string;
+  muted: boolean;
+  defaultAgent: string;
+}
+
 @ObservedV2
 export class RunCenterState {
   @Trace inboxRuns: InboxRun[] = [];
@@ -62,6 +79,7 @@ export class RunCenterState {
   @Trace reviewError: string = '';
   @Trace runNotice?: RunNotice = undefined;
   @Trace runNoticesEnabled: boolean = true;
+  @Trace alertSourcePrefs: AlertSourcePref[] = [];
 }
 
 export class RunCenterController {
@@ -159,6 +177,18 @@ export class RunCenterController {
     this.state.runNoticesEnabled = settings.getSync(RUN_NOTICE_SETTING, true) !== false;
     this.watchRemindersEnabled = settings.getSync(WATCH_REMINDERS_SETTING, true) !== false;
     try {
+      const prefs = JSON.parse(settings.getSync('alert_source_prefs', '[]') as string) as AlertSourcePref[];
+      if (Array.isArray(prefs)) {
+        this.state.alertSourcePrefs = prefs
+          .filter((item: AlertSourcePref): boolean => typeof item?.source === 'string' && item.source.trim().length > 0)
+          .map((item: AlertSourcePref): AlertSourcePref => ({
+            source: item.source.trim(),
+            muted: item.muted === true,
+            defaultAgent: typeof item.defaultAgent === 'string' ? item.defaultAgent.trim() : ''
+          }));
+      }
+    } catch { /* Ignore invalid alert source preferences. */ }
+    try {
       const delivered = JSON.parse(settings.getSync('watch_reminder_delivered', '[]') as string) as string[];
       if (Array.isArray(delivered)) {
         this.watchReminderDelivered = delivered.filter((id: string): boolean => typeof id === 'string').slice(0, 240);
@@ -250,6 +280,7 @@ export class RunCenterController {
       this.state.inboxRuns = this.state.inboxRuns.filter((row: InboxRun): boolean => row.address !== computer.address).concat(rows);
       for (const row of rows) {
         if (row.unread) {
+          if (row.run.status === 'alert' && this.isAlertSourceMuted(this.alertSourceKey(row.run))) continue;
           const watchDetail = row.run.status === 'alert' && row.run.body ?
             `${row.run.title ?? ''}\n${row.run.body}` : (row.run.title ?? '');
           this.queueWatchReminder(`inbox:${row.run.id}`, runStatus(row.run.status), row.computer,
@@ -266,6 +297,7 @@ export class RunCenterController {
       !run.id || this.seenBackgroundRuns.has(run.id) || this.notifiedBackgroundRuns.has(run.id) ||
       !(run.finishedAt >= this.backgroundRunNoticesSince) ||
       !['completed', 'failed', 'stopped', 'alert'].includes(run.status)) return;
+    if (run.status === 'alert' && this.isAlertSourceMuted(this.alertSourceKey(run))) return;
     const since = this.backgroundRunNoticesSince;
     this.notifiedBackgroundRuns.add(run.id);
     try {
@@ -336,7 +368,43 @@ export class RunCenterController {
     return `${group}:${row.run.sessionId}`;
   }
 
-  displayedInboxRuns(): InboxRun[] {
+  alertSourceKey(run: RunEvent): string {
+    return run.source?.trim() || 'local';
+  }
+
+  private findAlertSourcePref(source: string): AlertSourcePref | undefined {
+    const key = source.trim() || 'local';
+    return this.state.alertSourcePrefs.find((item: AlertSourcePref): boolean => item.source === key);
+  }
+
+  isAlertSourceMuted(source: string): boolean {
+    return this.findAlertSourcePref(source)?.muted === true;
+  }
+
+  alertSourceDefaultAgent(source: string): string {
+    return this.findAlertSourcePref(source)?.defaultAgent ?? '';
+  }
+
+  private updateAlertSourcePref(source: string, muted: boolean, defaultAgent: string): void {
+    const key = source.trim() || 'local';
+    const next = this.state.alertSourcePrefs.filter((item: AlertSourcePref): boolean => item.source !== key);
+    if (muted || defaultAgent) {
+      next.push({ source: key, muted: muted, defaultAgent: defaultAgent });
+    }
+    this.state.alertSourcePrefs = next;
+    void this.host.saveSetting('alert_source_prefs', JSON.stringify(next)).catch(() => {});
+    this.host.publishWidgets();
+  }
+
+  setAlertSourceMuted(source: string, muted: boolean): void {
+    this.updateAlertSourcePref(source, muted, this.alertSourceDefaultAgent(source));
+  }
+
+  setAlertSourceAgent(source: string, agent: string): void {
+    this.updateAlertSourcePref(source, this.isAlertSourceMuted(source), agent.trim());
+  }
+
+  private dedupedInboxRuns(): InboxRun[] {
     const byId = new Map<string, InboxRun>();
     for (const row of this.state.inboxRuns) {
       if (!byId.has(row.run.id) || row.address === this.host.base()) byId.set(row.run.id, row);
@@ -359,6 +427,63 @@ export class RunCenterController {
     }
     return Array.from(records.values()).sort((a: InboxRun, b: InboxRun): number =>
       Number(b.run.status === 'waiting') - Number(a.run.status === 'waiting') || b.run.finishedAt - a.run.finishedAt);
+  }
+
+  displayedInboxRuns(includeMuted: boolean = false): InboxRun[] {
+    const all = this.dedupedInboxRuns();
+    if (includeMuted) return all;
+    return all.filter((row: InboxRun): boolean =>
+      row.run.status !== 'alert' || !this.isAlertSourceMuted(this.alertSourceKey(row.run)));
+  }
+
+  alertSources(): AlertSourceSummary[] {
+    const grouped = new Map<string, AlertSourceSummary>();
+    for (const pref of this.state.alertSourcePrefs) {
+      grouped.set(pref.source, {
+        source: pref.source,
+        count: 0,
+        unreadCount: 0,
+        latestAt: 0,
+        latestTitle: '',
+        computer: '',
+        muted: pref.muted,
+        defaultAgent: pref.defaultAgent
+      });
+    }
+    for (const row of this.dedupedInboxRuns()) {
+      if (row.run.status !== 'alert') continue;
+      const key = this.alertSourceKey(row.run);
+      const existing = grouped.get(key);
+      if (!existing) {
+        grouped.set(key, {
+          source: key,
+          count: 1,
+          unreadCount: row.unread ? 1 : 0,
+          latestAt: row.run.finishedAt ?? 0,
+          latestTitle: row.run.title || row.run.body || '',
+          computer: row.computer,
+          muted: this.isAlertSourceMuted(key),
+          defaultAgent: this.alertSourceDefaultAgent(key)
+        });
+      } else {
+        existing.count += 1;
+        if (row.unread) existing.unreadCount += 1;
+        if ((row.run.finishedAt ?? 0) >= existing.latestAt) {
+          existing.latestAt = row.run.finishedAt ?? 0;
+          existing.latestTitle = row.run.title || row.run.body || existing.latestTitle;
+          existing.computer = row.computer || existing.computer;
+        }
+      }
+    }
+    return Array.from(grouped.values()).sort((a: AlertSourceSummary, b: AlertSourceSummary): number =>
+      b.latestAt - a.latestAt || a.source.localeCompare(b.source));
+  }
+
+  alertsForSource(source: string): InboxRun[] {
+    const key = source.trim() || 'local';
+    return this.dedupedInboxRuns()
+      .filter((row: InboxRun): boolean => row.run.status === 'alert' && this.alertSourceKey(row.run) === key)
+      .sort((a: InboxRun, b: InboxRun): number => (b.run.finishedAt ?? 0) - (a.run.finishedAt ?? 0));
   }
 
   async dismissInboxRuns(ids: string[]): Promise<boolean> {

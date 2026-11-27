@@ -1,7 +1,7 @@
 import type { BridgeReply, SessionRow, SidebarRow, WorkspaceRow } from './PiGoTypes';
 
 // Sidebar UI choices worth remembering between launches; plain state, no secrets.
-export const SIDEBAR_VIEWS: string[] = ['all', 'pinned', 'recent', 'archived'];
+export const SIDEBAR_VIEWS: string[] = ['all', 'recent', 'archived'];
 export const SIDEBAR_MAX_EXPANDED = 100;
 export const SIDEBAR_MAX_ENTRIES = 24;
 
@@ -140,7 +140,7 @@ export class SessionStore {
   }
 
   private sessionRow(session: SessionRow, nested: boolean): SidebarRow {
-    const key = `session:${session.id}:${nested}:${session.revision}:${session.pinned}:${session.archived}:${session.nativeArchived}:${session.cwd ?? ''}:${session.name ?? ''}`;
+    const key = `session:${session.id}:${nested}:${session.revision}:${session.archived}:${session.nativeArchived}:${session.cwd ?? ''}:${session.name ?? ''}`;
     return { key: key, session: session, nested: nested };
   }
 }

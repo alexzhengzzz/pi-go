@@ -583,7 +583,9 @@ export class PiGoPageStore {
     if (this.session.busy || this.session.openingSession || !run.cwd) return false;
     if (target.address !== this.base) this.chooseComputer(target);
     if (!this.isPaired || this.base !== target.address) return false;
-    if (!await this.sessionActions.requestAction('/new', { cwd: run.cwd })) {
+    const preferredAgent = this.runCenter.alertSourceDefaultAgent(run.source ?? '');
+    const newPayload: Payload = preferredAgent ? { cwd: run.cwd, agent: preferredAgent } : { cwd: run.cwd };
+    if (!await this.sessionActions.requestAction('/new', newPayload)) {
       this.scheduleController.state.scheduleError = this.session.status || '暂时无法在该工作区创建会话，请检查来源电脑。';
       return false;
     }
@@ -1455,19 +1457,16 @@ export class PiGoPageStore {
         action: () => { void this.shareController.shareCurrentSession('session-settings'); }
       });
     }
-    items.push(
-      { value: '模型与会话设置', action: () => {
+    items.push({
+      value: '模型与会话设置', action: () => {
         if (this.session.reachable && this.session.currentId) void this.sessionActions.requestAction('/models');
-      } },
-      { value: '切换电脑', action: () => { if (!this.session.busy) this.openComputers(); } }
-    );
+      }
+    });
     return items;
   }
 
-  async updateSessionMeta(session: SessionRow, pin: boolean): Promise<void> {
-    const payload: Payload = { id: session.id, cwd: session.cwd, revision: session.revision ?? 0 };
-    if (pin) payload.pinned = !session.pinned;
-    else payload.archived = !session.archived;
+  async toggleSessionArchive(session: SessionRow): Promise<void> {
+    const payload: Payload = { id: session.id, cwd: session.cwd, revision: session.revision ?? 0, archived: !session.archived };
     if (await this.sessionActions.requestAction('/session-meta', payload)) {
       if (this.sessionView === 'all' && session.cwd) await this.loadWorkspacePage(session.cwd);
       else await this.loadSessions();
@@ -2144,7 +2143,7 @@ export class PiGoPageStore {
   }
 
   sessionViewLabel(view: string): string {
-    return view === 'all' ? '工作区' : view === 'pinned' ? '置顶' : view === 'recent' ? '最近' : '归档';
+    return view === 'all' ? '工作区' : view === 'recent' ? '最近' : '归档';
   }
 
   selectSessionView(view: string): void {

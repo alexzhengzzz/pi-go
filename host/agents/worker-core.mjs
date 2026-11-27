@@ -71,7 +71,7 @@ function* newestFirst(entries) {
   for (let i = entries.length - 1; i >= 0; i -= 1) yield entries[i];
 }
 
-function paginateEntries(entries, liveTools, before, limit) {
+function paginateEntries(entries, liveTools, before, limit, previewLength = messagePreviewLength) {
   const messages = [];
   let historyCursor;
   let waitingForCursor = Boolean(before);
@@ -105,10 +105,10 @@ function paginateEntries(entries, liveTools, before, limit) {
     messages.push({
       id: entry.id,
       role: entry.role,
-      text: messageTextSlice(text, 0, messagePreviewLength),
+      text: messageTextSlice(text, 0, previewLength),
       imageCount: imageCount || undefined,
       tools: entryTools.length ? entryTools : undefined,
-      textTruncated: entry.role === 'assistant' && text.length > messagePreviewLength ? true : undefined,
+      textTruncated: entry.role === 'assistant' && text.length > previewLength ? true : undefined,
       thinking: thinking ? thinking.slice(0, 16000) : undefined,
       thinkingMs: thinking && typeof entry.thinkingMs === 'number' ? entry.thinkingMs : undefined,
     });
@@ -317,9 +317,12 @@ export function createWorkerServer(driver, {
         const source = driver.historyEntries?.() ?? driver.entries();
         const entries = driver.historyEntries ? source : newestFirst(await source);
         if (binding !== streamId || settledRunId !== runId) return;
-        const recent = paginateEntries(entries, toolLog, null, 60);
+        const turnEntries = driver.agent === 'codex' ? [...entries].filter((entry) => entry.turnId === settledRunId) : entries;
+        const recent = paginateEntries(turnEntries, toolLog, null, 60, Infinity);
         const ids = driver.runMessageIds?.(baselineLeaf);
-        const messages = (recent?.messages ?? []).filter((message) => !ids || ids.has(message.id));
+        const recentMessages = recent?.messages ?? [];
+        const lastUser = recentMessages.findLastIndex(({ role }) => role === 'user');
+        const messages = ids ? recentMessages.filter(({ id }) => ids.has(id)) : recentMessages.slice(Math.max(0, lastUser));
         const anchor = [...messages].reverse().find((message) =>
           message.role === 'assistant' && (message.text || message.imageCount)) ?? messages.at(-1);
         const screenshots = Array.from(toolLog.values()).flatMap(({ summary, result }) => {
@@ -366,7 +369,7 @@ export function createWorkerServer(driver, {
           partial,
           scheduled,
           status: aborted || lastStopReason === 'aborted' ? 'stopped' : lastStopReason === 'error' ? 'failed' : 'completed',
-        }, patches);
+        }, patches, scheduled ? '' : resultText);
       } catch {}
     }
     baseline = undefined;

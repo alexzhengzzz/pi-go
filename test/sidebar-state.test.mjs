@@ -67,11 +67,15 @@ test('repeated toggles coalesce into one save', () => {
 
 test('connecting restores the remembered expanded folders and filter state per computer', () => {
   const state = pageFixture({ version: 1, entries: [
-    { address: 'lan://desk', state: { expandedSpaces: ['/a', '/b'], sessionView: 'pinned' } }
+    { address: 'lan://desk', state: { expandedSpaces: ['/a', '/b'], sessionView: 'recent' } },
+    { address: 'lan://legacy', state: { expandedSpaces: ['/old'], sessionView: 'pinned' } }
   ]});
   state.applySidebar('lan://desk');
   assert.deepEqual(state.expandedSpaces, ['/a', '/b']);
-  assert.equal(state.sessionView, 'pinned');
+  assert.equal(state.sessionView, 'recent');
+  state.applySidebar('lan://legacy');
+  assert.deepEqual(state.expandedSpaces, ['/old']);
+  assert.equal(state.sessionView, 'all');
   state.applySidebar('usb://other');
   assert.deepEqual(state.expandedSpaces, []);
   assert.equal(state.sessionView, 'all');
@@ -124,7 +128,8 @@ test('the drawer connects the filter and virtualized rows to the session store',
   assert.doesNotMatch(sidebar, /电脑历史|searchComputerHistory/);
   assert.match(page, /this\.sessionView = view;/);
   assert.match(page, /this\.resetCatalog\(\);/);
-  assert.match(sidebar, /view === 'recent' \? '最近'/);
+  assert.match(sidebar, /this\.store\.sessionViewLabel\(view\)/);
+  assert.match(page, /view === 'recent' \? '最近'/);
   assert.match(sidebar, /this\.store\.expandedSpaces\.includes\(path\) \? 0 : -90/);
   assert.match(sidebar, /LazyForEach\(this\.store\.sidebarRows/);
 });

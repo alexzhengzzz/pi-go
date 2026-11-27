@@ -12,6 +12,7 @@ import { createInterface } from 'node:readline';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { localRequest } from '../bridge/local-ipc.mjs';
+import { messageText } from '../bridge/message-view.mjs';
 
 const agentWorkerScript = fileURLToPath(new URL('../agents/agent-worker.mjs', import.meta.url));
 const blockingMethods = new Set(['confirm', 'select', 'input', 'editor']);
@@ -145,10 +146,10 @@ export class RpcRuntime {
           }
           if (event.type === 'agent_settled') {
             const message = final ?? assistant;
-            const summary = message?.content?.filter(({ type }) => type === 'text').map(({ text }) => text).join('\n').trim().slice(0, 500);
+            const output = messageText(message?.content);
             const reason = !event.aborted && (message?.stopReason === 'stop' || message?.stopReason === 'length')
               ? undefined : 'model_failed';
-            complete({ summary, reason });
+            complete({ output, reason });
           }
         }
       };
@@ -320,9 +321,21 @@ export class AgentWorkerRuntime {
       const chat = await localRequest(socketPath, 'GET', '/chat', undefined, 3000).catch(() => undefined);
       if (chat?.status === 200 && chat.data?.session?.idle === true) {
         if (chat.data.promptError) return { reason: 'model_failed' };
-        const last = [...(chat.data.messages ?? [])].reverse().find((m) => m.role === 'assistant');
-        const summary = typeof last?.text === 'string' ? last.text.trim().slice(0, 500) : undefined;
-        return { summary };
+        const last = (chat.data.messages ?? []).findLast((message) => message.role === 'assistant');
+        if (!last?.textTruncated) return { output: last?.text };
+        let offset = 0;
+        const chunks = [];
+        while (offset !== undefined) {
+          const params = new URLSearchParams({ id: sessionId, message: last.id, offset: String(offset) });
+          const page = await localRequest(socketPath, 'GET', `/message-text?${params}`, undefined, 3000).catch(() => undefined);
+          if (page?.status !== 200 || typeof page.data?.text !== 'string' ||
+            (page.data.nextTextOffset !== undefined && (!page.data.text || page.data.nextTextOffset !== offset + page.data.text.length))) {
+            return { reason: 'result_unavailable' };
+          }
+          chunks.push(page.data.text);
+          offset = page.data.nextTextOffset;
+        }
+        return { output: chunks.join('') };
       }
     }
     return { reason: 'run_timeout' };

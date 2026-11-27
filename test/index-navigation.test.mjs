@@ -174,6 +174,55 @@ function fixture() {
   return state;
 }
 
+test('a session result reads from its source computer before the user chooses to open the session', async () => {
+  const computer = { address: 'http://127.0.0.1:18977', token: 'a'.repeat(64) };
+  const visits = [];
+  const read = [];
+  let finish;
+  const controller = new ScheduleController({
+    computers: () => [computer],
+    scheduleEndpoint: (item) => item,
+    dismissKeyboard() {},
+    inboxCleaning: () => false,
+    markRunRead: (id) => read.push(id),
+    request: async (path, input, endpoint) => {
+      assert.equal(input, undefined);
+      assert.equal(endpoint, computer);
+      assert.match(path, /^\/runs\/text\?session=other&run=result&offset=/);
+      if (path.endsWith('offset=0')) return { text: '首段', nextTextOffset: 2 };
+      assert.ok(path.endsWith('offset=2'));
+      return new Promise((resolve) => { finish = resolve; });
+    },
+    openNotifiedSession: async (...args) => {
+      visits.push(args);
+      return true;
+    },
+  });
+  const completed = {
+    address: computer.address, computer: 'Desktop', unread: true,
+    run: { id: 'result', sessionId: 'other', status: 'completed', hasFullResult: true, summary: '首段' },
+  };
+  controller.showSessionRunDetail(completed);
+  assert.equal(controller.state.schedulePage, 'session-run');
+  assert.deepEqual(read, ['result']);
+  assert.deepEqual(visits, []);
+  await new Promise((resolve) => setImmediate(resolve));
+  finish({ text: '末段' });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(controller.state.sessionRunResult, '首段末段');
+  await controller.openSessionRun();
+  assert.deepEqual(visits, [[computer, 'other', '', '']]);
+
+  controller.backFromSchedule();
+  controller.showSessionRunDetail({ ...completed, unread: false });
+  await new Promise((resolve) => setImmediate(resolve));
+  controller.backFromSchedule();
+  finish({ text: '迟到的结果' });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(controller.state.schedulePage, '');
+  assert.equal(controller.state.sessionRunResult, '');
+});
+
 test('inbox cleanup survives restart and polling while keeping pending and new runs', async () => {
   const computer = { address: 'https://desktop', token: 'token' };
   const events = [
@@ -338,6 +387,70 @@ test('watch reminders accept only recent events and persist delivery ids', async
   await state.runCenter.rememberWatchReminder('inbox:new');
   assert.deepEqual(state.runCenter.watchReminderDelivered, ['inbox:new']);
   assert.deepEqual(writes, [['watch_reminder_delivered', '["inbox:new"]']]);
+});
+
+test('removing schedule reports from the feed keeps source history across sync and restart', async () => {
+  const first = { address: 'https://first', source: 'first' };
+  const alternate = { address: 'https://alternate', source: 'first' };
+  const second = { address: 'https://second', source: 'second' };
+  const saved = new Map([['schedule_dismissed_first', JSON.stringify(['already-removed'])]]);
+  const history = new Map([
+    ['first', ['already-removed', 'shared-id', 'another-report', 'after-reading', 'kept']],
+    ['second', ['shared-id', 'other']],
+  ]);
+  const requests = [];
+  let widgetUpdates = 0;
+  const createController = () => new ScheduleController({
+    visible: () => true,
+    activeTab: () => 'inbox',
+    computers: () => [first, alternate, second],
+    settings: () => ({ getSync: (key, fallback) => saved.get(key) ?? fallback }),
+    saveSetting: async (key, value) => { saved.set(key, value); },
+    request: async (path, _input, computer) => {
+      requests.push(path);
+      assert.equal(path, '/schedules/sync');
+      return { source: computer.source, runs: history.get(computer.source).map((id) => ({ id, status: 'succeeded' })) };
+    },
+    scheduleEndpoint: (computer) => computer,
+    scheduleComputerName: (computer) => computer.source,
+    dismissKeyboard() {},
+    queueWatchReminder() {},
+    inboxCleaning: () => false,
+    runNoticesEnabled: () => false,
+    publishWidgets() { widgetUpdates += 1; },
+  });
+  const visibleKeys = (controller) => controller.state.scheduleMessages.filter((row) => !row.dismissed).map((row) => row.key);
+  const controller = createController();
+  await controller.syncScheduleComputer(first);
+  await controller.syncScheduleComputer(second);
+  const rows = controller.state.scheduleMessages;
+  const batch = rows.filter((row) => ['first:shared-id', 'first:another-report', 'second:other'].includes(row.key));
+  const syncCount = requests.length;
+  const widgetsBefore = widgetUpdates;
+  assert.equal(await controller.dismissScheduleMessages(batch), true);
+  assert.deepEqual(visibleKeys(controller), ['first:after-reading', 'first:kept', 'second:shared-id']);
+  assert.equal(widgetUpdates, widgetsBefore + 1);
+  assert.equal(controller.state.scheduleMessages.length, rows.length);
+
+  const read = controller.state.scheduleMessages.find((row) => row.key === 'first:after-reading');
+  controller.showScheduleDetail(read, true);
+  assert.ok(visibleKeys(controller).includes(read.key));
+  await controller.dismissScheduleDetail();
+  assert.equal(controller.state.schedulePage, '');
+  assert.equal(requests.length, syncCount);
+
+  const restarted = createController();
+  await restarted.syncScheduleComputer(alternate);
+  await restarted.syncScheduleComputer(second);
+  assert.deepEqual(visibleKeys(restarted), ['first:kept', 'second:shared-id']);
+  const dismissed = restarted.state.scheduleMessages.find((row) => row.key === read.key);
+  assert.equal(dismissed.dismissed, true);
+  assert.equal(dismissed.unread, false);
+  restarted.state.schedulePage = 'history';
+  restarted.showScheduleDetail(dismissed);
+  assert.equal(restarted.state.scheduleDetailFromInbox, false);
+  restarted.backFromSchedule();
+  assert.equal(restarted.state.schedulePage, 'history');
 });
 
 test('bulk history deletion removes successes and retains records the computer refused to delete', async () => {

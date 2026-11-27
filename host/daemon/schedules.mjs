@@ -1,12 +1,18 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { closeSync, fsyncSync, openSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { normalizeAgent } from '../agents/registry.mjs';
+import { messageTextSlice } from '../bridge/message-view.mjs';
 
 const minute = 60_000;
 const day = 24 * 60 * minute;
 const grace = 15_000;
 const historyLimit = 80;
 const runTimeout = 30 * minute;
+const resultPageLength = 128 * 1024;
+
+function runPreview({ output, ...run }) {
+  return output === undefined ? run : { ...run, hasFullResult: true };
+}
 
 function nextDaily(time, after) {
   const [hour, minuteOfHour] = time.split(':').map(Number);
@@ -127,7 +133,7 @@ export class ScheduleService {
         runs.some(({ id }) => !knownRuns.includes(id)),
       jobs: includeJobs ? jobs : undefined,
       activeRuns: this.state.runs.filter(({ cwd, status }) => paths.includes(cwd) && status === 'running'),
-      runs,
+      runs: runs.map(runPreview),
       timezone: Intl.DateTimeFormat().resolvedOptions().timeZone
     };
   }
@@ -136,6 +142,18 @@ export class ScheduleService {
     if (!this.registry.list().some(({ path }) => path === cwd)) return false;
     try { return realpathSync(cwd) === cwd; }
     catch { return false; }
+  }
+
+  result({ cwd, id, source, offset = 0 }) {
+    if (!this.workspaceAvailable(cwd)) return [403, { error: 'desktop_workspace_unshared' }];
+    const run = source === this.state.source && this.state.runs.find((row) => row.id === id && row.cwd === cwd);
+    if (!run || run.output === undefined) return [404, { error: 'schedule_result_missing' }];
+    const text = run.output;
+    if (!Number.isSafeInteger(offset) || offset < 0 || offset > text.length ||
+      (offset && /[\uDC00-\uDFFF]/.test(text.charAt(offset)))) return [400, { error: 'invalid_text_offset' }];
+    const chunk = messageTextSlice(text, offset, resultPageLength);
+    const end = offset + chunk.length;
+    return [200, { text: chunk, nextTextOffset: end < text.length ? end : undefined }];
   }
 
   update(input) {
@@ -156,7 +174,7 @@ export class ScheduleService {
     if (operation === 'run') {
       if (typeof input.requestId !== 'string' || !/^[\w-]{8,64}$/.test(input.requestId)) return [400, { error: 'invalid_schedule' }];
       const previous = this.state.runs.find(({ id }) => id === `${job.id}:manual:${input.requestId}`);
-      if (previous) return [200, { run: previous }];
+      if (previous) return [200, { run: runPreview(previous) }];
       if (this.running.size >= 3 || [...this.running.values()].includes(job.id)) return [409, { error: 'schedule_busy' }];
       return [200, { run: this.claim(job, now, now, undefined, input.requestId) }];
     }
@@ -224,9 +242,10 @@ export class ScheduleService {
     return run;
   }
 
-  finish(id, status, reason, summary) {
+  finish(id, status, reason, output) {
+    const summary = output ? messageTextSlice(output.trim(), 0, 500) : undefined;
     const runs = this.state.runs.map((row) => row.id === id && row.status === 'running'
-      ? { ...row, finishedAt: this.now(), status, reason, summary } : row);
+      ? { ...row, finishedAt: this.now(), status, reason, summary, output } : row);
     this.save({ ...this.state, runs });
   }
 
@@ -244,6 +263,6 @@ export class ScheduleService {
     } finally {
       if (runtime) await this.runtimes.stop(runtime);
     }
-    this.finish(run.id, result.reason ? 'failed' : 'succeeded', result.reason, result.summary);
+    this.finish(run.id, result.reason ? 'failed' : 'succeeded', result.reason, result.output?.trim() ? result.output : undefined);
   }
 }

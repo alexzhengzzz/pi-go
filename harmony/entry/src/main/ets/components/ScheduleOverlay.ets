@@ -2,7 +2,7 @@ import { PiGoPageStore } from '../model/PiGoPageStore';
 import { workspaceName } from '../model/SessionStore';
 import { immersiveSurface, themedCardSurface } from '../Immersive';
 import { RunMessage, scheduleTime, scheduleRunStatus, scheduleRunReason, isCurrentScheduleComputer } from '../ScheduledRuns';
-import { InboxRun } from '../RunResults';
+import { InboxRun, runStatus } from '../RunResults';
 import { headerSymbol } from './HeaderSymbol';
 import { runStatusMark } from './RunStatusMark';
 import { canvasFadeStops } from '../Appearance';
@@ -25,6 +25,7 @@ function headerAction() {
 @ComponentV2
 export struct ScheduleOverlay {
   @Param @Require store: PiGoPageStore;
+  @BuilderParam resultMarkdown: (text: string, cwd: string) => void;
   @Local private selectingRuns: boolean = false;
   @Local private selectedRunKeys: string[] = [];
 
@@ -88,7 +89,9 @@ export struct ScheduleOverlay {
         .enabled(!(this.store.scheduleController.state.scheduleSaving || this.store.runCenter.state.inboxCleaning))
         .onClick(() => { this.store.scheduleController.backFromSchedule(); })
       Text(this.store.scheduleController.state.schedulePage === 'alert' ? '提醒详情' :
-        this.store.scheduleController.state.schedulePage === 'detail' ? '运行详情' :
+        this.store.scheduleController.state.schedulePage === 'source_history' ? (this.store.scheduleController.state.scheduleAlertSource || '提醒源历史') :
+        (this.store.scheduleController.state.schedulePage === 'detail' ||
+          this.store.scheduleController.state.schedulePage === 'session-run') ? '运行详情' :
         this.store.scheduleController.state.schedulePage === 'editor' ?
           (this.store.scheduleController.state.scheduleEditing ? '编辑定时任务' : '新建定时任务') : '运行历史')
         .layoutWeight(1).fontSize(20).fontWeight(FontWeight.Bold).fontColor($r('app.color.pigo_text'))
@@ -111,6 +114,17 @@ export struct ScheduleOverlay {
                 .padding({ left: 16, right: 16, top: this.store.statusBarHeight + this.store.headerHeight() + 14, bottom: 24 })
             }.width('100%').height('100%').align(Alignment.TopStart).scrollBar(BarState.Off)
               .transition(subPageTransition())
+          } else if (this.store.scheduleController.state.schedulePage === 'session-run' &&
+            this.store.scheduleController.state.sessionRunDetail) {
+            Scroll() {
+              this.sessionRunDetail(this.store.scheduleController.state.sessionRunDetail)
+            }.width('100%').height('100%').align(Alignment.TopStart).scrollBar(BarState.Off)
+              .transition(subPageTransition())
+          } else if (this.store.scheduleController.state.schedulePage === 'source_history' &&
+            this.store.scheduleController.state.scheduleAlertSource) {
+            Column() {
+              this.alertSourceHistoryView(this.store.scheduleController.state.scheduleAlertSource)
+            }.width('100%').height('100%').transition(subPageTransition())
           } else if (this.store.scheduleController.state.schedulePage === 'history') {
             Column() {
               this.scheduleHistoryList()
@@ -161,16 +175,31 @@ export struct ScheduleOverlay {
           }.width('100%').padding({ left: 16, right: 16, bottom: this.store.bottomPad() + 8 })
         } else if (this.selectingRuns && this.store.scheduleController.state.schedulePage === 'history') {
           this.runSelectionActions()
-        } else if (this.store.scheduleController.state.schedulePage === 'detail' && this.store.scheduleController.state.scheduleDetail?.run.sessionId) {
+        } else if (this.store.scheduleController.state.schedulePage === 'session-run' &&
+          this.store.scheduleController.state.sessionRunDetail?.run.sessionId) {
+          Button('打开会话').chatAction().width('100%').height(46)
+            .enabled(!this.store.session.busy && !this.store.session.openingSession)
+            .onClick(() => { void this.store.scheduleController.openSessionRun(); })
+            .margin({ left: 16, right: 16, bottom: this.store.bottomPad() + 8 })
+        } else if (this.store.scheduleController.state.schedulePage === 'detail' && this.store.scheduleController.state.scheduleDetail &&
+          (this.store.scheduleController.state.scheduleDetailFromInbox || this.store.scheduleController.state.scheduleDetail.run.sessionId)) {
           Column({ space: 8 }) {
-            if (this.store.isPaired && !isCurrentScheduleComputer(this.store.computers, this.store.base, this.store.scheduleController.state.scheduleDetail)) {
-              Text(`当前会话在 ${this.store.computerTitle()}`).fontSize(13).fontColor($r('app.color.pigo_muted'))
+            if (this.store.scheduleController.state.scheduleDetail.run.sessionId) {
+              if (this.store.isPaired && !isCurrentScheduleComputer(this.store.computers, this.store.base, this.store.scheduleController.state.scheduleDetail)) {
+                Text(`当前会话在 ${this.store.computerTitle()}`).fontSize(13).fontColor($r('app.color.pigo_muted'))
+              }
+              Button(`在 ${this.store.scheduleController.state.scheduleDetail.computer} 打开会话`).chatAction().width('100%').height(46)
+                .backgroundColor(this.store.accent()).fontColor(this.store.accentForeground())
+                .enabled(!this.store.session.busy && !this.store.session.openingSession).onClick(() => {
+                  if (this.store.scheduleController.state.scheduleDetail) void this.store.openScheduledSession(this.store.scheduleController.state.scheduleDetail);
+                })
             }
-            Button(`在 ${this.store.scheduleController.state.scheduleDetail.computer} 打开会话`).chatAction().width('100%').height(46)
-              .backgroundColor(this.store.accent()).fontColor(this.store.accentForeground())
-              .enabled(!this.store.session.busy && !this.store.session.openingSession).onClick(() => {
-                if (this.store.scheduleController.state.scheduleDetail) void this.store.openScheduledSession(this.store.scheduleController.state.scheduleDetail);
-              })
+            if (this.store.scheduleController.state.scheduleDetailFromInbox) {
+              Button(this.store.scheduleController.state.scheduleDismissing ? '移除中…' : '从动态移除')
+                .chatAction().id('schedule-detail-dismiss').width('100%').height(44).fontColor($r('app.color.pigo_error'))
+                .enabled(!this.store.scheduleController.state.scheduleDismissing && !this.store.scheduleController.state.scheduleSaving)
+                .onClick(() => { void this.store.scheduleController.dismissScheduleDetail(); })
+            }
           }.width('100%').padding({ left: 16, right: 16, bottom: this.store.bottomPad() + 8 })
         }
       }.width('100%').height('100%')
@@ -238,6 +267,106 @@ export struct ScheduleOverlay {
         .width('100%').copyOption(CopyOptions.LocalDevice)
     }.width('100%').padding(16).borderRadius(16)
       .backgroundColor($r('app.color.pigo_panel')).border({ width: 1, color: $r('app.color.pigo_line') })
+  }
+
+  private agentDisplayLabel(agent: string): string {
+    if (!agent) return '自动（跟随当前）';
+    if (agent === 'pi') return 'Pi';
+    if (agent === 'codex') return 'Codex';
+    if (agent === 'agy') return 'AGY';
+    return agent.toUpperCase();
+  }
+
+  private sourceAgentMenu(source: string): MenuElement[] {
+    const items: MenuElement[] = [
+      { value: '自动（跟随当前）', action: () => { this.store.runCenter.setAlertSourceAgent(source, ''); } }
+    ];
+    const known = this.store.agents.length ? this.store.agents.map((item) => item.id) : ['pi', 'codex', 'agy'];
+    for (const id of known) {
+      items.push({
+        value: this.agentDisplayLabel(id),
+        action: () => { this.store.runCenter.setAlertSourceAgent(source, id); }
+      });
+    }
+    return items;
+  }
+
+  @Builder
+  alertSourceHistoryView(source: string) {
+    List({ space: 10 }) {
+      ListItem() {
+        Column({ space: 12 }) {
+          Row({ space: 12 }) {
+            Column({ space: 3 }) {
+              Text('静音此提醒源').fontSize(15).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
+              Text('静音后不在「动态」流展示，也不再触发手表和后台提醒').fontSize(12).fontColor($r('app.color.pigo_muted'))
+            }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+            Toggle({ type: ToggleType.Switch, isOn: this.store.runCenter.isAlertSourceMuted(source) })
+              .id(`source-mute-${source}`).selectedColor(this.store.accent())
+              .accessibilityText(`静音 ${source}`)
+              .onChange((muted: boolean) => { this.store.runCenter.setAlertSourceMuted(source, muted); })
+          }.width('100%')
+          Divider().color($r('app.color.pigo_line'))
+          Row({ space: 12 }) {
+            Column({ space: 3 }) {
+              Text('默认处理 Agent').fontSize(15).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
+              Text('点开提醒并拉起工作区会话时优先使用').fontSize(12).fontColor($r('app.color.pigo_muted'))
+            }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+            Button({ type: ButtonType.Normal }) {
+              Row({ space: 6 }) {
+                Text(this.agentDisplayLabel(this.store.runCenter.alertSourceDefaultAgent(source)))
+                  .fontSize(13).fontWeight(FontWeight.Medium).fontColor(this.store.accent())
+                SymbolGlyph($r('sys.symbol.chevron_down')).fontSize(12).fontColor([this.store.accent()])
+              }.padding({ left: 10, right: 10 })
+            }.id(`source-agent-${source}`).height(34).padding(0).borderRadius(10)
+              .backgroundColor(this.store.accentTint())
+              .bindMenu(this.sourceAgentMenu(source))
+          }.width('100%')
+        }.width('100%').padding(14).attributeModifier(themedCardSurface(this.store.darkMode, this.store.themeId))
+      }
+      ListItem() {
+        Text(`历史记录（${this.store.runCenter.alertsForSource(source).length}）`)
+          .fontSize(13).fontWeight(FontWeight.Bold).fontColor($r('app.color.pigo_muted'))
+          .padding({ left: 4, top: 6 })
+      }
+      if (!this.store.runCenter.alertsForSource(source).length) {
+        ListItem() {
+          Text('暂无来自该来源的历史提醒').fontSize(14).fontColor($r('app.color.pigo_muted'))
+            .padding({ left: 4, top: 6 })
+        }
+      }
+      ForEach(this.store.runCenter.alertsForSource(source), (row: InboxRun) => {
+        ListItem() {
+          Button({ type: ButtonType.Normal }) {
+            Row({ space: 12 }) {
+              runStatusMark(row.run.severity === 'error' ? 'failed' : 'alert', this.store.accent(), this.store.accentTint(), 34)
+              Column({ space: 4 }) {
+                Row({ space: 6 }) {
+                  Text(row.run.title || '工作区提醒').fontSize(15).fontWeight(row.unread ? FontWeight.Bold : FontWeight.Medium)
+                    .fontColor($r('app.color.pigo_text')).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).layoutWeight(1)
+                  if (row.unread) Blank().width(6).height(6).borderRadius(3).backgroundColor(this.store.accent())
+                }.width('100%')
+                if (row.run.body) {
+                  Text(row.run.body).fontSize(13).fontColor($r('app.color.pigo_text')).opacity(0.8)
+                    .maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis })
+                }
+                Text(`${row.computer} · ${scheduleTime(row.run.finishedAt)}`)
+                  .fontSize(11).fontColor($r('app.color.pigo_muted')).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+              }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+              SymbolGlyph($r('sys.symbol.chevron_right')).fontSize(13).fontColor([$r('app.color.pigo_muted')])
+            }.width('100%').padding(12)
+          }.id(`source-alert-${row.run.id}`).width('100%').padding(0)
+            .attributeModifier(themedCardSurface(this.store.darkMode, this.store.themeId))
+            .onClick(() => {
+              this.store.runCenter.markRunRead(row.run.id);
+              this.store.scheduleController.showAlertDetail(row);
+            })
+        }
+      }, (row: InboxRun) => `${row.run.id}:${row.unread}`)
+    }.layoutWeight(1).width('100%').scrollBar(BarState.Off).edgeEffect(EdgeEffect.Spring)
+      .contentStartOffset(this.store.statusBarHeight + this.store.headerHeight() + 14)
+      .contentEndOffset(this.store.bottomPad() + 16)
+      .padding({ left: 16, right: 16 })
   }
 
   @Builder
@@ -387,6 +516,37 @@ export struct ScheduleOverlay {
   }
 
   @Builder
+  sessionRunDetail(row: InboxRun) {
+    Column({ space: 12 }) {
+      Text(row.run.title || 'Agent 会话').fontSize(24).fontWeight(FontWeight.Bold).fontColor($r('app.color.pigo_text'))
+      Text(`${row.computer} · ${runStatus(row.run.status)} · ${scheduleTime(row.run.finishedAt)}`)
+        .fontSize(14).fontColor($r('app.color.pigo_muted'))
+      if (this.store.scheduleController.state.scheduleError) {
+        Text(this.store.scheduleController.state.scheduleError).fontSize(14).fontColor($r('app.color.pigo_error'))
+      }
+      if (this.store.scheduleController.state.sessionRunResult) {
+        this.resultMarkdown(this.store.scheduleController.state.sessionRunResult, row.address === this.store.base ? row.run.cwd : '')
+      } else {
+        if (row.run.summary) {
+          Text(row.run.summary).fontSize(15).lineHeight(23).fontColor($r('app.color.pigo_text'))
+            .width('100%').copyOption(CopyOptions.LocalDevice)
+        }
+        if (this.store.scheduleController.state.sessionRunResultError) {
+          Text(this.store.scheduleController.state.sessionRunResultError).fontSize(14).fontColor($r('app.color.pigo_error'))
+          Button('重新加载结果').chatAction().height(44)
+            .onClick(() => { void this.store.scheduleController.loadSessionRunResult(); })
+        } else if (row.run.hasFullResult) {
+          Text('正在加载运行结果…').fontSize(14).fontColor($r('app.color.pigo_muted'))
+        } else {
+          Text(row.run.summary ? '这里只显示结果摘要。' : '这条运行记录没有保存回复正文。')
+            .fontSize(14).fontColor($r('app.color.pigo_muted'))
+        }
+      }
+    }.width('100%').alignItems(HorizontalAlign.Start)
+      .padding({ left: 16, right: 16, top: this.store.statusBarHeight + this.store.headerHeight() + 14, bottom: 16 })
+  }
+
+  @Builder
   scheduledRunDetail(message: RunMessage) {
     Column({ space: 12 }) {
       Text(message.run.name).fontSize(24).fontWeight(FontWeight.Bold).fontColor($r('app.color.pigo_text'))
@@ -403,11 +563,17 @@ export struct ScheduleOverlay {
       if ((message.run.coalesced ?? 0) > 0) {
         Text(`此前还有 ${message.run.coalesced} 次到期，已合并处理。`).fontSize(14).fontColor($r('app.color.pigo_muted'))
       }
-      if (message.run.summary) {
-        Text('运行结果').fontSize(16).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
-        Text(message.run.summary).fontSize(15).copyOption(CopyOptions.LocalDevice).fontColor($r('app.color.pigo_text'))
-          .width('100%').padding(14).borderRadius(16).backgroundColor($r('app.color.pigo_panel'))
-          .border({ width: 1, color: $r('app.color.pigo_line') })
+      if (this.store.scheduleController.state.scheduleResult) {
+        this.resultMarkdown(this.store.scheduleController.state.scheduleResult,
+          isCurrentScheduleComputer(this.store.computers, this.store.base, message) ? message.run.cwd : '')
+      } else if (message.run.hasFullResult) {
+        if (this.store.scheduleController.state.scheduleResultError) {
+          Text(this.store.scheduleController.state.scheduleResultError).fontSize(14).fontColor($r('app.color.pigo_error'))
+          Button('重新加载结果').chatAction().height(44)
+            .onClick(() => { void this.store.scheduleController.loadScheduleResult(); })
+        } else {
+          Text('正在加载运行结果…').fontSize(14).fontColor($r('app.color.pigo_muted'))
+        }
       }
     }.width('100%').alignItems(HorizontalAlign.Start)
   }

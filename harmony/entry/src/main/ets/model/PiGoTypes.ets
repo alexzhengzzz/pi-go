@@ -62,7 +62,6 @@ export interface SessionState {
 export interface SessionRow {
   agent?: string;
   revision: number;
-  pinned?: boolean;
   archived?: boolean;
   nativeArchived?: boolean;
   lastVisited?: string;
@@ -294,6 +293,8 @@ export interface Payload {
   token?: string;
   includeJobs?: boolean;
   knownRuns?: string[];
+  source?: string;
+  offset?: number;
   operation?: string;
   scheduleVersion?: number;
   prompt?: string;
@@ -308,7 +309,6 @@ export interface Payload {
   cursor?: number;
   version?: string;
   revision?: number;
-  pinned?: boolean;
   archived?: boolean;
   name?: string;
   provider?: string;

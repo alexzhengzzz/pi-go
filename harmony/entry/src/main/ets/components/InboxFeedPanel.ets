@@ -78,6 +78,11 @@ export struct InboxFeedPanel {
     this.refreshTimer = -1;
   }
 
+  @Monitor('store.inboxSelecting')
+  private clearRunSelection(): void {
+    this.selectedRunKeys = [];
+  }
+
   private waitingRuns(): InboxRun[] {
     return this.store.runCenter.displayedInboxRuns().filter((row: InboxRun): boolean => row.run.status === 'waiting');
   }
@@ -144,7 +149,9 @@ export struct InboxFeedPanel {
   private selectableRunKeys(): string[] {
     const keys: string[] = [];
     for (const entry of this.filteredFeed()) {
-      if (entry.inboxRun && (entry.kind === 'alert' || entry.kind === 'run')) {
+      if (entry.scheduleMessage) {
+        keys.push(entry.key);
+      } else if (entry.inboxRun) {
         keys.push(entry.inboxRun.run.id);
       }
     }
@@ -158,6 +165,11 @@ export struct InboxFeedPanel {
   private allRunsSelected(): boolean {
     const keys = this.selectableRunKeys();
     return keys.length > 0 && keys.every((key: string): boolean => this.selectedRunKeys.includes(key));
+  }
+
+  private deletingRuns(): boolean {
+    return this.store.scheduleController.state.scheduleSaving || this.store.scheduleController.state.scheduleDismissing ||
+      this.store.runCenter.state.inboxCleaning;
   }
 
   private resetRunSelection(): void {
@@ -180,8 +192,18 @@ export struct InboxFeedPanel {
 
   private async deleteSelectedRuns(): Promise<void> {
     const keys = this.selectedKeys();
-    if (!keys.length || (this.store.scheduleController.state.scheduleSaving || this.store.runCenter.state.inboxCleaning)) return;
-    if (await this.store.runCenter.dismissInboxRuns(keys)) this.resetRunSelection();
+    if (!keys.length || this.deletingRuns()) return;
+    const runs: string[] = [];
+    const schedules: RunMessage[] = [];
+    for (const entry of this.filteredFeed()) {
+      if (entry.scheduleMessage && keys.includes(entry.key)) schedules.push(entry.scheduleMessage);
+      else if (entry.inboxRun && keys.includes(entry.inboxRun.run.id)) runs.push(entry.inboxRun.run.id);
+    }
+    const deletions: Promise<boolean>[] = [];
+    if (schedules.length) deletions.push(this.store.scheduleController.dismissScheduleMessages(schedules));
+    if (runs.length) deletions.push(this.store.runCenter.dismissInboxRuns(runs));
+    const results = await Promise.all(deletions);
+    if (results.every((removed: boolean): boolean => removed)) this.resetRunSelection();
   }
 
   private triggerRefresh(): void {
@@ -353,15 +375,15 @@ export struct InboxFeedPanel {
   @Builder
   runSelectionActions() {
     Row({ space: 8 }) {
-      Button('取消').feedAction().height(40).enabled(!(this.store.scheduleController.state.scheduleSaving || this.store.runCenter.state.inboxCleaning))
+      Button('取消').feedAction().height(40).enabled(!this.deletingRuns())
         .onClick(() => { this.resetRunSelection(); })
       Button(this.allRunsSelected() ? '取消全选' : '全选').feedAction().height(40)
-        .enabled(!(this.store.scheduleController.state.scheduleSaving || this.store.runCenter.state.inboxCleaning) && this.selectableRunKeys().length > 0)
+        .enabled(!this.deletingRuns() && this.selectableRunKeys().length > 0)
         .onClick(() => { this.selectedRunKeys = this.allRunsSelected() ? [] : this.selectableRunKeys(); })
       Blank()
-      Button((this.store.scheduleController.state.scheduleSaving || this.store.runCenter.state.inboxCleaning) ? '删除中…' : `删除（${this.selectedKeys().length}）`).feedAction()
+      Button(this.deletingRuns() ? '处理中…' : `${this.activeFilter === 'schedule' ? '从动态移除' : '删除'}（${this.selectedKeys().length}）`).feedAction()
         .height(40).fontColor($r('app.color.pigo_error'))
-        .enabled(!(this.store.scheduleController.state.scheduleSaving || this.store.runCenter.state.inboxCleaning) && this.selectedKeys().length > 0)
+        .enabled(!this.deletingRuns() && this.selectedKeys().length > 0)
         .onClick(() => { void this.deleteSelectedRuns(); })
     }.width('100%').padding({ left: 12, right: 12, top: 8, bottom: 8 })
       .margin({ left: 16, right: 16, bottom: this.store.bottomContentClearance() + 2 })
@@ -434,7 +456,7 @@ export struct InboxFeedPanel {
     }.id(`inbox-alert-${row.run.id}`).width('100%').padding(0)
       .attributeModifier(themedCardSurface(this.store.darkMode, this.store.themeId))
       .accessibilitySelected(this.store.inboxSelecting && this.selectedRunKeys.includes(row.run.id))
-      .enabled(this.store.inboxSelecting ? !(this.store.scheduleController.state.scheduleSaving || this.store.runCenter.state.inboxCleaning) : true)
+      .enabled(!this.store.inboxSelecting || !this.deletingRuns())
       .onClick(() => {
         if (this.store.inboxSelecting) this.toggleRunSelection(row.run.id);
         else {
@@ -459,6 +481,10 @@ export struct InboxFeedPanel {
             Text(relativeFeedTime(row.run.finishedAt)).fontSize(11).fontColor($r('app.color.pigo_muted'))
             if (row.unread) Blank().width(6).height(6).borderRadius(3).backgroundColor(this.store.accent())
           }.width('100%').alignItems(VerticalAlign.Center)
+          if (row.run.summary) {
+            Text(row.run.summary).fontSize(13).lineHeight(19).fontColor($r('app.color.pigo_text')).opacity(0.8)
+              .maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis })
+          }
           Row({ space: 6 }) {
             Text('会话').fontSize(11).fontWeight(FontWeight.Medium)
               .fontColor($r('app.color.pigo_muted')).backgroundColor($r('app.color.pigo_control'))
@@ -473,16 +499,21 @@ export struct InboxFeedPanel {
               .fontColor(runStatusInk(row.run.status, this.store.accent()))
               .backgroundColor(row.run.status === 'waiting' ? $r('app.color.pigo_warning_panel') : $r('app.color.pigo_control'))
               .padding({ left: 8, right: 8, top: 2, bottom: 2 }).borderRadius(8)
+            if (!this.store.inboxSelecting && row.run.status !== 'waiting') {
+              SymbolGlyph($r('sys.symbol.chevron_right')).fontSize(12).fontColor([$r('app.color.pigo_muted')])
+            }
           }.width('100%').alignItems(VerticalAlign.Center)
         }.alignItems(HorizontalAlign.Start).layoutWeight(1)
       }.width('100%').padding(13)
     }.id(`inbox-run-${row.run.id}`).width('100%').padding(0)
       .attributeModifier(themedCardSurface(this.store.darkMode, this.store.themeId))
       .accessibilitySelected(this.store.inboxSelecting && row.run.status !== 'waiting' && this.selectedRunKeys.includes(row.run.id))
-      .enabled(this.store.inboxSelecting && row.run.status !== 'waiting' ? !(this.store.scheduleController.state.scheduleSaving || this.store.runCenter.state.inboxCleaning) : !this.store.session.busy && !this.store.session.openingSession)
+      .enabled(row.run.status === 'waiting' ? !this.store.session.busy && !this.store.session.openingSession :
+        !this.store.inboxSelecting || !this.deletingRuns())
       .onClick(() => {
-        if (this.store.inboxSelecting && row.run.status !== 'waiting') this.toggleRunSelection(row.run.id);
-        else void this.store.runCenter.openInboxRun(row);
+        if (row.run.status === 'waiting') void this.store.runCenter.openInboxRun(row);
+        else if (this.store.inboxSelecting) this.toggleRunSelection(row.run.id);
+        else this.store.scheduleController.showSessionRunDetail(row);
       })
   }
 
@@ -490,6 +521,9 @@ export struct InboxFeedPanel {
   scheduledMessageRow(message: RunMessage) {
     Button({ type: ButtonType.Normal }) {
       Row({ space: 12 }) {
+        if (this.store.inboxSelecting) {
+          this.runSelectionMark(`schedule:${message.key}`)
+        }
         Stack() {
           SymbolGlyph(this.scheduleStatusSymbol(message.run.status)).fontSize(19)
             .fontColor([this.scheduleStatusColor(message.run.status)])
@@ -518,14 +552,19 @@ export struct InboxFeedPanel {
             }
             Text(scheduleRunStatus(message.run.status)).fontSize(11).fontWeight(FontWeight.Medium)
               .fontColor(this.scheduleStatusColor(message.run.status))
-            SymbolGlyph($r('sys.symbol.chevron_right')).fontSize(12).fontColor([$r('app.color.pigo_muted')])
+            if (!this.store.inboxSelecting) {
+              SymbolGlyph($r('sys.symbol.chevron_right')).fontSize(12).fontColor([$r('app.color.pigo_muted')])
+            }
           }.width('100%').alignItems(VerticalAlign.Center)
         }.layoutWeight(1).alignItems(HorizontalAlign.Start)
       }.width('100%').padding(13)
     }.id(`schedule-message-${message.run.id}`).width('100%').padding(0)
       .attributeModifier(themedCardSurface(this.store.darkMode, this.store.themeId))
+      .accessibilitySelected(this.store.inboxSelecting && this.selectedRunKeys.includes(`schedule:${message.key}`))
+      .enabled(!this.store.inboxSelecting || !this.deletingRuns())
       .onClick(() => {
-        this.store.scheduleController.showScheduleDetail(message);
+        if (this.store.inboxSelecting) this.toggleRunSelection(`schedule:${message.key}`);
+        else this.store.scheduleController.showScheduleDetail(message, true);
       })
   }
 
@@ -539,10 +578,11 @@ export struct InboxFeedPanel {
 
   @Builder
   scheduleInboxDelete(message: RunMessage) {
-    Button('删除').id(`schedule-dismiss-${message.run.id}`).width(72).height('100%').padding(0)
+    Button('移除').id(`schedule-dismiss-${message.run.id}`).width(72).height('100%').padding(0)
       .fontColor(Color.White).backgroundColor($r('app.color.pigo_error')).borderRadius(14)
-      .accessibilityText(`删除动态消息 ${message.run.name}`)
-      .onClick(() => { this.store.scheduleController.dismissScheduleMessage(message); })
+      .accessibilityText(`从动态移除 ${message.run.name}`)
+      .enabled(!this.deletingRuns())
+      .onClick(() => { void this.store.scheduleController.dismissScheduleMessages([message]); })
   }
 
   private scheduleStatusSymbol(status: string): Resource {

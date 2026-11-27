@@ -7,6 +7,7 @@ import { isAbsolute, join, relative, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { previewFile } from './workspace-files.mjs';
 import { stateDirectory } from './session-metadata.mjs';
+import { messageTextSlice } from './message-view.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -14,6 +15,8 @@ const fileLimit = 1200;
 const textBudget = 8 * 1024 * 1024;
 const patchLimit = 24 * 1024;
 const recentLimit = 120;
+const resultPageLength = 128 * 1024;
+const resultRecordLimit = 4 * 1024 * 1024;
 const ignored = new Set(['.git', '.pi-go', 'node_modules', 'oh_modules', '.DS_Store']);
 const artifactPattern = /\.(png|jpe?g|webp|gif|svg|pdf|md|html|csv|xlsx?|docx?|pptx?|zip|log)$/i;
 
@@ -287,13 +290,17 @@ function records(directory) {
   return readdirSync(directory).filter((name) => /^\d{13}-[a-f0-9]{64}\.json$/.test(name)).sort().reverse();
 }
 
-export function saveRunResult(profile, event, patches = {}) {
+export function saveRunResult(profile, event, patches = {}, text = '') {
   const directory = storeDirectory();
   const stem = `${String(event.finishedAt).padStart(13, '0')}-${key(profile, event.id)}`;
   if (Object.keys(patches).length) writeRecord(join(directory, stem + '.patches'), patches);
-  writeRecord(join(directory, stem + '.json'), { profile, ...event });
+  const trimmed = text.trim();
+  const summary = trimmed ? messageTextSlice(trimmed, 0, 500) : undefined;
+  const hasFullResult = Boolean(summary && Buffer.byteLength(JSON.stringify(text)) <= resultRecordLimit);
+  if (hasFullResult) writeRecord(join(directory, stem + '.text'), text);
+  writeRecord(join(directory, stem + '.json'), { profile, ...event, summary, hasFullResult: hasFullResult || undefined });
   for (const name of records(directory).slice(recentLimit)) {
-    for (const path of [name, name.replace(/\.json$/, '.patches')]) {
+    for (const path of [name, name.replace(/\.json$/, '.patches'), name.replace(/\.json$/, '.text')]) {
       try { unlinkSync(join(directory, path)); } catch {}
     }
   }
@@ -315,4 +322,16 @@ export function readRunPatch(profile, event, path) {
   const stem = `${String(event.finishedAt).padStart(13, '0')}-${key(profile, event.id)}`;
   const patches = readRecord(join(storeDirectory(), stem + '.patches'), 600 * 1024);
   return patches && Object.hasOwn(patches, path) && typeof patches[path] === 'string' ? patches[path] : undefined;
+}
+
+export function readRunTextPage(profile, event, rawOffset) {
+  const stem = `${String(event.finishedAt).padStart(13, '0')}-${key(profile, event.id)}`;
+  const text = event.hasFullResult && readRecord(join(storeDirectory(), stem + '.text'), resultRecordLimit);
+  if (typeof text !== 'string') return [404, { error: 'run_text_not_found' }];
+  const offset = Number(rawOffset);
+  if (!/^\d+$/.test(rawOffset) || !Number.isSafeInteger(offset) || offset > text.length ||
+    (offset && /[\uDC00-\uDFFF]/.test(text.charAt(offset)))) return [400, { error: 'invalid_text_offset' }];
+  const chunk = messageTextSlice(text, offset, resultPageLength);
+  const end = offset + chunk.length;
+  return [200, { text: chunk, nextTextOffset: end < text.length ? end : undefined }];
 }

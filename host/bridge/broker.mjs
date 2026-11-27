@@ -14,7 +14,7 @@ import { SessionMetadata, stateDirectory } from './session-metadata.mjs';
 import { readColdSnapshot } from './session-snapshot.mjs';
 import { computerSessions, findComputerSession } from './computer-sessions.mjs';
 import { agentProviders } from '../agents/registry.mjs';
-import { readRuns, readRunPatch } from './run-results.mjs';
+import { readRuns, readRunPatch, readRunTextPage } from './run-results.mjs';
 import { RunPush } from './run-push.mjs';
 import { maxFileBytes, maxHistoryImageBase64, maxImageBytes, maxPromptBody, safeAttachmentName } from './attachments.mjs';
 import { body, createRemoteLimiter, digest, error, matches, rawBody, reply, workerPath as buildWorkerPath } from './broker-http.mjs';
@@ -293,8 +293,13 @@ async function scheduleRequest(request, response, path) {
     if (typeof input.cwd !== 'string' || !context.granted.includes(input.cwd)) {
       return error(response, 403, 'desktop_workspace_unshared');
     }
-    const { cwd, operation, id, name, prompt, kind, time, at, interval, catchUp, scheduleVersion, requestId, agent } = input;
-    payload = { cwd, operation, id, name, prompt, kind, time, at, interval, catchUp, version: scheduleVersion, requestId, ...(agent !== undefined ? { agent } : {}) };
+    if (path === '/schedules/result') {
+      const { cwd, id, source, offset } = input;
+      payload = { cwd, id, source, offset };
+    } else {
+      const { cwd, operation, id, name, prompt, kind, time, at, interval, catchUp, scheduleVersion, requestId, agent } = input;
+      payload = { cwd, operation, id, name, prompt, kind, time, at, interval, catchUp, version: scheduleVersion, requestId, ...(agent !== undefined ? { agent } : {}) };
+    }
     if (Buffer.byteLength(JSON.stringify(payload)) > 7900) return error(response, 400, 'invalid_schedule');
   }
   const result = await localRequest(context.socket, 'POST', path, payload).catch(() => undefined);
@@ -573,7 +578,7 @@ const publicHandler = async (request, response) => {
       const [status, result] = runPush.register(bearer.toString('hex'), input);
       return reply(response, status, result);
     }
-    if (route === 'GET /runs/inbox' || route === 'GET /runs/results' || route === 'GET /runs/diff') {
+    if (route === 'GET /runs/inbox' || route === 'GET /runs/results' || route === 'GET /runs/diff' || route === 'GET /runs/text') {
       const params = new URL(request.url ?? '/', 'http://pi-go').searchParams;
       const sessionId = params.get('session');
       if (route !== 'GET /runs/inbox' && (!sessionId || !/^[\w.-]{1,200}$/.test(sessionId))) {
@@ -588,6 +593,12 @@ const publicHandler = async (request, response) => {
         if (!run || !run.files?.some(({ path, diff }) => path === file && diff)) return error(response, 404, 'diff_not_found');
         const text = readRunPatch(pairingProfile, run, file);
         return text === undefined ? error(response, 404, 'diff_not_found') : reply(response, 200, { text });
+      }
+      if (route === 'GET /runs/text') {
+        const run = rows.find(({ id }) => id === params.get('run'));
+        if (!run) return error(response, 404, 'run_text_not_found');
+        const [status, result] = readRunTextPage(pairingProfile, run, params.get('offset') ?? '0');
+        return reply(response, status, result);
       }
       if (route === 'GET /runs/inbox') {
         const alerts = await daemonAlerts(context);
@@ -610,7 +621,7 @@ const publicHandler = async (request, response) => {
       if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
       return result ? reply(response, result.status, result.data) : error(response, 409, 'desktop_handoff_unconfirmed');
     }
-    if (route === 'POST /schedules/sync' || route === 'POST /schedules/update') {
+    if (route === 'POST /schedules/sync' || route === 'POST /schedules/update' || route === 'POST /schedules/result') {
       return await scheduleRequest(request, response, path);
     }
     if (!['GET /session', 'GET /session/snapshot', 'GET /chat', 'GET /history', 'GET /tool-detail', 'GET /message-image', 'GET /message-text', 'GET /sessions', 'GET /sessions/status', 'GET /models', 'GET /commands', 'GET /events', 'GET /files/download', 'POST /open', 'POST /session/open', 'POST /new', 'POST /fork', 'POST /regenerate', 'POST /prompt', 'POST /upload', 'POST /abort', 'POST /answer', 'POST /receipt', 'POST /model', 'POST /rename', 'POST /session-meta', 'POST /create-workspace', 'POST /close-workspace', 'POST /files/list', 'POST /files/read', 'POST /files/save'].includes(route)) return error(response, 404, 'not_found');
@@ -831,9 +842,8 @@ const publicHandler = async (request, response) => {
       if (scope === 'workspace' && view === 'all') {
         visible.sort((left, right) => (right.modified ?? right.lastVisited ?? '').localeCompare(left.modified ?? left.lastVisited ?? '') ||
           left.id.localeCompare(right.id));
-      } else {
-        visible.sort((left, right) => view === 'recent' ? (right.lastVisited ?? '').localeCompare(left.lastVisited ?? '') :
-          Number(right.pinned) - Number(left.pinned));
+      } else if (view === 'recent') {
+        visible.sort((left, right) => (right.lastVisited ?? '').localeCompare(left.lastVisited ?? ''));
       }
       const filtered = query ? visible.filter((row) =>
         `${row.name ?? ''} ${row.id} ${row.cwd ?? ''}`.toLowerCase().includes(query)) : visible;

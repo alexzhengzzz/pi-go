@@ -26,6 +26,8 @@ export interface RunEvent {
   cwd: string;
   title?: string;
   body?: string;
+  summary?: string;
+  hasFullResult?: boolean;
   source?: string;
   severity?: string;
   suggestedPrompt?: string;

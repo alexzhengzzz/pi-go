@@ -51,7 +51,7 @@ struct RootTabBarItem {
   @Computed
   get badgeCount(): number {
     if (this.tab === 'inbox') return this.store.inboxBadgeCount();
-    return this.tab === 'pending' ? this.store.runningTaskCount() : 0;
+    return 0;
   }
 
   build() {
@@ -69,7 +69,7 @@ struct RootTabBarItem {
             .padding({ left: 2, right: 2 }).backgroundColor(this.store.accent()).borderRadius(7)
         }
       }.width(48).height(25)
-      Text(this.tab === 'inbox' ? '动态' : this.tab === 'tasks' ? '会话' : this.tab === 'pending' ? '任务' : '我的')
+      Text(this.tab === 'inbox' ? '动态' : this.tab === 'tasks' ? '会话' : this.tab === 'pending' ? '自动化' : '我的')
         .fontSize(11).fontWeight(this.store.activeTab === this.tab ? FontWeight.Bold : FontWeight.Medium)
         .fontColor(this.store.activeTab === this.tab ? this.store.accent() : $r('app.color.pigo_muted'))
     }.id(`tab-${this.tab}`).width('100%').height('100%').justifyContent(FlexAlign.Center)
@@ -174,7 +174,8 @@ struct Index {
           .onClick(() => { this.store.setDrawer(true); })
       }
       Text(this.store.minePage === 'theme' ? '系统主题' : this.store.minePage === 'computers' ?
-        (this.store.addingComputer ? (this.store.pairingComputerId ? '添加连接' : '添加电脑') : '电脑管理') : '我的')
+        (this.store.addingComputer ? (this.store.pairingComputerId ? '添加连接' : '添加电脑') : '电脑管理') :
+        this.store.minePage === 'notifications' ? '通知' : '我的')
         .fontSize(this.store.minePage ? 20 : 26).fontWeight(FontWeight.Bold).fontColor($r('app.color.pigo_text')).layoutWeight(1)
     }.width('100%').height(this.store.headerHeight())
   }
@@ -211,6 +212,33 @@ struct Index {
   @Builder
   inboxView() {
     InboxFeedPanel({ store: this.store })
+  }
+
+  @Builder
+  automationHeader() {
+    Row({ space: 12 }) {
+      if (this.store.isPaired && !this.store.dockedSessions()) {
+        Button({ type: ButtonType.Normal }) {
+          headerSymbol($r('sys.symbol.line_2_horizontal'), $r('app.color.pigo_text'), 20)
+        }.id('automation-history').headerAction().attributeModifier(immersiveSurface(this.store.darkMode))
+          .accessibilityText('打开会话抽屉').enabled(!this.store.session.busy)
+          .onClick(() => { this.store.setDrawer(true); })
+      }
+      Column({ space: 2 }) {
+        Text('自动化').fontSize(24).fontWeight(FontWeight.Bold).fontColor($r('app.color.pigo_text'))
+        Text('定时任务与本机提醒源').fontSize(12).fontColor($r('app.color.pigo_muted')).maxLines(1)
+      }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+      if (this.store.isPaired) {
+        Button({ type: ButtonType.Normal }) {
+          headerSymbol($r('sys.symbol.arrow_clockwise'), $r('app.color.pigo_text'), 19)
+        }.id('schedule-refresh').headerAction().attributeModifier(immersiveSurface(this.store.darkMode))
+          .accessibilityText('刷新自动化').enabled(!this.store.scheduleController.state.scheduleSaving)
+          .onClick(() => {
+            void this.store.scheduleController.loadScheduleJobs();
+            this.store.runCenter.queueRunSync(0);
+          })
+      }
+    }.width('100%').height(this.store.headerHeight())
   }
 
   @Builder
@@ -335,6 +363,8 @@ struct Index {
         this.mineHeader()
       } else if (this.store.activeTab === 'inbox') {
         this.inboxHeader()
+      } else if (this.store.activeTab === 'pending') {
+        this.automationHeader()
       } else {
         this.chatHeader()
       }
@@ -550,8 +580,7 @@ struct Index {
               narrow: false,
               busy: this.store.session.busy,
               retry: (): void => { this.store.offlineDismissed = false; this.store.streamSync.schedule(0); },
-              dismiss: (): void => { this.store.offlineDismissed = true; },
-              openComputers: (): void => this.store.openComputers()
+              dismiss: (): void => { this.store.offlineDismissed = true; }
             })
           }
           if (this.store.session.interaction) {
@@ -624,10 +653,6 @@ struct Index {
         share: (): void => { void this.store.shareController.shareCurrentSession('session-share'); },
         thinkingLevelLabel: (level: string): string => this.store.toolCmd.thinkingLevelLabel(level)
       })
-      } else if (this.store.activeTab === 'pending') {
-        Column() {
-          this.taskView()
-        }.width('100%').height('100%').transition(modalFadeTransition())
       } else if (this.store.session.noSession && !this.store.split.state.splitOpen) {
         Column() {
           this.welcome()
@@ -702,35 +727,7 @@ struct Index {
 
   @Builder
   taskView() {
-    TaskPanel({
-      darkMode: this.store.darkMode,
-      topClearance: this.store.topContentClearance(),
-      bottomClearance: this.store.bottomContentClearance(),
-      runningRows: this.store.taskPanelRows(),
-      scheduleRuns: this.store.standaloneScheduleRuns(),
-      currentId: this.store.session.currentId,
-      busy: this.store.session.busy,
-      openingSession: this.store.session.openingSession,
-      accentTint: this.store.accentTint(),
-      openRunningTask: (id: string): void => {
-        if (id !== this.store.session.currentId) void this.store.sessionActions.requestAction('/open', { id: id });
-        this.store.activeTab = 'tasks';
-      },
-      editSchedule: (job?: ScheduleJob): void => this.store.scheduleController.editSchedule(job),
-      loadScheduleJobs: (): Promise<void> => this.store.scheduleController.loadScheduleJobs(),
-      projects: this.store.projects,
-      reachable: this.store.session.reachable,
-      scheduleError: this.store.scheduleController.state.scheduleError!!,
-      scheduleJobMenu: (job: ScheduleJob): MenuElement[] => this.store.scheduleJobMenu(job),
-      scheduleJobs: this.store.scheduleController.state.scheduleJobs,
-      scheduleListError: this.store.scheduleController.state.scheduleListError,
-      scheduleLoaded: this.store.scheduleController.state.scheduleLoaded,
-      schedulePage: this.store.scheduleController.state.schedulePage!!,
-      scheduleSaving: this.store.scheduleController.state.scheduleSaving,
-      workspaces: this.store.workspaces,
-      accent: this.store.accent(),
-      accentForeground: this.store.accentForeground()
-    })
+    TaskPanel({ store: this.store })
   }
 
   @Builder
@@ -847,7 +844,12 @@ struct Index {
 
   @Builder
   scheduleOverlay() {
-    ScheduleOverlay({ store: this.store })
+    ScheduleOverlay({
+      store: this.store,
+      resultMarkdown: (text: string, cwd: string): void => {
+        this.richChatText(text, cwd)
+      }
+    })
   }
 
   build() {
@@ -909,6 +911,7 @@ struct Index {
       if (this.store.voiceComposer.state.recording || this.store.voiceComposer.state.voicePreparing || (this.store.voiceComposer.state.voiceFinishing && !this.store.voiceComposer.state.voiceCancelling) || this.store.voiceComposer.state.voiceHint) {
         VoiceFeedbackOverlay({ state: this.store.voiceComposer.state, darkMode: this.store.darkMode })
       }
+      if (this.store.scheduleController.state.schedulePage) this.scheduleOverlay()
       if (this.store.fileController.state.editingPath) {
         Stack({ alignContent: Alignment.Top }) {
           WorkspaceFileEditor({
@@ -1031,14 +1034,13 @@ struct Index {
           ScheduledRunBanner({
             message: this.store.scheduleController.state.scheduleBanner,
             darkMode: this.store.darkMode,
-            open: (message: RunMessage): void => this.store.scheduleController.showScheduleDetail(message),
+            open: (message: RunMessage): void => this.store.scheduleController.showScheduleDetail(message, true),
             dismiss: (): void => { this.store.scheduleController.state.scheduleBanner = undefined; }
           })
         }.width('100%').justifyContent(FlexAlign.Center)
           .margin({ top: this.store.statusBarHeight + this.store.headerHeight() + 10 }).hitTestBehavior(HitTestMode.Transparent)
           .transition(bannerTransition())
       }
-      if (this.store.scheduleController.state.schedulePage) this.scheduleOverlay()
       if (this.store.runCenter.state.reviewedRun) {
         RunResultView({
           result: this.store.runCenter.state.reviewedRun, file: this.store.runCenter.state.reviewedFile, patch: this.store.runCenter.state.reviewPatch,

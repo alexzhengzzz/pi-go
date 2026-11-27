@@ -19,7 +19,7 @@ test('wake-up coalesces missed intervals and keeps the original cadence', async 
     runtimes: {
       start: () => ({
         awaitReady: async () => ({ sessionId: 'fixture' }),
-        runScheduledPrompt: async (prompt) => { prompts.push(prompt); return { summary: 'Done' }; }
+        runScheduledPrompt: async (prompt) => { prompts.push(prompt); return { output: 'Done' }; }
       }),
       stop: async () => {}
     },
@@ -33,6 +33,7 @@ test('wake-up coalesces missed intervals and keeps the original cadence', async 
   const { jobs, runs } = service.snapshot([cwd], true, []);
   const catchUp = runs.find(({ jobId }) => jobId === repeating.job.id);
   assert.equal(catchUp.status, 'succeeded');
+  assert.equal(catchUp.summary, 'Done');
   assert.equal(catchUp.scheduledAt, initial + 90 * minute);
   assert.equal(catchUp.coalesced, 2);
   assert.equal(jobs.find(({ id }) => id === repeating.job.id).nextAt, initial + 120 * minute);
@@ -101,12 +102,29 @@ test('delete-run removes finished runs even after job deletion and rejects runni
   assert.deepEqual(service.update({ operation: 'delete-run', cwd, id: activeRun.id }), [409, { error: 'schedule_busy' }]);
   assert.deepEqual(service.update({ operation: 'delete-run', cwd, id: 'bad id' }), [400, { error: 'invalid_schedule' }]);
 
-  resolveRun({ summary: 'Done' });
+  const markdown = '# Digest\n\n' + 'x'.repeat(128 * 1024 - 11) + '🚀\n\n```text\nDone\n```\n';
+  resolveRun({ output: markdown });
   await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(service.snapshot([cwd], false, []).runs.length, 1);
+  const reloadedResult = new ScheduleService(file, { registry: { list: () => [{ path: cwd }] }, runtimes: {}, now: () => now });
+  const { source, runs: [completed] } = reloadedResult.snapshot([cwd], false, []);
+  assert.equal(completed.summary, markdown.slice(0, 500));
+  assert.equal(completed.hasFullResult, true);
+  assert.equal(completed.output, undefined);
+  const input = { cwd, id: activeRun.id, source };
+  const [status, first] = reloadedResult.result(input);
+  assert.equal(status, 200);
+  assert.equal(first.nextTextOffset, 128 * 1024 - 1);
+  const [lastStatus, last] = reloadedResult.result({ ...input, offset: first.nextTextOffset });
+  assert.equal(lastStatus, 200);
+  assert.equal(last.nextTextOffset, undefined);
+  assert.equal(first.text + last.text, markdown);
+  assert.equal(reloadedResult.result({ ...input, offset: first.nextTextOffset + 1 })[0], 400);
+  assert.equal(reloadedResult.result({ ...input, source: 'other' })[0], 404);
+  assert.equal(reloadedResult.result({ ...input, cwd: tmpdir() })[0], 403);
 
   assert.equal(service.update({ operation: 'delete', cwd, id: created.job.id, version: created.job.version })[0], 200);
   assert.deepEqual(service.update({ operation: 'delete-run', cwd, id: activeRun.id }), [200, { deleted: true }]);
+  assert.equal(service.result(input)[0], 404);
   assert.deepEqual(service.snapshot([cwd], false, []).runs, []);
   assert.deepEqual(service.update({ operation: 'delete-run', cwd, id: activeRun.id }), [200, { deleted: false }]);
 

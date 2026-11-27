@@ -286,7 +286,7 @@ test('daemon host serves native open, new, interactions and close', { timeout: 3
   await waitIdle(firstWorker);
   await writeFile(join(first, 'existing.txt'), 'unchanged pre-existing edit\n');
   await writeFile(join(first, 'example.txt'), 'old content\n');
-  const runPrompt = await phone('/prompt', { id: a.sessionId, requestId: 'result-test', text: 'Verify result capture' });
+  const runPrompt = await phone('/prompt', { id: a.sessionId, requestId: 'result-test', text: 'Pi Go fixture: long Markdown' });
   assert.equal(runPrompt.status, 202);
   let liveRunId;
   for (let i = 0; i < 20 && !liveRunId; i++) {
@@ -314,7 +314,20 @@ test('daemon host serves native open, new, interactions and close', { timeout: 3
   const patch = await phone(reviewedPath);
   assert.match(patch.data.text, /-old content\n\+new content/);
   assert.equal((await phone(reviewedPath.replace(a.sessionId, b.sessionId))).status, 404);
-  assert.ok((await phone('/runs/inbox')).data.runEvents.some(({ id }) => id === reviewed.id));
+  const inboxResult = (await phone('/runs/inbox')).data.runEvents.find(({ id }) => id === reviewed.id);
+  assert.equal(inboxResult.hasFullResult, true);
+  assert.match(inboxResult.summary, /^# 长回复/);
+  assert.equal(inboxResult.summary.length, 500);
+  const resultPath = `/runs/text?session=${a.sessionId}&run=${reviewed.id}`;
+  assert.equal((await fetch(`${pairing.url}${resultPath}`)).status, 401);
+  assert.equal((await phone(resultPath.replace(a.sessionId, b.sessionId))).status, 404);
+  const firstPage = await phone(resultPath);
+  assert.equal(firstPage.status, 200);
+  assert.equal(firstPage.data.nextTextOffset, firstPage.data.text.length);
+  const lastPage = await phone(`${resultPath}&offset=${firstPage.data.nextTextOffset}`);
+  assert.equal(lastPage.status, 200);
+  assert.equal(lastPage.data.nextTextOffset, undefined);
+  assert.equal(firstPage.data.text + lastPage.data.text, '# 长回复\n\n```txt\n' + 'a'.repeat(131057) + '🚀\n```\n\n最后一段');
 
   await waitIdle(firstWorker);
   assert.equal((await prompt(firstWorker, a.sessionId, 'Pi Go fixture: ask for confirmation', 'inbox-pending')).status, 202);
@@ -366,6 +379,12 @@ test('daemon host serves native open, new, interactions and close', { timeout: 3
   const [scheduledRun] = scheduleSnapshot.runs;
   assert.equal(scheduledRun.status, 'succeeded', JSON.stringify(scheduledRun));
   assert.equal(scheduledRun.summary, 'fixture delta');
+  assert.equal(scheduledRun.hasFullResult, true);
+  const resultInput = { cwd: first, id: scheduledRun.id, source: scheduleSnapshot.source };
+  const scheduledResult = await phone('/schedules/result', resultInput);
+  assert.equal(scheduledResult.status, 200);
+  assert.equal(scheduledResult.data.text, 'fixture delta');
+  assert.equal((await phone('/schedules/result', { ...resultInput, cwd: root })).status, 403);
   assert.equal(scheduleSnapshot.jobs[0].nextAt, null);
   assert.equal(scheduleSnapshot.watching, true);
   assert.equal((await phone('/schedules/sync', { knownRuns: [scheduledRun.id] })).data.watching, false);

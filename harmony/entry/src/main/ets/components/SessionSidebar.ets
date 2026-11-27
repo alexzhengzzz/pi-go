@@ -28,20 +28,14 @@ export struct SessionSidebar {
           SymbolGlyph($r('sys.symbol.computer')).fontSize(19).fontColor([this.store.accent()])
         }.width(34).height(34).borderRadius(10).backgroundColor(this.store.accentTint())
       }
-      Button({ type: ButtonType.Normal }) {
-        Row({ space: this.store.dockedSessions() ? 6 : 8 }) {
-          if (!this.store.dockedSessions()) {
-            SymbolGlyph($r('sys.symbol.computer')).fontSize(21).fontColor([this.store.accent()])
-          }
-          Text(this.store.computerTitle()).fontSize(this.store.compactSessionPane() ? 14 : this.store.dockedSessions() ? 17 : 19)
-            .fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
-            .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
-            .layoutWeight(this.store.dockedSessions() ? 1 : 0)
-            .constraintSize({ maxWidth: this.store.dockedSessions() ? '100%' : '65%' })
-          SymbolGlyph($r('sys.symbol.chevron_down')).fontSize(13).fontColor([$r('app.color.pigo_muted')])
-        }.width('100%')
-      }.id('computers').layoutWeight(1).height(44).padding(0).backgroundColor(Color.Transparent)
-        .accessibilityText('切换电脑').enabled(!this.store.session.busy).onClick(() => { this.store.openComputers(); })
+      Row({ space: 8 }) {
+        if (!this.store.dockedSessions()) {
+          SymbolGlyph($r('sys.symbol.computer')).fontSize(21).fontColor([this.store.accent()])
+        }
+        Text(this.store.computerTitle()).fontSize(this.store.compactSessionPane() ? 14 : this.store.dockedSessions() ? 17 : 19)
+          .fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
+          .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).layoutWeight(1)
+      }.layoutWeight(1).height(44)
       if (!this.store.dockedSessions()) {
         Button({ type: ButtonType.Normal }) {
           headerSymbol($r('sys.symbol.xmark'), $r('app.color.pigo_text'), 17)
@@ -85,13 +79,13 @@ export struct SessionSidebar {
             .onClick(() => { this.store.openNewSession(); })
         }
         if (!this.store.session.reachable) this.offlineNotice(true, this.store.compactSessionPane())
-        Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.SpaceBetween, alignContent: FlexAlign.SpaceBetween }) {
+        Row({ space: 4 }) {
           ForEach(SIDEBAR_VIEWS, (view: string) => {
             Button({ type: ButtonType.Normal }) {
-              Text(this.sessionViewLabel(view))
+              Text(this.store.sessionViewLabel(view))
                 .fontSize(13).fontColor(this.store.sessionView === view ? this.store.accentForeground() : $r('app.color.pigo_muted')).maxLines(1)
                 .fontWeight(this.store.sessionView === view ? FontWeight.Medium : FontWeight.Regular)
-            }.id(`session-view-${view}`).width(this.store.compactSessionPane() ? '49%' : '24%')
+            }.id(`session-view-${view}`).layoutWeight(1)
               .height(34).padding(0).borderRadius(10)
               .backgroundColor(this.store.sessionView === view ? this.store.accent() : Color.Transparent)
               .accessibilitySelected(this.store.sessionView === view).enabled(!this.store.session.busy && !this.store.sessionLoading && this.store.session.reachable)
@@ -143,8 +137,6 @@ export struct SessionSidebar {
           .fontSize(compact ? 13 : 16).fontWeight(FontWeight.Medium).fontColor(compact ? $r('app.color.pigo_warning') : $r('app.color.pigo_text'))
         if (!compact) Text('请检查电脑与网络连接').fontSize(12).fontColor($r('app.color.pigo_muted'))
       }.layoutWeight(1).alignItems(HorizontalAlign.Start)
-      if (!compact) Button('切换').chatAction().height(34).fontSize(13)
-        .onClick(() => { if (!this.store.session.busy) this.store.openComputers(); })
       if (compact) {
         Button({ type: ButtonType.Normal }) {
           SymbolGlyph($r('sys.symbol.arrow_clockwise')).fontSize(16).fontColor([$r('app.color.pigo_warning')])
@@ -323,11 +315,8 @@ export struct SessionSidebar {
         action: () => { ((row: SessionRow): void => { void this.store.split.openInSystemSplit(row); })(session); } },
       { value: '分享会话', action: () => { void this.store.shareController.shareSidebarSession(session); } }
     ];
-    if (this.store.session.reachable) {
-      options.push({ value: session.pinned ? '取消置顶' : '置顶', action: () => { void this.store.updateSessionMeta(session, true); } });
-      if (!session.nativeArchived) {
-        options.push({ value: session.archived ? '取消归档' : '归档', action: () => { void this.store.updateSessionMeta(session, false); } });
-      }
+    if (this.store.session.reachable && !session.nativeArchived) {
+      options.push({ value: session.archived ? '取消归档' : '归档', action: () => { void this.store.toggleSessionArchive(session); } });
     }
     return options;
   }
@@ -355,9 +344,5 @@ export struct SessionSidebar {
   }
   private sessionRunning(id: string): boolean {
     return this.store.session.reachable && (id === this.store.session.currentId ? !this.store.session.idle || this.store.session.queued : this.store.runningSessionIds.includes(id));
-  }
-
-  private sessionViewLabel(view: string): string {
-    return view === 'all' ? '工作区' : view === 'pinned' ? '置顶' : view === 'recent' ? '最近' : '归档';
   }
 }

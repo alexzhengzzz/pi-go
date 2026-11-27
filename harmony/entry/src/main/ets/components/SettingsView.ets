@@ -57,6 +57,16 @@ export struct SettingsView {
             .padding({ left: 16, right: 16, top: this.store.topContentClearance(), bottom: this.store.bottomContentClearance() })
         }.width('100%').height('100%').align(Alignment.TopStart).scrollBar(BarState.Off)
           .edgeEffect(EdgeEffect.Spring).transition(subPageTransition())
+      } else if (this.store.minePage === 'notifications') {
+        Scroll() {
+          Column({ space: 12 }) {
+            this.backgroundPushSettings()
+            this.runNoticeSettings()
+            this.liveViewSettings()
+          }.width('100%').alignItems(HorizontalAlign.Start)
+            .padding({ left: 16, right: 16, top: this.store.topContentClearance(), bottom: this.store.bottomContentClearance() })
+        }.width('100%').height('100%').align(Alignment.TopStart).scrollBar(BarState.Off)
+          .edgeEffect(EdgeEffect.Spring).transition(subPageTransition())
       } else {
         Scroll() {
           Column({ space: 12 }) {
@@ -65,9 +75,7 @@ export struct SettingsView {
               `${this.computerTitle()} · ${this.store.session.reachable ? '已连接' : '离线'}` :
               (this.store.computers.length ? `${computerGroups(this.store.computers).length} 台电脑` : '配对并连接电脑'))
             this.mineEntry('theme', '系统主题', `${themeStyle(this.store.themeId).label} · ${appearanceMode(this.store.modeId).label}`)
-            this.backgroundPushSettings()
-            this.runNoticeSettings()
-            this.liveViewSettings()
+            this.mineEntry('notifications', '通知', '后台通知、运行结束通知、任务实况窗')
           }.width('100%').alignItems(HorizontalAlign.Start)
             .padding({ left: 16, right: 16, top: this.store.topContentClearance(), bottom: this.store.bottomContentClearance() })
         }.width('100%').height('100%').align(Alignment.TopStart).scrollBar(BarState.Off)
@@ -373,6 +381,8 @@ export struct SettingsView {
         Stack() {
           if (page === 'computers') {
             SymbolGlyph($r('sys.symbol.computer')).fontSize(21).fontColor([this.store.accent()])
+          } else if (page === 'notifications') {
+            SymbolGlyph($r('sys.symbol.bell')).fontSize(21).fontColor([this.store.accent()])
           } else {
             Row({ space: 3 }) {
               Blank().width(6).height(6).borderRadius(3).backgroundColor(this.paletteFor(themeStyle('sakura')).accent)

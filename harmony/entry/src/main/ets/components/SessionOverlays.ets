@@ -81,7 +81,6 @@ export struct OfflineNotice {
   @Param @Require busy: boolean;
   @Event retry: () => void = unboundAction;
   @Event dismiss: () => void = unboundAction;
-  @Event openComputers: () => void = unboundAction;
 
   build() {
     Row({ space: this.narrow ? 6 : 10 }) {
@@ -94,8 +93,6 @@ export struct OfflineNotice {
           .fontSize(this.compact ? 13 : 16).fontWeight(FontWeight.Medium).fontColor(this.compact ? $r('app.color.pigo_warning') : $r('app.color.pigo_text'))
         if (!this.compact) Text('请检查电脑与网络连接').fontSize(12).fontColor($r('app.color.pigo_muted'))
       }.layoutWeight(1).alignItems(HorizontalAlign.Start)
-      if (!this.compact) Button('切换').chatAction().height(34).fontSize(13)
-        .onClick(() => { if (!this.busy) this.openComputers(); })
       if (this.compact) {
         Button({ type: ButtonType.Normal }) {
           SymbolGlyph($r('sys.symbol.arrow_clockwise')).fontSize(16).fontColor([$r('app.color.pigo_warning')])

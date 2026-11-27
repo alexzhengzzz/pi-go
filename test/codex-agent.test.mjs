@@ -309,6 +309,38 @@ test('Codex CLI sessions work end-to-end through daemon and broker', { timeout: 
   assert.notEqual(autoForked.data.session.id, lockedId);
   assert.equal(autoForked.data.session.agent, 'codex');
   assert.match(autoForked.data.session.name, /（分支）$/);
+
+  const schedule = await post('/schedules/update', {
+    cwd: workspace, operation: 'create', agent: 'codex', kind: 'interval', interval: 60, catchUp: 0,
+    name: 'Report', prompt: 'Long scheduled report',
+  });
+  assert.equal(schedule.status, 200, JSON.stringify(schedule));
+  const manual = await post('/schedules/update', {
+    cwd: workspace, operation: 'run', id: schedule.data.job.id,
+    scheduleVersion: schedule.data.job.version, requestId: 'long-report',
+  });
+  assert.equal(manual.status, 200, JSON.stringify(manual));
+  const runId = manual.data.run.id;
+  let snapshot;
+  let report;
+  for (let i = 0; i < 60; i += 1) {
+    snapshot = (await post('/schedules/sync', {})).data;
+    report = snapshot.runs.find(({ id }) => id === runId);
+    if (report) break;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  assert.equal(report?.status, 'succeeded', JSON.stringify(report));
+  assert.equal(report.summary.length, 500);
+  assert.equal(report.hasFullResult, true);
+  const resultInput = { cwd: workspace, id: runId, source: snapshot.source };
+  const firstPage = await post('/schedules/result', resultInput);
+  assert.equal(firstPage.status, 200);
+  assert.ok(firstPage.data.nextTextOffset);
+  const lastPage = await post('/schedules/result', { ...resultInput, offset: firstPage.data.nextTextOffset });
+  assert.equal(lastPage.status, 200);
+  assert.equal(lastPage.data.nextTextOffset, undefined);
+  assert.ok(firstPage.data.text + lastPage.data.text ===
+    '# Report\n\n' + '一行 Markdown 内容。\n'.repeat(8500) + '\n**End of report**\n');
 });
 
 test('a refreshed Codex workspace stays fresh when a global catalog is cached', async (context) => {

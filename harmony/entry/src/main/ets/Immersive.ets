@@ -216,8 +216,8 @@ function sharedTabBarMaterial(): uiMaterial.ImmersiveMaterial {
     tabBarMaterial = new uiMaterial.ImmersiveMaterial({
       style: uiMaterial.ImmersiveStyle.THIN,
       applyShadow: true,
-      interactive: true,
-      lightEffect: {}
+      interactive: false,
+      lightEffect: null
     });
   }
   return tabBarMaterial;

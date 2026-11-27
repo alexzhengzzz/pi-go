@@ -22,7 +22,7 @@ const logTiming = (label, startMs, extra = '') => {
 const mutatingRoutes = new Set(['/open', '/new', '/authorize', '/create-workspace', '/close-workspace', '/rename-workspace', '/remove-workspace', '/delete-session', '/schedules/update', '/alerts/emit', '/alerts/delete']);
 const routes = new Set(['/open', '/new', '/catalog', '/projects', '/authorize', '/pending', '/answer',
   '/create-workspace', '/close-workspace', '/rename-workspace', '/remove-workspace', '/delete-session', '/workspaces', '/workspace-library', '/session-deleted',
-  '/schedules/sync', '/schedules/update', '/alerts/emit', '/alerts/sync', '/alerts/delete']);
+  '/schedules/sync', '/schedules/update', '/schedules/result', '/alerts/emit', '/alerts/sync', '/alerts/delete']);
 const bodyLimit = 8192;
 
 export function daemonProfile() {
@@ -187,6 +187,11 @@ export function createDaemonHost({ registry, runtimes, schedules, alerts, profil
       if (request.url === '/schedules/update') {
         if (!schedules || schedules.closing) return reply(response, 404, { error: 'schedules_unsupported' });
         const [status, data] = schedules.update(input);
+        return reply(response, status, data);
+      }
+      if (request.url === '/schedules/result') {
+        if (!schedules || schedules.closing) return reply(response, 404, { error: 'schedules_unsupported' });
+        const [status, data] = schedules.result(input);
         return reply(response, status, data);
       }
       if (request.url === '/alerts/emit') {

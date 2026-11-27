@@ -48,13 +48,21 @@ export class ScheduleState {
   @Trace scheduleActive: RunMessage[] = [];
   @Trace scheduleOffline: string[] = [];
   @Trace scheduleDetail?: RunMessage = undefined;
+  @Trace scheduleDetailFromInbox: boolean = false;
+  @Trace scheduleResult: string = '';
+  @Trace scheduleResultError: string = '';
   @Trace scheduleAlert?: InboxRun = undefined;
+  @Trace scheduleAlertSource: string = '';
+  @Trace sessionRunDetail?: InboxRun = undefined;
+  @Trace sessionRunResult: string = '';
+  @Trace sessionRunResultError: string = '';
   @Trace scheduleBanner?: RunMessage = undefined;
   @Trace scheduleJobs: ScheduleJob[] = [];
   @Trace scheduleZone: string = '';
   @Trace scheduleError: string = '';
   @Trace scheduleListError: string = '';
   @Trace scheduleSaving: boolean = false;
+  @Trace scheduleDismissing: boolean = false;
   @Trace scheduleLoading: boolean = false;
   @Trace scheduleLoaded: boolean = false;
   @Trace scheduleEditing?: ScheduleJob = undefined;
@@ -80,6 +88,7 @@ export class ScheduleController {
   private scheduleDiscovery: boolean = false;
   private scheduleMutation: number = 0;
   private scheduleComputerGeneration: number = 0;
+  private scheduleResultRequest: number = 0;
 
   private readonly host: ScheduleHost;
 
@@ -326,24 +335,52 @@ export class ScheduleController {
       const raw = this.host.settings()?.getSync(key, '[]') as string;
       if (raw) {
         const ids = JSON.parse(raw) as string[];
-        if (Array.isArray(ids)) read = ids.filter((id: string): boolean => typeof id === 'string').slice(0, 80);
+        if (Array.isArray(ids)) {
+          read = ids.filter((id: string): boolean => typeof id === 'string');
+          if (!dismissed) read = read.slice(0, 80);
+        }
       }
     } catch { }
     cache.set(source, read);
     return read;
   }
 
-  dismissScheduleMessage(message: RunMessage): void {
-    const previous = this.readScheduleRuns(message.source, true);
-    if (previous.includes(message.run.id)) return;
-    const dismissed = [message.run.id].concat(previous).slice(0, 80);
-    this.scheduleDismissed.set(message.source, dismissed);
-    this.state.scheduleMessages = this.state.scheduleMessages.map((item: RunMessage): RunMessage => item.key === message.key
-      ? { key: item.key, source: item.source, address: item.address, computer: item.computer, run: item.run,
-        unread: false, dismissed: true } : item);
-    void this.host.saveSetting(`schedule_dismissed_${message.source}`, JSON.stringify(dismissed)).catch(() => {
-      this.host.getUIContext().getPromptAction().showToast({ message: '暂时无法保存删除记录。' });
-    });
+  async dismissScheduleMessages(messages: RunMessage[]): Promise<boolean> {
+    if (this.state.scheduleDismissing || this.state.scheduleSaving || !messages.length) return false;
+    const idsBySource = new Map<string, Set<string>>();
+    for (const message of messages) {
+      const ids = idsBySource.get(message.source) ?? new Set<string>();
+      ids.add(message.run.id);
+      idsBySource.set(message.source, ids);
+    }
+    this.state.scheduleDismissing = true;
+    let savedAll = true;
+    try {
+      for (const source of idsBySource.keys()) {
+        const ids = idsBySource.get(source)!;
+        const dismissed = new Set<string>(this.readScheduleRuns(source, true));
+        ids.forEach((id: string) => { dismissed.add(id); });
+        const savedIds = Array.from(dismissed);
+        try {
+          await this.host.saveSetting(`schedule_dismissed_${source}`, JSON.stringify(savedIds));
+        } catch {
+          savedAll = false;
+          continue;
+        }
+        this.scheduleDismissed.set(source, savedIds);
+        this.state.scheduleMessages = this.state.scheduleMessages.map((item: RunMessage): RunMessage =>
+          item.source === source && ids.has(item.run.id) ?
+            { key: item.key, source: item.source, address: item.address, computer: item.computer, run: item.run,
+              unread: false, dismissed: true } : item);
+        const banner = this.state.scheduleBanner;
+        if (banner && banner.source === source && ids.has(banner.run.id)) this.state.scheduleBanner = undefined;
+      }
+      this.host.publishWidgets();
+      if (!savedAll) this.host.getUIContext().getPromptAction().showToast({ message: '部分动态暂时无法移除，请重试。' });
+      return savedAll;
+    } finally {
+      this.state.scheduleDismissing = false;
+    }
   }
 
   private removeScheduleMessage(message: RunMessage): void {
@@ -365,7 +402,7 @@ export class ScheduleController {
   }
 
   async deleteScheduleRuns(messages: RunMessage[]): Promise<boolean> {
-    if (this.state.scheduleSaving || !messages.length) return false;
+    if (this.state.scheduleSaving || this.state.scheduleDismissing || !messages.length) return false;
     const computer = this.host.computers().find((item: Companion): boolean => item.address === this.host.base());
     if (!computer) {
       this.host.getUIContext().getPromptAction().showToast({ message: '请先连接电脑。' });
@@ -406,12 +443,17 @@ export class ScheduleController {
     }
   }
 
-  showScheduleDetail(message: RunMessage): void {
+  showScheduleDetail(message: RunMessage, fromInbox: boolean = false): void {
     this.host.dismissKeyboard();
     this.schedulePrevious = this.state.schedulePage;
     this.state.scheduleDetail = message;
+    this.state.scheduleDetailFromInbox = fromInbox && !message.dismissed;
+    this.state.scheduleResult = message.run.hasFullResult ? '' : (message.run.summary ?? '');
+    this.state.scheduleResultError = '';
+    this.state.scheduleError = '';
     this.state.schedulePage = 'detail';
     this.state.scheduleBanner = undefined;
+    if (message.run.hasFullResult) void this.loadScheduleResult();
     if (!message.unread) return;
     const read = [message.run.id].concat(this.readScheduleRuns(message.source)
       .filter((id: string): boolean => id !== message.run.id)).slice(0, 80);
@@ -419,6 +461,104 @@ export class ScheduleController {
     this.state.scheduleMessages = this.state.scheduleMessages.map((item: RunMessage): RunMessage => item.key === message.key
       ? { key: item.key, source: item.source, address: item.address, computer: item.computer, run: item.run, unread: false } : item);
     void this.host.saveSetting(`schedule_read_${message.source}`, JSON.stringify(read)).catch(() => {});
+  }
+
+  async dismissScheduleDetail(): Promise<void> {
+    const message = this.state.scheduleDetail;
+    if (this.state.schedulePage !== 'detail' || !this.state.scheduleDetailFromInbox || !message) return;
+    if (await this.dismissScheduleMessages([message])) {
+      if (this.state.schedulePage === 'detail' && this.state.scheduleDetail === message) this.backFromSchedule();
+    }
+  }
+
+  async loadScheduleResult(): Promise<void> {
+    const message = this.state.scheduleDetail;
+    if (!message || !message.run.hasFullResult || this.state.schedulePage !== 'detail') return;
+    const request = ++this.scheduleResultRequest;
+    this.state.scheduleResultError = '';
+    const computer = this.host.computers().find((item: Companion): boolean => item.address === message.address);
+    try {
+      if (!computer) throw new Error('schedule_computer_missing');
+      const endpoint = this.host.scheduleEndpoint(computer);
+      const text = await this.loadResultText((offset: number): Promise<BridgeReply> => this.host.request('/schedules/result',
+        { cwd: message.run.cwd, id: message.run.id, source: message.source, offset: offset }, endpoint),
+        (): boolean => this.isCurrentScheduleResult(message, request));
+      if (text !== undefined && this.isCurrentScheduleResult(message, request)) this.state.scheduleResult = text;
+    } catch {
+      if (this.isCurrentScheduleResult(message, request)) this.state.scheduleResultError = '暂时无法加载运行结果。';
+    }
+  }
+
+  private async loadResultText(fetchPage: (offset: number) => Promise<BridgeReply>, isCurrent: () => boolean): Promise<string | undefined> {
+    const chunks: string[] = [];
+    let offset: number | undefined = 0;
+    while (offset !== undefined) {
+      const page: BridgeReply = await fetchPage(offset);
+      if (!isCurrent()) return undefined;
+      if (!page.text || (page.nextTextOffset !== undefined && page.nextTextOffset !== offset + page.text.length)) {
+        throw new Error('invalid_result_page');
+      }
+      chunks.push(page.text);
+      offset = page.nextTextOffset;
+    }
+    return chunks.join('');
+  }
+
+  showSessionRunDetail(row: InboxRun): void {
+    this.host.dismissKeyboard();
+    this.scheduleResultRequest += 1;
+    this.schedulePrevious = this.state.schedulePage;
+    this.state.sessionRunDetail = row;
+    this.state.sessionRunResult = '';
+    this.state.sessionRunResultError = '';
+    this.state.scheduleError = '';
+    this.state.schedulePage = 'session-run';
+    if (row.unread) this.host.markRunRead(row.run.id);
+    if (row.run.hasFullResult) void this.loadSessionRunResult();
+  }
+
+  async loadSessionRunResult(): Promise<void> {
+    const row = this.state.sessionRunDetail;
+    if (!row?.run.hasFullResult || this.state.schedulePage !== 'session-run') return;
+    const request = ++this.scheduleResultRequest;
+    const isCurrent = (): boolean => request === this.scheduleResultRequest && this.state.schedulePage === 'session-run';
+    this.state.sessionRunResultError = '';
+    try {
+      const computer = this.host.computers().find((item: Companion): boolean => item.address === row.address);
+      if (!computer) throw new Error('run_computer_missing');
+      const endpoint = this.host.scheduleEndpoint(computer);
+      const path = '/runs/text?session=' + encodeURIComponent(row.run.sessionId) + '&run=' + encodeURIComponent(row.run.id);
+      const text = await this.loadResultText((offset: number): Promise<BridgeReply> =>
+        this.host.request(path + '&offset=' + offset, undefined, endpoint), isCurrent);
+      if (text !== undefined && isCurrent()) this.state.sessionRunResult = text;
+    } catch {
+      if (isCurrent()) this.state.sessionRunResultError = '暂时无法加载运行结果。';
+    }
+  }
+
+  async openSessionRun(): Promise<void> {
+    const row = this.state.sessionRunDetail;
+    if (!row || this.state.schedulePage !== 'session-run') return;
+    const computer = this.host.computers().find((item: Companion): boolean =>
+      item.address === row.address && validCompanion(item));
+    this.state.scheduleError = '';
+    if (computer && await this.host.openNotifiedSession(computer, row.run.sessionId, '', '')) return;
+    if (this.state.schedulePage === 'session-run' && !this.state.scheduleError) {
+      this.state.scheduleError = '暂时无法打开会话，请检查来源电脑。';
+    }
+  }
+
+  private isCurrentScheduleResult(message: RunMessage, request: number): boolean {
+    return request === this.scheduleResultRequest && this.state.schedulePage === 'detail' &&
+      this.state.scheduleDetail?.key === message.key;
+  }
+
+  showAlertSourceHistory(source: string): void {
+    this.host.dismissKeyboard();
+    this.schedulePrevious = this.state.schedulePage;
+    this.state.scheduleAlertSource = source.trim() || 'local';
+    this.state.schedulePage = 'source_history';
+    this.state.scheduleError = '';
   }
 
   showAlertDetail(row: InboxRun): void {
@@ -431,9 +571,23 @@ export class ScheduleController {
 
   backFromSchedule(): void {
     if (this.state.scheduleSaving || this.host.inboxCleaning()) return;
-    if (this.state.schedulePage === 'detail') this.state.schedulePage = this.schedulePrevious;
-    else if (this.state.schedulePage === 'alert') {
+    if (this.state.schedulePage === 'detail') {
+      this.state.scheduleDetail = undefined;
+      this.state.scheduleDetailFromInbox = false;
+      this.state.scheduleResult = '';
+      this.state.scheduleResultError = '';
+      this.state.schedulePage = this.schedulePrevious;
+    } else if (this.state.schedulePage === 'alert') {
       this.state.scheduleAlert = undefined;
+      this.state.schedulePage = this.schedulePrevious;
+    } else if (this.state.schedulePage === 'source_history') {
+      this.state.scheduleAlertSource = '';
+      this.state.schedulePage = '';
+    } else if (this.state.schedulePage === 'session-run') {
+      this.scheduleResultRequest += 1;
+      this.state.sessionRunDetail = undefined;
+      this.state.sessionRunResult = '';
+      this.state.sessionRunResultError = '';
       this.state.schedulePage = this.schedulePrevious;
     } else this.state.schedulePage = '';
     this.state.scheduleError = '';
