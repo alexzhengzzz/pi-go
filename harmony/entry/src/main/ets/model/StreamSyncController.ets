@@ -39,6 +39,7 @@ export interface StreamSyncHost {
   getUIContext: () => UIContext;
   restoreOnlineNotice: () => void;
   refreshVisibleCatalog: (connected: boolean) => void;
+  hasBackgroundTasks?: () => boolean;
   sessionDeleted: (id: string) => void;
   showTextPreview: (cwd: string, path: string, text: string) => void;
   observeRun: (id: string, title: string, active: boolean, stopped?: boolean) => void;
@@ -448,7 +449,7 @@ export class StreamSyncController {
         }
         this.session.noSession = result.state === 'session_deleted' ? '会话已在电脑端删除。' :
           result.state === 'session_closed' ? '原会话已关闭，请在会话列表选择历史记录或其他会话。' :
-          result.state === 'no_shared_sessions' ? '电脑已连接，请在任务列表选择一条对话。' : '请在任务列表选择一个会话。';
+          result.state === 'no_shared_sessions' ? '电脑已连接，请在会话列表选择一条对话。' : '请在会话列表选择一个会话。';
         if (this.session.currentId) {
           this.rememberDraft(this.session.currentId);
           this.host.resetCommands();
@@ -537,7 +538,9 @@ export class StreamSyncController {
         const delay = !this.session.reachable ? 1500 :
           this.session.syncMode === 'sequenced' && this.host.chatState().sync.needsSnapshot() ? 150 :
           this.hasPendingOptimistic() ? 500 :
-          this.streamAlive ? (this.session.syncMode === 'sequenced' ? (this.session.idle ? 20000 : 6000) : (this.session.idle ? 3000 : 1200)) :
+          this.streamAlive ? (this.session.syncMode === 'sequenced' ?
+            (this.session.idle ? (this.host.hasBackgroundTasks?.() ? 3000 : 20000) : 6000) :
+            (this.session.idle ? 3000 : 1200)) :
           this.session.idle ? 1500 : 650;
         this.schedule(delay);
       }

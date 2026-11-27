@@ -246,7 +246,7 @@ export struct SessionSettings {
             Text('等待当前任务和队列结束后可切换模型。').fontSize(13).fontColor($r('app.color.pigo_warning')).width('100%')
           }
           if (!this.models.length) {
-            Text('没有可用模型，请在电脑上检查 Pi CLI 的模型配置。').fontSize(13).fontColor($r('app.color.pigo_muted')).width('100%')
+            Text('没有可用模型，请在电脑上检查当前 Agent 的模型配置。').fontSize(13).fontColor($r('app.color.pigo_muted')).width('100%')
           }
         }.width('100%').padding(14).attributeModifier(glassCardSurface(this.darkMode, 16))
         Column({ space: 10 }) {

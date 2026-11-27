@@ -56,12 +56,19 @@ export function createTicketManager({ tls, address, remote, transport }) {
     clear();
     const directory = mkdtempSync(join(tmpdir(), 'pigo-bridge-'));
     const ticket = randomBytes(32).toString('hex');
-    const code = tls ? undefined : String(randomInt(100_000_000)).padStart(8, '0');
+    const code = String(randomInt(1_000_000)).padStart(6, '0');
     const file = join(directory, 'pair.json');
-    pairing = { directory, ticket: digest(ticket), code: code && digest(code), attempts: 0, expiresAt: Date.now() + 120000 };
+    pairing = { directory, ticket: digest(ticket), code: digest(code), attempts: 0, expiresAt: Date.now() + 120000 };
     const url = `${tls ? 'https' : 'http'}://${address}`;
-    const config = tls ? { bundle: Buffer.from(JSON.stringify({ url, ticket, ca: tls.cert, pin: tls.pin,
-      ...(remote ? { transport } : {}) })).toString('base64url') } : { url, ticket, code };
+    const pinPrefix = tls ? tls.pin.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '').slice(0, 16) : undefined;
+    const qr = tls ? `pigo://${remote ? 'r' : 'l'}/${address}/${code}/${pinPrefix}` : undefined;
+    const config = tls ? {
+      url,
+      code,
+      qr,
+      bundle: Buffer.from(JSON.stringify({ url, ticket, ca: tls.cert, pin: tls.pin,
+        ...(remote ? { transport } : {}) })).toString('base64url'),
+    } : { url, ticket, code };
     writeFileSync(file, JSON.stringify(config), { mode: 0o600, flag: 'wx' });
     ticketTimer = setTimeout(clear, 120000).unref();
     return file;

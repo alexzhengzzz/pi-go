@@ -5,7 +5,7 @@ import { ChatContent } from '../ChatContent';
 import { ChatImage } from '../ChatImage';
 import { markdownWorkspacePath } from '../ChatPaths';
 import { glassCardSurface, hasImmersiveMaterial, immersiveFloatingTabs, immersiveSheetMaterial, immersiveSurface } from '../Immersive';
-import { DiffLine, InboxRun, RunEvent, RunFile, RunScreenshot } from '../RunResults';
+import { DiffLine, RunEvent, RunFile, RunScreenshot } from '../RunResults';
 import { RunMessage, ScheduleJob } from '../ScheduledRuns';
 import { ChatComposer } from '../components/ChatComposer';
 import { IncomingShareBanner, NewSessionDialog, NewSpaceDialog, PendingInteractionCard, ToolDetailsSheet } from '../components/ChatDialogs';
@@ -13,6 +13,7 @@ import { CommandPaletteCard, VoiceFeedbackOverlay } from '../components/ChatSubV
 import { ChatTranscript } from '../components/ChatTranscript';
 import { MarkdownTableReaderPage, TextFilePreviewPage, WorkspaceFileEditor } from '../components/FilePreviewPages';
 import { headerSymbol } from '../components/HeaderSymbol';
+import { InboxFeedPanel } from '../components/InboxFeedPanel';
 import { bannerTransition, drawerSlideTransition, modalFadeTransition, pagePushTransition, subPageTransition } from '../components/PageTransitions';
 import { RunResultView } from '../components/RunResultView';
 import { ScheduleOverlay } from '../components/ScheduleOverlay';
@@ -40,6 +41,40 @@ function chatAction() {
 @Extend(Button)
 function headerAction() {
   .width(44).height(44).padding(0).borderRadius(22).backgroundColor(Color.Transparent)
+}
+
+@ComponentV2
+struct RootTabBarItem {
+  @Param @Require store: PiGoPageStore;
+  @Param @Require tab: string;
+
+  @Computed
+  get badgeCount(): number {
+    if (this.tab === 'inbox') return this.store.inboxBadgeCount();
+    return this.tab === 'pending' ? this.store.runningTaskCount() : 0;
+  }
+
+  build() {
+    Column({ space: 3 }) {
+      Stack({ alignContent: Alignment.TopEnd }) {
+        Row() {
+          SymbolGlyph(this.store.tabSymbol(this.tab, this.store.activeTab === this.tab)).fontSize(23)
+            .fontColor([this.store.activeTab === this.tab ? this.store.accent() : $r('app.color.pigo_muted')])
+            .accessibilityLevel('no')
+        }.width('100%').height('100%').justifyContent(FlexAlign.Center)
+        if (this.badgeCount > 0) {
+          Text(this.badgeCount > 9 ? '9+' : `${this.badgeCount}`)
+            .fontSize(9).fontWeight(FontWeight.Medium).fontColor(this.store.accentForeground())
+            .textAlign(TextAlign.Center).constraintSize({ minWidth: 14 }).height(14)
+            .padding({ left: 2, right: 2 }).backgroundColor(this.store.accent()).borderRadius(7)
+        }
+      }.width(48).height(25)
+      Text(this.tab === 'inbox' ? '动态' : this.tab === 'tasks' ? '会话' : this.tab === 'pending' ? '任务' : '我的')
+        .fontSize(11).fontWeight(this.store.activeTab === this.tab ? FontWeight.Bold : FontWeight.Medium)
+        .fontColor(this.store.activeTab === this.tab ? this.store.accent() : $r('app.color.pigo_muted'))
+    }.id(`tab-${this.tab}`).width('100%').height('100%').justifyContent(FlexAlign.Center)
+      .accessibilitySelected(this.store.activeTab === this.tab)
+  }
 }
 
 @Entry
@@ -141,8 +176,41 @@ struct Index {
       Text(this.store.minePage === 'theme' ? '系统主题' : this.store.minePage === 'computers' ?
         (this.store.addingComputer ? (this.store.pairingComputerId ? '添加连接' : '添加电脑') : '电脑管理') : '我的')
         .fontSize(this.store.minePage ? 20 : 26).fontWeight(FontWeight.Bold).fontColor($r('app.color.pigo_text')).layoutWeight(1)
-      if (!this.store.minePage && this.store.computers.length) this.scheduleInboxButton()
     }.width('100%').height(this.store.headerHeight())
+  }
+
+  @Builder
+  inboxHeader() {
+    Row({ space: 12 }) {
+      if (this.store.isPaired && !this.store.dockedSessions()) {
+        Button({ type: ButtonType.Normal }) {
+          headerSymbol($r('sys.symbol.line_2_horizontal'), $r('app.color.pigo_text'), 20)
+        }.id('inbox-history').headerAction().attributeModifier(immersiveSurface(this.store.darkMode))
+          .accessibilityText('打开会话抽屉').enabled(!this.store.session.busy)
+          .onClick(() => { this.store.setDrawer(true); })
+      }
+      Column({ space: 2 }) {
+        Text('动态').fontSize(24).fontWeight(FontWeight.Bold).fontColor($r('app.color.pigo_text'))
+        if (this.store.isPaired) {
+          Text(this.store.inboxBadgeCount() > 0 ? `${this.store.inboxBadgeCount()} 条未读 · 下拉可刷新` : '全部已读 · 下拉可刷新')
+            .fontSize(12).fontColor($r('app.color.pigo_muted')).maxLines(1)
+        }
+      }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+      if (this.store.isPaired) {
+        Button({ type: ButtonType.Normal }) {
+          Stack() {
+            Image($r('app.media.ic_more')).width(20).height(20).fillColor($r('app.color.pigo_text'))
+          }.width('100%').height('100%').accessibilityLevel('no-hide-descendants')
+        }.id('inbox-more').headerAction().attributeModifier(immersiveSurface(this.store.darkMode))
+          .accessibilityText('动态操作菜单').enabled(!this.store.session.busy)
+          .bindMenu(this.store.inboxHeaderMenu())
+      }
+    }.width('100%').height(this.store.headerHeight())
+  }
+
+  @Builder
+  inboxView() {
+    InboxFeedPanel({ store: this.store })
   }
 
   @Builder
@@ -197,7 +265,13 @@ struct Index {
   @Builder
   chatHeader() {
     Row({ space: 10 }) {
-      if (this.store.session.showSettings) {
+      if (this.store.showFiles) {
+        Button({ type: ButtonType.Normal }) {
+          headerSymbol($r('sys.symbol.chevron_left'), $r('app.color.pigo_text'), 21)
+        }.headerAction().attributeModifier(immersiveSurface(this.store.darkMode)).accessibilityText('返回会话')
+          .enabled(!this.store.session.busy && !this.store.session.openingSession)
+          .onClick(() => { this.store.fileBack(); })
+      } else if (this.store.session.showSettings) {
         Button({ type: ButtonType.Normal }) {
           headerSymbol($r('sys.symbol.chevron_left'), $r('app.color.pigo_text'), 21)
         }.headerAction().attributeModifier(immersiveSurface(this.store.darkMode)).accessibilityText('返回会话').onClick(() => { this.store.session.showSettings = false; })
@@ -217,8 +291,8 @@ struct Index {
             Blank().width(7).height(7).borderRadius(4)
               .backgroundColor(this.store.session.reachable ? $r('app.color.pigo_success') : $r('app.color.pigo_warning'))
               .accessibilityText(this.store.session.reachable ? '电脑已连接' : '电脑离线')
-            if (this.store.session.currentAgent && this.store.session.currentAgent !== 'pi') {
-              Text(this.store.session.currentAgent === 'codex' ? 'Codex' : this.store.session.currentAgent === 'agy' ? 'AGY' : this.store.session.currentAgent.toUpperCase())
+            if (this.store.session.currentAgent && (this.store.agents.length > 1 || this.store.session.currentAgent !== 'pi')) {
+              Text(this.store.session.currentAgent === 'pi' ? 'Pi' : this.store.session.currentAgent === 'codex' ? 'Codex' : this.store.session.currentAgent === 'agy' ? 'AGY' : this.store.session.currentAgent.toUpperCase())
                 .fontSize(10).fontWeight(FontWeight.Medium).fontColor(this.store.accent())
                 .padding({ left: 5, right: 5, top: 1, bottom: 1 }).borderRadius(5)
                 .backgroundColor(this.store.accentTint())
@@ -237,7 +311,6 @@ struct Index {
           .onClick(() => { void this.store.fileController.loadFileDirectory(''); })
       } else if (!this.store.session.showSettings) {
         Row({ space: 6 }) {
-          this.scheduleInboxButton()
           Button({ type: ButtonType.Normal }) {
             headerSymbol($r('sys.symbol.square_and_pencil'), this.store.accent(), 19)
           }.id('new-task').headerAction().attributeModifier(immersiveSurface(this.store.darkMode)).accessibilityText('新建会话')
@@ -260,6 +333,8 @@ struct Index {
     Column() {
       if (this.store.activeTab === 'mine') {
         this.mineHeader()
+      } else if (this.store.activeTab === 'inbox') {
+        this.inboxHeader()
       } else {
         this.chatHeader()
       }
@@ -595,27 +670,9 @@ struct Index {
     ChatComposer({ store: this.store })
   }
 
-  @Builder
+  @LocalBuilder
   rootTabBar(tab: string) {
-    Column({ space: 3 }) {
-      Stack({ alignContent: Alignment.TopEnd }) {
-        Row() {
-          SymbolGlyph(this.store.tabSymbol(tab, this.store.activeTab === tab)).fontSize(23)
-            .fontColor([this.store.activeTab === tab ? this.store.accent() : $r('app.color.pigo_muted')])
-            .accessibilityLevel('no')
-        }.width('100%').height('100%').justifyContent(FlexAlign.Center)
-        if (tab === 'pending' && this.store.runningTaskCount()) {
-          Text(this.store.runningTaskCount() > 9 ? '9+' : `${this.store.runningTaskCount()}`)
-            .fontSize(9).fontWeight(FontWeight.Medium).fontColor(this.store.accentForeground())
-            .textAlign(TextAlign.Center).constraintSize({ minWidth: 14 }).height(14)
-            .padding({ left: 2, right: 2 }).backgroundColor(this.store.accent()).borderRadius(7)
-        }
-      }.width(48).height(25)
-      Text(tab === 'tasks' ? '会话' : tab === 'pending' ? '任务' : tab === 'files' ? '工作区' : '我的')
-        .fontSize(11).fontWeight(this.store.activeTab === tab ? FontWeight.Bold : FontWeight.Medium)
-        .fontColor(this.store.activeTab === tab ? this.store.accent() : $r('app.color.pigo_muted'))
-    }.id(`tab-${tab}`).width('100%').height('100%').justifyContent(FlexAlign.Center)
-      .accessibilitySelected(this.store.activeTab === tab)
+    RootTabBarItem({ store: this.store, tab: tab })
   }
 
   @Builder
@@ -624,10 +681,10 @@ struct Index {
       Stack() {
         SymbolGlyph($r('sys.symbol.code_square')).fontSize(31).fontColor([this.store.accent()])
       }.width(60).height(60).borderRadius(18).backgroundColor(this.store.accentTint()).accessibilityLevel('no')
-      Text(!this.store.isPaired || this.store.loading ? 'Pi Go' : inTranscript ? '开始新任务' : '选择一个任务')
+      Text(!this.store.isPaired || this.store.loading ? 'Pi Go' : inTranscript ? '开始新会话' : '选择一个会话')
         .fontSize(this.store.isPaired && !this.store.loading ? 24 : 36).fontWeight(FontWeight.Bold)
         .fontColor($r('app.color.pigo_text')).textAlign(TextAlign.Center)
-      Text(this.store.loading ? '正在读取已配对的电脑…' : !this.store.isPaired ? '连接电脑后查看和继续任务。' :
+      Text(this.store.loading ? '正在读取已配对的电脑…' : !this.store.isPaired ? '连接电脑，随时查看 AI 后台动态与对话。' :
         this.store.session.noSession || (this.store.session.reachable ? '输入你的目标，或添加文件作为上下文。' : '电脑重新连接后即可发送消息。'))
         .fontSize(15).fontColor($r('app.color.pigo_muted')).textAlign(TextAlign.Center).lineHeight(23)
         .constraintSize({ maxWidth: 320 })
@@ -635,7 +692,7 @@ struct Index {
         Button('连接电脑').chatAction().height(46).padding({ left: 24, right: 24 })
           .backgroundColor(this.store.accent()).fontColor(this.store.accentForeground()).onClick(() => { this.store.openComputers(); })
       } else if (!this.store.loading && this.store.session.noSession && !this.store.dockedSessions()) {
-        Button('打开任务列表').chatAction().height(44).padding({ left: 18, right: 18 })
+        Button('打开会话列表').chatAction().height(44).padding({ left: 18, right: 18 })
           .backgroundColor(this.store.accent()).fontColor(this.store.accentForeground()).onClick(() => { this.store.setDrawer(true); })
       }
     }.width('100%').padding({ top: inTranscript && this.store.windowHeight >= SHORT_WINDOW_HEIGHT ? 36 : 8,
@@ -743,8 +800,8 @@ struct Index {
                   this.mineView()
                 } else if (!this.store.isPaired) {
                   this.welcome()
-                } else if (tab === 'files') {
-                  this.workspaceFiles()
+                } else if (tab === 'inbox') {
+                  this.inboxView()
                 } else if (tab === 'pending') {
                   this.taskView()
                 } else {
@@ -786,23 +843,6 @@ struct Index {
         barStyle: BarStyle.STACK
       })
       .hideTitleBar(this.store.loading || (!this.store.isPaired && this.store.activeTab !== 'mine'))
-  }
-
-  @Builder
-  scheduleInboxButton() {
-    Button({ type: ButtonType.Normal }) {
-      Stack({ alignContent: Alignment.TopEnd }) {
-        Stack() {
-          headerSymbol($r('sys.symbol.inbox'), $r('app.color.pigo_text'), 19)
-        }.width('100%').height('100%')
-        if (this.store.scheduleController.state.scheduleMessages.some((item: RunMessage): boolean => item.unread) || this.store.runCenter.displayedInboxRuns().some((item: InboxRun): boolean => item.unread)) {
-          Blank().width(8).height(8).borderRadius(4).backgroundColor(this.store.accent())
-            .margin({ top: 9, right: 9 })
-        }
-      }.width('100%').height('100%')
-    }.id('schedule-inbox').headerAction().attributeModifier(immersiveSurface(this.store.darkMode)).accessibilityText(this.store.scheduleController.state.scheduleMessages.some((item: RunMessage): boolean =>
-      item.unread) || this.store.runCenter.displayedInboxRuns().some((item: InboxRun): boolean => item.unread) ? '收件箱，有未读消息' : '收件箱')
-      .onClick(() => { this.store.showScheduleInbox(); })
   }
 
   @Builder

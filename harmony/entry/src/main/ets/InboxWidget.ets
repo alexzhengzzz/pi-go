@@ -139,7 +139,7 @@ export function buildWidgetSnapshot(overview: WidgetOverview): WidgetSnapshot {
     pendingId: row.run.pendingId ?? '',
     address: row.address,
     computer: row.computer,
-    title: row.run.title || 'Pi 会话',
+    title: row.run.title || 'Agent 会话',
     subtitle: `${row.computer} · ${scheduleTime(row.run.finishedAt).slice(5)}`,
     status: row.run.status,
     statusText: runStatus(row.run.status),

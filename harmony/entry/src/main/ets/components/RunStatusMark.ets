@@ -9,6 +9,7 @@ export function runStatusInk(status: string, accent: string): ResourceColor {
 
 function statusIcon(status: string): Resource {
   if (status === 'failed') return $r('sys.symbol.exclamationmark_circle');
+  if (status === 'alert') return $r('sys.symbol.bell');
   if (status === 'waiting' || status === 'stopped') return $r('sys.symbol.clock');
   return $r('sys.symbol.checkmark_circle');
 }

@@ -61,6 +61,7 @@ struct Payload: Decodable {
     var bridge: Bridge?
     var services: Services?
     var code: String?
+    var qr: String?
     var bundle: String?
     var warning: String?
 }
@@ -85,6 +86,7 @@ struct Result: Decodable { var ok: Bool; var data: Payload?; var error: String? 
     @Published var bridge = Bridge(running: false)
     @Published var services: Services?
     @Published var code = ""
+    @Published var qrText = ""
     @Published var bundle = ""
     @Published var notice = ""
     @Published var error = ""
@@ -137,8 +139,8 @@ struct Result: Decodable { var ok: Bool; var data: Payload?; var error: String? 
                 publicIP = String(endpoint[0])
                 publicPort = endpoint.count == 2 ? String(endpoint[1]) : "443"
             }
-            if (!code.isEmpty || !bundle.isEmpty) && (bridge.expiresAt ?? 0) < Date().timeIntervalSince1970 * 1000 {
-                code = ""; bundle = ""; notice = ""
+            if (!code.isEmpty || !qrText.isEmpty || !bundle.isEmpty) && (bridge.expiresAt ?? 0) < Date().timeIntervalSince1970 * 1000 {
+                code = ""; qrText = ""; bundle = ""; notice = ""
             }
         } catch { self.error = error.localizedDescription }
     }
@@ -158,6 +160,7 @@ struct Result: Decodable { var ok: Bool; var data: Payload?; var error: String? 
             if action == "pair" || action == "connect" {
                 notice = payload.warning ?? ""
                 code = payload.code ?? ""
+                qrText = payload.qr ?? ""
                 bundle = payload.bundle ?? ""
                 if mode == "lan" { UserDefaults.standard.set(host, forKey: "lanHost") }
                 if mode == "remote" {
@@ -165,7 +168,7 @@ struct Result: Decodable { var ok: Bool; var data: Payload?; var error: String? 
                     UserDefaults.standard.set(input["publicPort"], forKey: "publicPort")
                 }
             }
-            if action == "revoke" || action == "stop" { code = ""; bundle = ""; notice = "" }
+            if action == "revoke" || action == "stop" { code = ""; qrText = ""; bundle = ""; notice = "" }
             if mode == "usb" && action == "stop" { autoUSB = false }
             if let usbEnabled { autoUSB = usbEnabled }
             if let value = payload.bridge { bridge = value }
@@ -184,13 +187,20 @@ struct Result: Decodable { var ok: Bool; var data: Payload?; var error: String? 
         if bridge.running { return "生成新配对码" }
         return mode == "remote" ? "启动公网配对" : "启动局域网服务"
     }
+    var formattedCode: String {
+        guard code.count == 6 else { return code }
+        let mid = code.index(code.startIndex, offsetBy: 3)
+        return "\(code[..<mid]) \(code[mid...])"
+    }
     var qr: NSImage? {
-        guard !bundle.isEmpty, let filter = CIFilter(name: "CIQRCodeGenerator") else { return nil }
-        filter.setValue(Data(bundle.utf8), forKey: "inputMessage")
-        filter.setValue("M", forKey: "inputCorrectionLevel")
+        let message = !qrText.isEmpty ? qrText : bundle
+        guard !message.isEmpty, let filter = CIFilter(name: "CIQRCodeGenerator") else { return nil }
+        filter.setValue(Data(message.utf8), forKey: "inputMessage")
+        filter.setValue("L", forKey: "inputCorrectionLevel")
         guard let image = filter.outputImage else { return nil }
-        let rect = image.extent.insetBy(dx: -4, dy: -4)
-        let padded = image.composited(over: CIImage(color: .white).cropped(to: rect)).transformed(by: .init(scaleX: 5, y: 5))
+        let rect = image.extent.insetBy(dx: -3, dy: -3)
+        let scale: CGFloat = !qrText.isEmpty ? 8 : 5
+        let padded = image.composited(over: CIImage(color: .white).cropped(to: rect)).transformed(by: .init(scaleX: scale, y: scale))
         guard let bitmap = CIContext().createCGImage(padded, from: padded.extent) else { return nil }
         return NSImage(cgImage: bitmap, size: NSSize(width: bitmap.width, height: bitmap.height))
     }
@@ -217,12 +227,12 @@ struct PairingView: View {
             HStack(alignment: .top, spacing: 24) {
                 VStack(alignment: .leading, spacing: 14) {
                     Picker("连接方式", selection: $model.mode) {
-                        Text("局域网扫码").tag("lan")
+                        Text("局域网").tag("lan")
                         Text("公网").tag("remote")
                         Text("USB").tag("usb")
                     }.pickerStyle(.segmented).disabled(model.busy)
                     if model.mode == "lan" {
-                        Text("手机和电脑连接同一 Wi-Fi，在手机 Pi Go 中选择「局域网 → 扫码导入」。").foregroundStyle(.secondary)
+                        Text("手机和电脑连接同一 Wi-Fi，扫码或输入 6 位配对码即可连接。").foregroundStyle(.secondary)
                         Picker("电脑地址", selection: $model.host) {
                             if model.addresses.isEmpty { Text("未找到局域网地址").tag("") }
                             ForEach(model.addresses, id: \.self) { Text($0).tag($0) }
@@ -263,24 +273,31 @@ struct PairingView: View {
                     }
                     Text("关闭窗口后服务继续运行。配对成功后手机会保存连接。").font(.caption).foregroundStyle(.secondary)
                 }.frame(maxWidth: .infinity, alignment: .leading)
-                VStack(spacing: 10) {
+                VStack(spacing: 8) {
                     if let qr = model.qr {
-                        Image(nsImage: qr).interpolation(.none).resizable().scaledToFit().frame(width: 225, height: 225)
-                        Text("扫码后在手机点「配对并连接」").font(.caption)
+                        Image(nsImage: qr).interpolation(.none).resizable().scaledToFit().frame(width: 176, height: 176)
+                        if !model.code.isEmpty {
+                            Text(model.formattedCode)
+                                .font(.system(size: 28, weight: .bold, design: .monospaced))
+                                .textSelection(.enabled)
+                            Text("扫码或输入 6 位配对码").font(.caption).foregroundStyle(.secondary)
+                        } else {
+                            Text("扫码配对连接").font(.caption).foregroundStyle(.secondary)
+                        }
                     } else if !model.code.isEmpty {
-                        Text(model.code).font(.system(size: 34, weight: .semibold, design: .monospaced)).textSelection(.enabled)
-                        Text("在手机 Pi Go 中输入八位配对码").foregroundStyle(.secondary)
+                        Text(model.formattedCode).font(.system(size: 36, weight: .bold, design: .monospaced)).textSelection(.enabled)
+                        Text("在手机 Pi Go 中输入 6 位配对码").foregroundStyle(.secondary)
                     } else {
                         Image(systemName: model.mode == "usb" ? "cable.connector" : "qrcode").font(.system(size: 65)).foregroundStyle(.tertiary)
                         Text(model.status).foregroundStyle(.secondary)
                     }
-                    if !model.code.isEmpty || !model.bundle.isEmpty {
+                    if !model.code.isEmpty || !model.qrText.isEmpty || !model.bundle.isEmpty {
                         TimelineView(.periodic(from: .now, by: 1)) { context in
                             Text("剩余 \(max(0, Int((model.bridge.expiresAt ?? 0) / 1000 - context.date.timeIntervalSince1970))) 秒").font(.caption).foregroundStyle(.secondary)
                         }
                     }
                     if !model.notice.isEmpty { Text(model.notice).font(.caption).foregroundStyle(.orange).textSelection(.enabled) }
-                }.frame(width: 250, height: 270).background(.white, in: RoundedRectangle(cornerRadius: 12)).foregroundStyle(.black)
+                }.frame(width: 250, height: 280).background(.white, in: RoundedRectangle(cornerRadius: 12)).foregroundStyle(.black)
             }
             Divider()
             HStack { Text("正在运行的会话").font(.headline); Spacer(); Button("刷新") { Task { await model.refresh() } }.disabled(model.busy) }
@@ -310,7 +327,7 @@ struct PairingView: View {
         }
         .padding(26).frame(minWidth: 760, idealWidth: 800, minHeight: 620, idealHeight: 700)
         .task { while !Task.isCancelled { await model.refresh(); try? await Task.sleep(for: .seconds(3)) } }
-        .onChange(of: model.mode) { _, _ in model.code = ""; model.bundle = ""; model.notice = ""; model.bridge = Bridge(running: false); model.services = nil; model.error = ""; Task { await model.refresh() } }
+        .onChange(of: model.mode) { _, _ in model.code = ""; model.qrText = ""; model.bundle = ""; model.notice = ""; model.bridge = Bridge(running: false); model.services = nil; model.error = ""; Task { await model.refresh() } }
     }
 }
 

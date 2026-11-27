@@ -115,7 +115,7 @@ struct InboxCard {
     Row({ space: 7 }) {
       Blank().width(6).height(6).borderRadius(3).backgroundColor(this.itemBadgeColor(item.status))
       Column({ space: 1 }) {
-        Text(item.title || 'Pi 会话')
+        Text(item.title || 'Agent 会话')
           .fontSize(compact ? 11 : 12)
           .fontWeight(item.unread || item.status === 'waiting' ? FontWeight.Bold : FontWeight.Medium)
           .fontColor($r('app.color.pigo_widget_ink'))

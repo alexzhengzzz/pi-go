@@ -7,6 +7,7 @@ import { computerGroupId } from '../ComputerGroups';
 import type { Companion } from '../CredentialVault';
 import { parseScheduleTime, scheduleRunStatus, scheduleTime } from '../ScheduledRuns';
 import type { RunMessage, ScheduleJob, ScheduleRun, ScheduleWatch } from '../ScheduledRuns';
+import type { InboxRun } from '../RunResults';
 import { BridgeFailure } from './PiGoTypes';
 import type { BridgeEndpoint, BridgeReply, Payload } from './PiGoTypes';
 
@@ -36,6 +37,7 @@ export interface ScheduleHost {
   markRunRead: (id: string) => void;
   showScheduleInbox: () => void;
   selectRootTab: (tab: string) => boolean;
+  openWorkspaceFiles: () => boolean;
   openNewSession: () => void;
 }
 
@@ -46,6 +48,7 @@ export class ScheduleState {
   @Trace scheduleActive: RunMessage[] = [];
   @Trace scheduleOffline: string[] = [];
   @Trace scheduleDetail?: RunMessage = undefined;
+  @Trace scheduleAlert?: InboxRun = undefined;
   @Trace scheduleBanner?: RunMessage = undefined;
   @Trace scheduleJobs: ScheduleJob[] = [];
   @Trace scheduleZone: string = '';
@@ -139,7 +142,7 @@ export class ScheduleController {
     }
     if (destination === 'files') {
       this.state.schedulePage = '';
-      if (!this.host.selectRootTab('files')) this.host.selectRootTab('tasks');
+      if (!this.host.openWorkspaceFiles()) this.host.selectRootTab('tasks');
       return;
     }
     if (destination === 'tasks') {
@@ -418,10 +421,21 @@ export class ScheduleController {
     void this.host.saveSetting(`schedule_read_${message.source}`, JSON.stringify(read)).catch(() => {});
   }
 
+  showAlertDetail(row: InboxRun): void {
+    this.host.dismissKeyboard();
+    this.schedulePrevious = this.state.schedulePage;
+    this.state.scheduleAlert = row;
+    this.state.schedulePage = 'alert';
+    this.state.scheduleError = '';
+  }
+
   backFromSchedule(): void {
     if (this.state.scheduleSaving || this.host.inboxCleaning()) return;
     if (this.state.schedulePage === 'detail') this.state.schedulePage = this.schedulePrevious;
-    else this.state.schedulePage = '';
+    else if (this.state.schedulePage === 'alert') {
+      this.state.scheduleAlert = undefined;
+      this.state.schedulePage = this.schedulePrevious;
+    } else this.state.schedulePage = '';
     this.state.scheduleError = '';
   }
 

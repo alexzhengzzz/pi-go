@@ -205,7 +205,7 @@ export async function control(input) {
     // Deliver the one-time ticket through the same USB debugging channel that
     // launched the app, so the phone pairs without manual code entry.
     const warning = usb ? await usbLaunch(usb.args, port, config.ticket) : undefined;
-    return { code: config.code, bundle: config.bundle, warning, usbTarget: usb?.target, bridge: await status(port) };
+    return { code: config.code, qr: config.qr, bundle: config.bundle, warning, usbTarget: usb?.target, bridge: await status(port) };
   }
   if (input.action === 'stop' && appServices) {
     const current = await status(port);

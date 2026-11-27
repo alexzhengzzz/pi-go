@@ -20,6 +20,7 @@ export interface BridgeEndpoint {
   token: string;
   ca?: string;
   pin?: string;
+  skipTlsVerify?: boolean;
 }
 
 export interface SessionCapabilities {
@@ -261,6 +262,8 @@ export interface BridgeReply {
   workspaces?: WorkspaceRow[];
   agents?: AgentInfo[];
   token?: string;
+  ca?: string;
+  pin?: string;
   error?: string;
   session?: SessionState;
   sessions?: SessionRow[];

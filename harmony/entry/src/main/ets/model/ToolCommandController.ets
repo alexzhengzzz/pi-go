@@ -194,7 +194,7 @@ export class ToolCommandController {
       const result = await this.host.request('/models');
       if (epoch !== session.epoch || result.session?.id !== session.currentId) return;
       session.models = result.models ?? [];
-      if (!session.models.length) { session.status = '没有可用模型，请在电脑上检查 Pi CLI 的模型配置。'; return; }
+      if (!session.models.length) { session.status = '没有可用模型，请在电脑上检查当前 Agent 的模型配置。'; return; }
       this.state.showModelMenu = true;
     } catch (error) {
       if (epoch !== session.epoch) return;

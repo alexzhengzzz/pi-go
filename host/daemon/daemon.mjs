@@ -19,6 +19,7 @@ import { stateDirectory } from '../bridge/session-metadata.mjs';
 import { WorkspaceRegistry } from './registry.mjs';
 import { RuntimePool } from './runtimes.mjs';
 import { ScheduleService } from './schedules.mjs';
+import { AlertService } from './alerts.mjs';
 import { createDaemonHost } from './host.mjs';
 
 async function main() {
@@ -38,7 +39,14 @@ async function main() {
     process.stderr.write(`pi-go scheduler unavailable: ${error.message}\n`);
     schedules = undefined;
   }
-  const host = createDaemonHost({ registry, runtimes, schedules });
+  let alerts;
+  try {
+    alerts = new AlertService(join(directory, 'alerts.json'));
+  } catch (error) {
+    process.stderr.write(`pi-go alerts unavailable: ${error.message}\n`);
+    alerts = undefined;
+  }
+  const host = createDaemonHost({ registry, runtimes, schedules, alerts });
 
   await new Promise((resolve, reject) => {
     host.server.once('error', reject);

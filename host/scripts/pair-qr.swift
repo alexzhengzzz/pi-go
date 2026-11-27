@@ -3,7 +3,8 @@ import CoreImage
 import Darwin
 
 struct PairingFile: Decodable {
-    let bundle: String
+    let qr: String?
+    let bundle: String?
 }
 
 func makeCode() throws -> URL {
@@ -13,13 +14,20 @@ func makeCode() throws -> URL {
     guard values.isRegularFile == true, let length = values.fileSize, length <= 4096 else {
         throw CocoaError(.fileReadCorruptFile)
     }
-    let bundle = try JSONDecoder().decode(PairingFile.self, from: Data(contentsOf: source)).bundle
-    guard bundle.range(of: "^[A-Za-z0-9_-]{100,2000}$", options: .regularExpression) != nil,
-          let generator = CIFilter(name: "CIQRCodeGenerator") else {
+    let decoded = try JSONDecoder().decode(PairingFile.self, from: Data(contentsOf: source))
+    let payload: String
+    if let qr = decoded.qr, qr.range(of: "^pigo://[lr]/[^/\\s]+/\\d{6}(?:/[A-Za-z0-9_-]{16})?$", options: .regularExpression) != nil {
+        payload = qr
+    } else if let bundle = decoded.bundle, bundle.range(of: "^[A-Za-z0-9_-]{100,2000}$", options: .regularExpression) != nil {
+        payload = bundle
+    } else {
         throw CocoaError(.fileReadCorruptFile)
     }
-    generator.setValue(Data(bundle.utf8), forKey: "inputMessage")
-    generator.setValue("M", forKey: "inputCorrectionLevel")
+    guard let generator = CIFilter(name: "CIQRCodeGenerator") else {
+        throw CocoaError(.fileReadCorruptFile)
+    }
+    generator.setValue(Data(payload.utf8), forKey: "inputMessage")
+    generator.setValue("L", forKey: "inputCorrectionLevel")
     guard let code = generator.outputImage else { throw CocoaError(.fileWriteUnknown) }
     let bounds = code.extent.insetBy(dx: -4, dy: -4)
     let white = CIImage(color: CIColor(red: 1, green: 1, blue: 1)).cropped(to: bounds)

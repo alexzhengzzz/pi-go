@@ -79,7 +79,7 @@ export function scheduleRunStatus(status: string): string {
 export function scheduleRunReason(reason: string): string {
   switch (reason) {
     case 'interaction_required': return 'Pi 需要确认或输入，本次无人值守运行已结束。';
-    case 'model_failed': return '模型未正常完成，请查看 Pi 会话。';
+    case 'model_failed': return '模型未正常完成，请查看运行会话。';
     case 'runtime_exited': return 'Pi 进程提前退出。';
     case 'prompt_failed': return 'Pi 未能启动或接收提示词。';
     case 'run_timeout': return '本次运行超过 30 分钟。';

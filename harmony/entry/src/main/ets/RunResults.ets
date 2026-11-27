@@ -25,6 +25,11 @@ export interface RunEvent {
   sessionId: string;
   cwd: string;
   title?: string;
+  body?: string;
+  source?: string;
+  severity?: string;
+  suggestedPrompt?: string;
+  artifacts?: string[];
   status: string;
   messageId?: string;
   pendingId?: string;
@@ -47,6 +52,7 @@ export function runStatus(status: string): string {
     case 'waiting': return '等待处理';
     case 'failed': return '运行失败';
     case 'stopped': return '已停止';
+    case 'alert': return '工作区提醒';
     default: return '已完成';
   }
 }

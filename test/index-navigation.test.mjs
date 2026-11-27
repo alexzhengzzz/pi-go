@@ -29,7 +29,7 @@ function method(name) {
   return page.slice(start + 1, end);
 }
 const { runNotificationText } = await import('../harmony/entry/src/main/ets/RunResults.ets');
-const methods = ['setDrawer', 'swipeDrawer', 'loadSessions', 'applyCatalog', 'positionTranscript', 'loadSessionStatus', 'applyRunningStatus',
+const methods = ['setDrawer', 'swipeDrawer', 'loadSessions', 'applyCatalog', 'positionTranscript', 'clearFinishedRunningSession', 'loadSessionStatus', 'applyRunningStatus',
   'backgroundRunning', 'backgroundActive', 'sessionState', 'sessionRunning', 'toggleSpace', 'updateSidebarRows', 'revealLibraryAnchor',
   'appendSessionPage', 'setWorkspacePage', 'loadWorkspacePage', 'resetCatalog',
   'chooseComputer', 'leaveComputer', 'persistComputers', 'pair', 'workspaceName', 'openNewSpace', 'closeNewSpace',
@@ -1520,6 +1520,35 @@ test('chat polling keeps watching background tasks with the drawer closed', asyn
   await state.poll();
   assert.equal(statusRequests, 2, 'background tasks keep refreshing while the chat stays open');
   assert.deepEqual(state.backgroundRunning().map(row => row.id), ['two']);
+});
+
+test('settled current session is pruned from runningSessionIds and ignores stale in-flight status', async () => {
+  const state = fixture();
+  state.reachable = true;
+  state.currentId = 'one';
+  state.idle = false;
+  state.queued = false;
+  state.runningSessionIds = ['one', 'two'];
+  state.runningSessions = [{ id: 'one', name: 'Current' }, { id: 'two', name: 'Other' }];
+  state.runCenter = { observeRun() {}, reconcileObservedRuns() {} };
+  state.observeSessionRun({ id: 'one', idle: true, queued: false, name: 'Current' });
+  assert.deepEqual(state.runningSessionIds, ['two']);
+  assert.deepEqual(state.runningSessions.map(row => row.id), ['two']);
+
+  // Stale in-flight /sessions/status started before current session settled to idle must not re-add it.
+  let finish;
+  state.loadSessionStatus = Page.prototype.loadSessionStatus;
+  state.request = () => new Promise(resolve => { finish = resolve; });
+  state.idle = false;
+  state.liveRevision = 1;
+  const pending = state.loadSessionStatus();
+  state.liveRevision = 2;
+  state.idle = true;
+  state.queued = false;
+  finish({ runningSessions: [{ id: 'one', name: 'Current' }], runningSessionIds: ['one'] });
+  await pending;
+  assert.deepEqual(state.runningSessionIds, []);
+  assert.deepEqual(state.runningSessions, []);
 });
 
 test('idle chats only probe running status on a slow schedule', async () => {

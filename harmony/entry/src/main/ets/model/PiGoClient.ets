@@ -41,6 +41,8 @@ export class PiGoClient {
       if (ca && pin) {
         opts.caData = ca;
         opts.certificatePinning = { hashAlgorithm: 'SHA-256', publicKeyHash: pin };
+      } else if (endpoint.skipTlsVerify && path === '/pair') {
+        opts.remoteValidation = 'skip';
       }
       if (input) opts.extraData = JSON.stringify(input);
       const response = await req.request(`${address}${path}`, opts);

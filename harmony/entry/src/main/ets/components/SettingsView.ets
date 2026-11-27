@@ -65,6 +65,7 @@ export struct SettingsView {
               `${this.computerTitle()} · ${this.store.session.reachable ? '已连接' : '离线'}` :
               (this.store.computers.length ? `${computerGroups(this.store.computers).length} 台电脑` : '配对并连接电脑'))
             this.mineEntry('theme', '系统主题', `${themeStyle(this.store.themeId).label} · ${appearanceMode(this.store.modeId).label}`)
+            this.backgroundPushSettings()
             this.runNoticeSettings()
             this.liveViewSettings()
           }.width('100%').alignItems(HorizontalAlign.Start)
@@ -246,37 +247,67 @@ export struct SettingsView {
       }.width('100%').padding(4).borderRadius(14).backgroundColor($r('app.color.pigo_control'))
         .enabled(!this.store.session.busy && !this.store.removeTarget)
       if (this.store.pairingMode !== 'usb') {
-        Text(this.store.pairingMode === 'remote' ? '扫描或粘贴 Pi Go.app「公网」生成的配对包。' :
-          '扫描或粘贴 Pi Go.app「局域网扫码」生成的配对包。').fontSize(14).fontColor($r('app.color.pigo_muted')).width('100%')
+        Text(this.store.pairingMode === 'remote' ? '扫描 Pi Go.app「公网」二维码，或输入公网地址与 6 位配对码。' :
+          '扫描 Pi Go.app「局域网」二维码，或直接输入 6 位配对码。').fontSize(14).fontColor($r('app.color.pigo_muted')).width('100%')
         Row({ space: 8 }) {
-          if (this.store.pairingMode === 'lan') {
-            Button('发现电脑').chatAction().id('lan-discover').enabled(!this.store.session.busy && !this.store.removeTarget).onClick(() => { void this.store.findLanCompanions(); })
-          }
-          Button('扫码导入').chatAction().id(this.store.pairingMode === 'remote' ? 'remote-scan' : 'lan-scan')
+          Button('扫码配对').chatAction().id(this.store.pairingMode === 'remote' ? 'remote-scan' : 'lan-scan')
+            .layoutWeight(1).height(42)
             .enabled(!this.store.session.busy && !this.store.removeTarget).onClick(() => { void this.store.scanPairingBundle(); })
+          if (this.store.pairingMode === 'lan') {
+            Button('发现电脑').chatAction().id('lan-discover').height(42)
+              .enabled(!this.store.session.busy && !this.store.removeTarget).onClick(() => { void this.store.findLanCompanions(); })
+          }
         }.width('100%')
         if (this.store.lanCandidates.length) {
-          Text('附近地址（未验证）').fontSize(12).fontColor($r('app.color.pigo_muted')).width('100%')
+          Text('附近电脑（点击选择）').fontSize(12).fontColor($r('app.color.pigo_muted')).width('100%')
           Scroll() {
-            Column({ space: 4 }) {
+            Column({ space: 6 }) {
               ForEach(this.store.lanCandidates, (candidate: string) => {
-                Text(candidate).width('100%').fontSize(14).fontColor($r('app.color.pigo_text'))
+                Button({ type: ButtonType.Normal }) {
+                  Row({ space: 8 }) {
+                    Text(candidate.replace(/^https:\/\//, '')).fontSize(14).fontColor($r('app.color.pigo_text')).layoutWeight(1)
+                    if (this.store.appState.address === candidate) {
+                      SymbolGlyph($r('sys.symbol.checkmark')).fontSize(15).fontColor([this.store.accent()])
+                    }
+                  }.width('100%')
+                }.width('100%').padding({ left: 12, right: 12, top: 8, bottom: 8 }).borderRadius(10)
+                  .backgroundColor(this.store.appState.address === candidate ? this.store.accentTint() : $r('app.color.pigo_control'))
+                  .border({ width: this.store.appState.address === candidate ? 1 : 0, radius: 10, color: this.store.accent() })
+                  .onClick(() => {
+                    this.store.appState.address = candidate;
+                    this.store.pairingBundle = '';
+                  })
               }, (candidate: string) => candidate)
             }.width('100%')
-          }.constraintSize({ maxHeight: 100 }).width('100%').scrollBar(BarState.Off)
+          }.constraintSize({ maxHeight: 120 }).width('100%').scrollBar(BarState.Off)
         }
-        TextInput({ placeholder: this.store.pairingMode === 'remote' ? '公网配对包' : '局域网配对包', text: this.store.pairingBundle })
-          .id(this.store.pairingMode === 'remote' ? 'remote-bundle' : 'lan-bundle').type(InputType.Password).maxLength(4096)
+        TextInput({
+          placeholder: this.store.pairingMode === 'remote' ? '公网地址（如 IP:端口）' : '电脑地址（如 192.168.1.50:18981）',
+          text: this.store.appState.address
+        })
+          .id(this.store.pairingMode === 'remote' ? 'remote-address' : 'lan-address')
           .backgroundColor($r('app.color.pigo_control')).fontColor($r('app.color.pigo_text'))
           .placeholderColor($r('app.color.pigo_muted'))
-          .onChange((value: string) => { this.store.pairingBundle = value; }).width('100%')
+          .onChange((value: string) => {
+            this.store.appState.address = value;
+            this.store.pairingBundle = '';
+          }).width('100%')
+        TextInput({ placeholder: '输入 6 位数字配对码', text: this.store.ticket })
+          .id(this.store.pairingMode === 'remote' ? 'remote-code' : 'lan-code')
+          .type(InputType.Number).maxLength(6)
+          .backgroundColor($r('app.color.pigo_control')).fontColor($r('app.color.pigo_text'))
+          .placeholderColor($r('app.color.pigo_muted'))
+          .onChange((value: string) => {
+            this.store.ticket = value;
+            this.store.pairingBundle = '';
+          }).width('100%')
       } else {
         Text('用 USB 连接电脑并允许调试，再在 Pi Go.app 选择「USB」并点「连接手机」。').fontSize(14).fontColor($r('app.color.pigo_muted')).width('100%')
         TextInput({ placeholder: 'USB 地址', text: this.store.appState.address }).id('address')
           .backgroundColor($r('app.color.pigo_control')).fontColor($r('app.color.pigo_text'))
           .placeholderColor($r('app.color.pigo_muted'))
           .onChange((value: string) => { this.store.appState.address = value; }).width('100%')
-        TextInput({ placeholder: '8 位配对码或一次性票据', text: this.store.ticket }).id('ticket').type(InputType.Password)
+        TextInput({ placeholder: '6 位配对码或一次性票据', text: this.store.ticket }).id('ticket').type(InputType.Password)
           .backgroundColor($r('app.color.pigo_control')).fontColor($r('app.color.pigo_text'))
           .placeholderColor($r('app.color.pigo_muted'))
           .onChange((value: string) => { this.store.ticket = value; }).width('100%')
@@ -607,6 +638,21 @@ export struct SettingsView {
       }, (style: ThemeStyle) => style.id)
     }.width('100%').padding(16).attributeModifier(themedCardSurface(this.store.darkMode, this.store.themeId))
     if (this.store.appearanceNotice) Text(this.store.appearanceNotice).fontSize(13).fontColor($r('app.color.pigo_warning'))
+  }
+  @Builder
+  backgroundPushSettings() {
+    Row({ space: 12 }) {
+      Column({ space: 4 }) {
+        Text('后台通知').fontSize(16).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
+        Text(this.store.runCenter.state.pushStatus || '应用未在前台时通过系统推送接收动态与提醒')
+          .fontSize(13).fontColor($r('app.color.pigo_muted'))
+      }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+      if (this.store.runCenter.state.pushSaving) LoadingProgress().width(16).height(16).color(this.store.accent())
+      Toggle({ type: ToggleType.Switch, isOn: this.store.runCenter.state.pushEnabled })
+        .id('inbox-push-toggle').selectedColor(this.store.accent()).accessibilityText('后台通知')
+        .enabled(!this.store.runCenter.state.pushSaving)
+        .onChange((enabled: boolean) => { void this.store.runCenter.setPushEnabled(enabled); })
+    }.width('100%').padding(14).attributeModifier(themedCardSurface(this.store.darkMode, this.store.themeId))
   }
   @Builder
   runNoticeSettings() {

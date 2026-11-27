@@ -33,6 +33,25 @@ test('bridge requests retain the endpoint, bearer, certificate pin and slow-oper
   assert.equal(destroyed, true);
 });
 
+test('bridge skips TLS verification only for /pair when skipTlsVerify is set', async (context) => {
+  const calls = [];
+  context.after(() => { delete globalThis.pigoTestHttp; });
+  globalThis.pigoTestHttp = {
+    createHttp: () => ({
+      async request(url, opts) {
+        calls.push({ url, opts });
+        return { responseCode: 200, result: '{"token":"' + 'a'.repeat(64) + '"}' };
+      },
+      destroy() {}
+    })
+  };
+  const endpoint = { address: 'https://192.168.1.50:18981', token: '', skipTlsVerify: true };
+  await new PiGoClient().request(endpoint, '/pair', { ticket: '123456' });
+  await new PiGoClient().request(endpoint, '/chat');
+  assert.equal(calls[0].opts.remoteValidation, 'skip');
+  assert.equal(calls[1].opts.remoteValidation, undefined);
+});
+
 test('SSE assembles split UTF-8 frames and stops dispatching after the stream changes', async (context) => {
   const events = new Map();
   const frames = [];

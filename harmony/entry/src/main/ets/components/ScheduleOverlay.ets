@@ -1,12 +1,10 @@
 import { PiGoPageStore } from '../model/PiGoPageStore';
 import { workspaceName } from '../model/SessionStore';
 import { immersiveSurface, themedCardSurface } from '../Immersive';
-import { Companion } from '../CredentialVault';
-import { ScheduleJob, RunMessage, scheduleTime, scheduleRunStatus, scheduleRunReason, isCurrentScheduleComputer } from '../ScheduledRuns';
-import { InboxRun, runStatus } from '../RunResults';
-import { WorkspaceRow } from '../model/PiGoTypes';
+import { RunMessage, scheduleTime, scheduleRunStatus, scheduleRunReason, isCurrentScheduleComputer } from '../ScheduledRuns';
+import { InboxRun } from '../RunResults';
 import { headerSymbol } from './HeaderSymbol';
-import { runStatusInk, runStatusMark } from './RunStatusMark';
+import { runStatusMark } from './RunStatusMark';
 import { canvasFadeStops } from '../Appearance';
 import { pagePushTransition, subPageTransition } from './PageTransitions';
 
@@ -30,18 +28,13 @@ export struct ScheduleOverlay {
   @Local private selectingRuns: boolean = false;
   @Local private selectedRunKeys: string[] = [];
 
-  private recentRuns(): InboxRun[] {
-    return this.store.runCenter.displayedInboxRuns().filter((row: InboxRun): boolean => row.run.status !== 'waiting');
-  }
-
   private historyRuns(): RunMessage[] {
     return this.store.scheduleController.state.scheduleMessages.filter((message: RunMessage): boolean =>
       isCurrentScheduleComputer(this.store.computers, this.store.base, message));
   }
 
   private selectableRunKeys(): string[] {
-    return this.store.scheduleController.state.schedulePage === 'inbox' ? this.recentRuns().map((row: InboxRun): string => row.run.id) :
-      this.historyRuns().map((message: RunMessage): string => message.key);
+    return this.historyRuns().map((message: RunMessage): string => message.key);
   }
 
   private selectedKeys(): string[] {
@@ -73,10 +66,6 @@ export struct ScheduleOverlay {
   private async deleteSelectedRuns(): Promise<void> {
     const keys = this.selectedKeys();
     if (!keys.length || (this.store.scheduleController.state.scheduleSaving || this.store.runCenter.state.inboxCleaning)) return;
-    if (this.store.scheduleController.state.schedulePage === 'inbox') {
-      if (await this.store.runCenter.dismissInboxRuns(keys)) this.resetRunSelection();
-      return;
-    }
     const messages = this.historyRuns().filter((message: RunMessage): boolean => keys.includes(message.key));
     const computer = this.store.base;
     try {
@@ -95,10 +84,13 @@ export struct ScheduleOverlay {
     Row({ space: 12 }) {
       Button({ type: ButtonType.Normal }) {
         headerSymbol($r('sys.symbol.chevron_left'), $r('app.color.pigo_text'), 21)
-      }.headerAction().attributeModifier(immersiveSurface(this.store.darkMode)).accessibilityText('返回').enabled(!(this.store.scheduleController.state.scheduleSaving || this.store.runCenter.state.inboxCleaning))
+      }.headerAction().attributeModifier(immersiveSurface(this.store.darkMode)).accessibilityText('返回')
+        .enabled(!(this.store.scheduleController.state.scheduleSaving || this.store.runCenter.state.inboxCleaning))
         .onClick(() => { this.store.scheduleController.backFromSchedule(); })
-      Text(this.store.scheduleController.state.schedulePage === 'inbox' ? '收件箱' : this.store.scheduleController.state.schedulePage === 'detail' ? '运行详情' :
-        this.store.scheduleController.state.schedulePage === 'editor' ? (this.store.scheduleController.state.scheduleEditing ? '编辑定时任务' : '新建定时任务') : '运行历史')
+      Text(this.store.scheduleController.state.schedulePage === 'alert' ? '提醒详情' :
+        this.store.scheduleController.state.schedulePage === 'detail' ? '运行详情' :
+        this.store.scheduleController.state.schedulePage === 'editor' ?
+          (this.store.scheduleController.state.scheduleEditing ? '编辑定时任务' : '新建定时任务') : '运行历史')
         .layoutWeight(1).fontSize(20).fontWeight(FontWeight.Bold).fontColor($r('app.color.pigo_text'))
     }.width('100%').padding({ left: 16, right: 16, top: this.store.statusBarHeight + 8, bottom: 12 })
       .linearGradient({
@@ -111,10 +103,14 @@ export struct ScheduleOverlay {
     Navigation() {
       Column({ space: 10 }) {
         Stack({ alignContent: Alignment.TopStart }) {
-          if (this.store.scheduleController.state.schedulePage === 'inbox') {
-            Column() {
-              this.scheduleInboxList()
-            }.width('100%').height('100%').transition(subPageTransition())
+          if (this.store.scheduleController.state.schedulePage === 'alert' && this.store.scheduleController.state.scheduleAlert) {
+            Scroll() {
+              Column({ space: 14 }) {
+                this.alertDetailView(this.store.scheduleController.state.scheduleAlert)
+              }.width('100%').alignItems(HorizontalAlign.Start)
+                .padding({ left: 16, right: 16, top: this.store.statusBarHeight + this.store.headerHeight() + 14, bottom: 24 })
+            }.width('100%').height('100%').align(Alignment.TopStart).scrollBar(BarState.Off)
+              .transition(subPageTransition())
           } else if (this.store.scheduleController.state.schedulePage === 'history') {
             Column() {
               this.scheduleHistoryList()
@@ -141,12 +137,34 @@ export struct ScheduleOverlay {
               .transition(subPageTransition())
           }
         }.layoutWeight(1).width('100%')
-        if (this.selectingRuns && (this.store.scheduleController.state.schedulePage === 'inbox' || this.store.scheduleController.state.schedulePage === 'history')) {
+        if (this.store.scheduleController.state.schedulePage === 'alert' && this.store.scheduleController.state.scheduleAlert) {
+          Column({ space: 8 }) {
+            if (this.store.scheduleController.state.scheduleAlert.run.cwd) {
+              Button('拉起 Agent 处理').chatAction().width('100%').height(46)
+                .backgroundColor(this.store.accent()).fontColor(this.store.accentForeground())
+                .enabled(!this.store.session.busy && !this.store.session.openingSession)
+                .onClick(() => {
+                  const target = this.store.scheduleController.state.scheduleAlert;
+                  if (!target) return;
+                  this.store.scheduleController.backFromSchedule();
+                  void this.store.runCenter.openInboxRun(target);
+                })
+            }
+            Button('删除这条提醒').chatAction().width('100%').height(46).fontColor($r('app.color.pigo_error'))
+              .enabled(!this.store.runCenter.state.inboxCleaning).onClick(() => {
+                const target = this.store.scheduleController.state.scheduleAlert;
+                if (!target) return;
+                void this.store.runCenter.dismissInboxRuns([target.run.id]).then((removed: boolean) => {
+                  if (removed) this.store.scheduleController.backFromSchedule();
+                });
+              })
+          }.width('100%').padding({ left: 16, right: 16, bottom: this.store.bottomPad() + 8 })
+        } else if (this.selectingRuns && this.store.scheduleController.state.schedulePage === 'history') {
           this.runSelectionActions()
         } else if (this.store.scheduleController.state.schedulePage === 'detail' && this.store.scheduleController.state.scheduleDetail?.run.sessionId) {
           Column({ space: 8 }) {
             if (this.store.isPaired && !isCurrentScheduleComputer(this.store.computers, this.store.base, this.store.scheduleController.state.scheduleDetail)) {
-              Text(`当前聊天在 ${this.store.computerTitle()}`).fontSize(13).fontColor($r('app.color.pigo_muted'))
+              Text(`当前会话在 ${this.store.computerTitle()}`).fontSize(13).fontColor($r('app.color.pigo_muted'))
             }
             Button(`在 ${this.store.scheduleController.state.scheduleDetail.computer} 打开会话`).chatAction().width('100%').height(46)
               .backgroundColor(this.store.accent()).fontColor(this.store.accentForeground())
@@ -165,77 +183,6 @@ export struct ScheduleOverlay {
       })
       .backgroundColor(this.store.themeCanvas()).hitTestBehavior(HitTestMode.BLOCK_HIERARCHY)
       .transition(pagePushTransition())
-  }
-  @Builder
-  scheduleInboxList() {
-    List({ space: 8 }) {
-      ListItem() {
-        Row({ space: 12 }) {
-          Stack() {
-            headerSymbol($r('sys.symbol.bell'), this.store.accent(), 17)
-          }.width(36).height(36).borderRadius(11).backgroundColor(this.store.accentTint())
-          Column({ space: 3 }) {
-            Text('后台通知').fontSize(15).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
-            if (this.store.runCenter.state.pushStatus) {
-              Text(this.store.runCenter.state.pushStatus).fontSize(12).fontColor($r('app.color.pigo_muted'))
-            }
-          }.layoutWeight(1).alignItems(HorizontalAlign.Start)
-          if (this.store.runCenter.state.pushSaving) LoadingProgress().width(16).height(16).color(this.store.accent())
-          Toggle({ type: ToggleType.Switch, isOn: this.store.runCenter.state.pushEnabled }).id('inbox-push-toggle')
-            .accessibilityText('后台通知').enabled(!this.store.runCenter.state.pushSaving)
-            .selectedColor(this.store.accent()).onChange((enabled: boolean) => { void this.store.runCenter.setPushEnabled(enabled); })
-        }.width('100%').padding(12).borderRadius(16).backgroundColor($r('app.color.pigo_panel'))
-          .border({ width: 1, color: $r('app.color.pigo_line') })
-      }
-      if (this.store.scheduleController.state.scheduleError || this.store.scheduleController.state.scheduleOffline.length) {
-        ListItem() {
-          Row({ space: 8 }) {
-            headerSymbol($r('sys.symbol.exclamationmark_circle'), $r('app.color.pigo_warning'), 15)
-            Text(this.store.scheduleController.state.scheduleError || '部分电脑离线，重新连接后会补收结果。').layoutWeight(1)
-              .fontSize(12).fontColor($r('app.color.pigo_muted'))
-          }.padding({ left: 4, top: 4, bottom: 4 })
-        }
-      }
-      if (this.store.runCenter.displayedInboxRuns().some((row: InboxRun): boolean => row.run.status === 'waiting')) {
-        ListItem() { this.inboxSection('待处理') }
-        ForEach(this.store.runCenter.displayedInboxRuns().filter((row: InboxRun): boolean => row.run.status === 'waiting'), (row: InboxRun) => {
-          ListItem() { this.inboxRunRow(row) }
-        }, (row: InboxRun) => `${row.run.id}:${row.address}`)
-      }
-      if (this.recentRuns().length) {
-        ListItem() { this.selectableRunSection('最近会话') }
-        ForEach(this.recentRuns(), (row: InboxRun) => {
-          ListItem() { this.inboxRunRow(row) }
-        }, (row: InboxRun) => `${row.run.id}:${row.address}:${row.unread}`)
-      }
-      if (this.store.scheduleController.state.scheduleMessages.some((message: RunMessage): boolean => !message.dismissed)) {
-        ListItem() { this.inboxSection('定时任务') }
-        ForEach(this.store.scheduleController.state.scheduleMessages.filter((message: RunMessage): boolean => !message.dismissed), (message: RunMessage) => {
-          ListItem() {
-            this.scheduledMessageRow(message)
-          }.swipeAction({ end: this.scheduleInboxDelete.bind(this, message), edgeEffect: SwipeEdgeEffect.None })
-        }, (message: RunMessage) => `${message.key}:${message.unread}`)
-      }
-      if (!this.store.runCenter.displayedInboxRuns().length && !this.store.scheduleController.state.scheduleMessages.some((message: RunMessage): boolean => !message.dismissed)) {
-        ListItem() {
-          Column({ space: 9 }) {
-            Stack() {
-              headerSymbol($r('sys.symbol.inbox'), this.store.accent(), 24)
-            }.width(48).height(48).borderRadius(15).backgroundColor(this.store.accentTint())
-            Text('暂无任务消息').fontSize(15).fontWeight(FontWeight.Medium).fontColor($r('app.color.pigo_text'))
-          }.width('100%').padding({ top: 44, bottom: 36 })
-        }
-      }
-    }.layoutWeight(1).width('100%').scrollBar(BarState.Off).edgeEffect(EdgeEffect.Spring)
-      .contentStartOffset(this.store.statusBarHeight + this.store.headerHeight() + 14)
-      .contentEndOffset(this.store.bottomPad() + 16)
-      .padding({ left: 16, right: 16 })
-  }
-
-  @Builder
-  inboxSection(title: string) {
-    Text(title).fontSize(13).fontWeight(FontWeight.Bold).fontColor($r('app.color.pigo_muted'))
-      .padding({ left: 4, top: 10, bottom: 1 }).accessibilityGroup(true)
   }
 
   @Builder
@@ -274,44 +221,25 @@ export struct ScheduleOverlay {
   }
 
   @Builder
-  inboxRunRow(row: InboxRun) {
-    Button({ type: ButtonType.Normal }) {
-      Row({ space: 11 }) {
-        if (this.selectingRuns && row.run.status !== 'waiting') {
-          this.runSelectionMark(row.run.id)
-        }
-        runStatusMark(row.run.status, this.store.accent(), this.store.accentTint(), 36)
-        Column({ space: 5 }) {
-          Row({ space: 6 }) {
-            Text(row.run.title || 'Pi 会话').fontSize(15).fontWeight(row.unread ? FontWeight.Bold : FontWeight.Medium)
-              .fontColor($r('app.color.pigo_text')).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).layoutWeight(1)
-            if (row.unread) Blank().width(6).height(6).borderRadius(3).backgroundColor(this.store.accent())
-          }.width('100%')
-          Text(`${row.computer} · ${scheduleTime(row.run.finishedAt)}`)
-            .fontSize(11).fontColor($r('app.color.pigo_muted')).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+  alertDetailView(row: InboxRun) {
+    Column({ space: 14 }) {
+      Row({ space: 10 }) {
+        runStatusMark(row.run.severity === 'error' ? 'failed' : 'alert', this.store.accent(), this.store.accentTint(), 36)
+        Column({ space: 4 }) {
+          Text(row.run.title || '工作区提醒').fontSize(17).fontWeight(FontWeight.Bold)
+            .fontColor($r('app.color.pigo_text')).copyOption(CopyOptions.LocalDevice)
+          Text(`${row.computer}${row.run.source ? ' · ' + row.run.source : ''} · ${scheduleTime(row.run.finishedAt)}`)
+            .fontSize(12).fontColor($r('app.color.pigo_muted'))
         }.alignItems(HorizontalAlign.Start).layoutWeight(1)
-        Text(runStatus(row.run.status)).fontSize(11).fontWeight(FontWeight.Medium)
-          .fontColor(runStatusInk(row.run.status, this.store.accent()))
-          .backgroundColor(row.run.status === 'waiting' ? $r('app.color.pigo_warning_panel') : $r('app.color.pigo_control'))
-          .padding({ left: 8, right: 8, top: 4, bottom: 4 }).borderRadius(9)
-      }.width('100%').padding(12)
-    }.id(`inbox-run-${row.run.id}`).width('100%').padding(0).borderRadius(16)
+      }.width('100%').alignItems(VerticalAlign.Top)
+      Divider().color($r('app.color.pigo_line'))
+      Text(row.run.body || row.run.title || '无正文内容')
+        .fontSize(15).lineHeight(23).fontColor($r('app.color.pigo_text'))
+        .width('100%').copyOption(CopyOptions.LocalDevice)
+    }.width('100%').padding(16).borderRadius(16)
       .backgroundColor($r('app.color.pigo_panel')).border({ width: 1, color: $r('app.color.pigo_line') })
-      .accessibilitySelected(this.selectingRuns && row.run.status !== 'waiting' && this.selectedRunKeys.includes(row.run.id))
-      .enabled(this.selectingRuns && row.run.status !== 'waiting' ? !(this.store.scheduleController.state.scheduleSaving || this.store.runCenter.state.inboxCleaning) : !this.store.session.busy && !this.store.session.openingSession)
-      .onClick(() => {
-        if (this.selectingRuns && row.run.status !== 'waiting') this.toggleRunSelection(row.run.id);
-        else void this.store.runCenter.openInboxRun(row);
-      })
   }
 
-  @Builder
-  scheduleInboxDelete(message: RunMessage) {
-    Button('删除').id(`schedule-dismiss-${message.run.id}`).width(72).height('100%').padding(0)
-      .fontColor(Color.White).backgroundColor($r('app.color.pigo_error')).borderRadius(14)
-      .accessibilityText(`删除收件箱消息 ${message.run.name}`)
-      .onClick(() => { this.store.scheduleController.dismissScheduleMessage(message); })
-  }
   @Builder
   scheduleHistoryList() {
     List({ space: 12 }) {
@@ -340,6 +268,7 @@ export struct ScheduleOverlay {
       .contentEndOffset(this.store.bottomPad() + 16)
       .padding({ left: 16, right: 16 })
   }
+
   @Builder
   scheduleHistoryDelete(message: RunMessage) {
     Button('删除').id(`schedule-delete-run-${message.run.id}`).width(72).height('100%').padding(0)
@@ -348,6 +277,7 @@ export struct ScheduleOverlay {
       .enabled(!(this.store.scheduleController.state.scheduleSaving || this.store.runCenter.state.inboxCleaning))
       .onClick(() => { void this.store.scheduleController.deleteScheduleRuns([message]); })
   }
+
   @Builder
   scheduleEditor() {
     Column({ space: 12 }) {
@@ -371,7 +301,7 @@ export struct ScheduleOverlay {
         .backgroundColor($r('app.color.pigo_control')).fontColor($r('app.color.pigo_text'))
         .placeholderColor($r('app.color.pigo_muted'))
         .onChange((value: string) => { this.store.scheduleController.state.scheduleName = value; })
-      Text('让 Pi 执行什么').fontSize(13).fontColor($r('app.color.pigo_muted'))
+      Text('让 Agent 执行什么').fontSize(13).fontColor($r('app.color.pigo_muted'))
       TextArea({ text: this.store.scheduleController.state.schedulePrompt, placeholder: '汇总今天的工作区变更' }).id('schedule-prompt').maxLength(1600).height(112)
         .backgroundColor($r('app.color.pigo_control')).fontColor($r('app.color.pigo_text'))
         .placeholderColor($r('app.color.pigo_muted'))
@@ -422,6 +352,7 @@ export struct ScheduleOverlay {
         })
     }.width('100%').alignItems(HorizontalAlign.Start)
   }
+
   @Builder
   scheduledMessageRow(message: RunMessage) {
     Button({ type: ButtonType.Normal }) {
@@ -454,6 +385,7 @@ export struct ScheduleOverlay {
         else this.store.scheduleController.showScheduleDetail(message);
       })
   }
+
   @Builder
   scheduledRunDetail(message: RunMessage) {
     Column({ space: 12 }) {
@@ -479,16 +411,19 @@ export struct ScheduleOverlay {
       }
     }.width('100%').alignItems(HorizontalAlign.Start)
   }
+
   private scheduleStatusSymbol(status: string): Resource {
     if (status === 'succeeded') return $r('sys.symbol.checkmark_circle');
     if (status === 'failed' || status === 'interrupted') return $r('sys.symbol.exclamationmark_circle');
     return $r('sys.symbol.clock');
   }
+
   private scheduleStatusColor(status: string): Resource {
     if (status === 'succeeded') return $r('app.color.pigo_success');
     if (status === 'failed' || status === 'interrupted') return $r('app.color.pigo_error');
     return $r('app.color.pigo_warning');
   }
+
   private scheduleStatusPanel(status: string): Resource {
     if (status === 'succeeded') return $r('app.color.pigo_control');
     if (status === 'failed' || status === 'interrupted') return $r('app.color.pigo_error_panel');

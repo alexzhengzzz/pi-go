@@ -49,10 +49,21 @@ function authorization(account) {
   return `Bearer ${payload}.${signature.toString('base64url')}`;
 }
 
+function clipPushText(value, limit) {
+  if (typeof value !== 'string') return '';
+  const chars = Array.from(value.replace(/\s+/g, ' ').trim());
+  return chars.length > limit ? `${chars.slice(0, limit - 1).join('')}…` : chars.join('');
+}
+
 export function pushMessage(event, subscription, test) {
-  const status = { completed: '任务已完成', failed: '任务运行失败', stopped: '任务已停止', waiting: '任务等待你的处理' };
+  const status = { completed: '任务已完成', failed: '任务运行失败', stopped: '任务已停止', waiting: '任务等待你的处理', alert: '收到一条工作区提醒' };
+  const isAlert = event.status === 'alert';
+  const title = isAlert ? (clipPushText(event.title, 40) || 'Pi Go 提醒') : 'Pi Go';
+  const body = isAlert
+    ? (clipPushText(event.body, 100) || (event.source ? `${clipPushText(event.source, 24)} 提醒` : status.alert))
+    : status[event.status];
   return {
-    payload: { notification: { category: 'WORK', title: 'Pi Go', body: status[event.status],
+    payload: { notification: { category: 'WORK', title, body,
       appMessageId: hash(event.id).slice(0, 32),
       clickAction: { actionType: 0, data: { pigoPushDevice: subscription.device, pigoPushEvent: event.id,
         pigoPushSession: event.sessionId || '', pigoPushPending: event.status === 'waiting' ? event.pendingId : '' } } } },

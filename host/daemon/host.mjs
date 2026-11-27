@@ -19,10 +19,10 @@ const logTiming = (label, startMs, extra = '') => {
   if (!timingEnabled) return;
   process.stderr.write(`[pigo-timing] daemon.${label}: ${(performance.now() - startMs).toFixed(1)}ms${extra ? ` ${extra}` : ''}\n`);
 };
-const mutatingRoutes = new Set(['/open', '/new', '/authorize', '/create-workspace', '/close-workspace', '/rename-workspace', '/remove-workspace', '/delete-session', '/schedules/update']);
+const mutatingRoutes = new Set(['/open', '/new', '/authorize', '/create-workspace', '/close-workspace', '/rename-workspace', '/remove-workspace', '/delete-session', '/schedules/update', '/alerts/emit', '/alerts/delete']);
 const routes = new Set(['/open', '/new', '/catalog', '/projects', '/authorize', '/pending', '/answer',
   '/create-workspace', '/close-workspace', '/rename-workspace', '/remove-workspace', '/delete-session', '/workspaces', '/workspace-library', '/session-deleted',
-  '/schedules/sync', '/schedules/update']);
+  '/schedules/sync', '/schedules/update', '/alerts/emit', '/alerts/sync', '/alerts/delete']);
 const bodyLimit = 8192;
 
 export function daemonProfile() {
@@ -80,7 +80,7 @@ async function trashSession(path) {
   await run('/usr/bin/osascript', ['-l', 'JavaScript', '-e', script, path], { timeout: 8000 });
 }
 
-export function createDaemonHost({ registry, runtimes, schedules, profile = daemonProfile(), trash = trashSession, hasExternalPi = externalPiRunning }) {
+export function createDaemonHost({ registry, runtimes, schedules, alerts, profile = daemonProfile(), trash = trashSession, hasExternalPi = externalPiRunning }) {
   let revision = randomUUID();
   const deletedSessions = new Map();
   let busy = false;
@@ -94,7 +94,7 @@ export function createDaemonHost({ registry, runtimes, schedules, profile = daem
 
   const health = () => ({
     protocol: 'pi-go-desktop-host/1', profile, canCreateWorkspace: true, workspaceLibrary: true, workspacePages: true,
-    schedules: schedules?.closing === false, agents: currentAgents(),
+    schedules: schedules?.closing === false, alerts: Boolean(alerts), agents: currentAgents(),
   });
   const registration = registerSocket(server, health);
 
@@ -187,6 +187,22 @@ export function createDaemonHost({ registry, runtimes, schedules, profile = daem
       if (request.url === '/schedules/update') {
         if (!schedules || schedules.closing) return reply(response, 404, { error: 'schedules_unsupported' });
         const [status, data] = schedules.update(input);
+        return reply(response, status, data);
+      }
+      if (request.url === '/alerts/emit') {
+        if (!alerts) return reply(response, 404, { error: 'alerts_unsupported' });
+        const [status, data] = alerts.emit(input);
+        return reply(response, status, data);
+      }
+      if (request.url === '/alerts/sync') {
+        if (!alerts) return reply(response, 404, { error: 'alerts_unsupported' });
+        const paths = Array.isArray(input.paths) ? input.paths.filter((p) => typeof p === 'string') : [];
+        return reply(response, 200, alerts.snapshot(paths));
+      }
+      if (request.url === '/alerts/delete') {
+        if (!alerts) return reply(response, 404, { error: 'alerts_unsupported' });
+        const paths = Array.isArray(input.paths) ? input.paths.filter((p) => typeof p === 'string') : [];
+        const [status, data] = alerts.remove(input.id, paths);
         return reply(response, status, data);
       }
       if (request.url === '/pending' || request.url === '/answer') {

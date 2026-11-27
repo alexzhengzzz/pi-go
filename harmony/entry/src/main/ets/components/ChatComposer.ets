@@ -264,7 +264,7 @@ export struct ChatComposer {
         }, (model: ModelOption) => `${model.provider}-${model.id}`)
         if (!this.store.session.models.length) {
           ListItem() {
-            Text('没有可用模型，请在电脑上检查 Pi CLI 的模型配置。').fontSize(13)
+            Text('没有可用模型，请在电脑上检查当前 Agent 的模型配置。').fontSize(13)
               .fontColor($r('app.color.pigo_muted')).width('100%')
           }
         }

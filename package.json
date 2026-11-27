@@ -10,6 +10,7 @@
     "host/daemon/runtimes.mjs",
     "host/daemon/registry.mjs",
     "host/daemon/schedules.mjs",
+    "host/daemon/alerts.mjs",
     "host/daemon/catalog.mjs",
     "host/agents/jsonrpc.mjs",
     "host/agents/registry.mjs",
@@ -46,8 +47,12 @@
     "host/macos/ScreenCapture.swift",
     "host/scripts/build-pairing-app.sh",
     "host/bridge/computer-sessions.mjs",
-    "host/scripts/install-daemon-launchd.sh"
+    "host/scripts/install-daemon-launchd.sh",
+    "host/scripts/pigo-notify.mjs"
   ],
+  "bin": {
+    "pigo-notify": "./host/scripts/pigo-notify.mjs"
+  },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*"
   },

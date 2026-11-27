@@ -4,13 +4,21 @@ import type { Companion } from '../CredentialVault';
 import { validCompanion } from '../CompanionCheck';
 import { withComputerAssignment } from '../ComputerGroups';
 import { discoverLan } from '../LanDiscovery';
-import { decodePairingBundle, validUsb } from '../PairingCode';
+import { decodePairingBundle, normalizeSecureUrl, pinMatchesPrefix, validSecureAddress, validSecureHostUrl, validUsb } from '../PairingCode';
 import { MAX_COMPUTERS } from './PiGoConstants';
 import type { BridgeEndpoint, BridgeReply, Payload } from './PiGoTypes';
 
 export interface PairingRequest {
   endpoint: BridgeEndpoint;
   ticket: string;
+  remote: boolean;
+  pinPrefix?: string;
+}
+
+export interface PairedCredentials {
+  token: string;
+  ca?: string;
+  pin?: string;
 }
 
 export class ConnectionManager {
@@ -45,40 +53,66 @@ export class ConnectionManager {
 
   pairingRequest(mode: string, address: string, ticket: string, rawBundle: string, computers: Companion[]): PairingRequest {
     let endpoint: BridgeEndpoint = { address: address.trim(), token: '' };
-    let code = ticket.trim().toLowerCase();
+    let code = ticket.replace(/\s+/g, '').toLowerCase();
+    const remote = mode === 'remote';
+    let pinPrefix: string | undefined;
     if (mode !== 'usb') {
-      try {
-        const bundle = decodePairingBundle(rawBundle, mode === 'remote');
-        endpoint = { address: bundle.url, token: '', ca: bundle.ca, pin: bundle.pin };
-        code = bundle.ticket;
-      } catch {
-        throw new Error(mode === 'remote' ? '请导入 Pi Go.app 生成的公网配对包。' : '请导入 Pi Go.app 生成的局域网配对包。');
+      if (rawBundle.trim()) {
+        try {
+          const bundle = decodePairingBundle(rawBundle, remote);
+          endpoint = bundle.ca && bundle.pin
+            ? { address: bundle.url, token: '', ca: bundle.ca, pin: bundle.pin }
+            : { address: bundle.url, token: '', skipTlsVerify: true };
+          code = bundle.ticket;
+          pinPrefix = bundle.pinPrefix;
+        } catch {
+          throw new Error(remote ? '请扫描 Pi Go.app「公网」二维码，或输入地址和 6 位配对码。' :
+            '请扫描 Pi Go.app「局域网」二维码，或输入地址和 6 位配对码。');
+        }
+      } else {
+        const url = normalizeSecureUrl(address, remote);
+        if (!validSecureHostUrl(url, remote)) {
+          throw new Error(remote ? '请输入有效的公网地址（如 IP:端口）。' : '请先发现或输入电脑局域网地址（如 192.168.1.50:18981）。');
+        }
+        if (!/^\d{6}$/.test(code)) {
+          throw new Error('请输入 6 位数字配对码。');
+        }
+        endpoint = { address: url, token: '', skipTlsVerify: true };
       }
-    } else if (!validUsb(endpoint.address) || !/^(\d{8}|[a-f0-9]{64})$/.test(code)) {
-      throw new Error('请输入本机 USB 地址和有效的一次性票据。');
+    } else if (!validUsb(endpoint.address) || !/^(\d{6}|\d{8}|[a-f0-9]{64})$/.test(code)) {
+      throw new Error('请输入本机 USB 地址和有效的 6 位配对码或一次性票据。');
     }
     if (computers.length >= MAX_COMPUTERS &&
         !computers.some((record: Companion): boolean => record.address === endpoint.address)) {
       throw new Error('已保存 12 条连接。请先移除不再使用的连接。');
     }
-    return { endpoint: endpoint, ticket: code };
+    return { endpoint: endpoint, ticket: code, remote: remote, pinPrefix: pinPrefix };
   }
 
   async pair(
     pairing: PairingRequest,
     request: (path: string, input: Payload, endpoint: BridgeEndpoint) => Promise<BridgeReply>
-  ): Promise<string> {
+  ): Promise<PairedCredentials> {
     const result = await request('/pair', { ticket: pairing.ticket }, pairing.endpoint);
     if (!result.token || !/^[a-f0-9]{64}$/.test(result.token)) throw new Error('invalid_token');
-    return result.token;
+    if (validUsb(pairing.endpoint.address)) {
+      return { token: result.token };
+    }
+    const ca = pairing.endpoint.ca ?? result.ca;
+    const pin = pairing.endpoint.pin ?? result.pin;
+    if (!ca || !pin || !validSecureAddress(pairing.endpoint.address, ca, pin, pairing.remote) ||
+        !pinMatchesPrefix(pin, pairing.pinPrefix)) {
+      throw new Error('invalid_tls_identity');
+    }
+    return { token: result.token, ca: ca, pin: pin };
   }
 
-  pairedComputer(endpoint: BridgeEndpoint, token: string, computers: Companion[], computerId: string,
+  pairedComputer(endpoint: BridgeEndpoint, credentials: PairedCredentials, computers: Companion[], computerId: string,
     newId: () => string): Companion {
     const previous = computers.find((item: Companion): boolean => item.address === endpoint.address);
     const target = computers.find((item: Companion): boolean => item.computerId === computerId);
     const computer = previous ?? target;
-    return { address: endpoint.address, token: token, ca: endpoint.ca, pin: endpoint.pin,
+    return { address: endpoint.address, token: credentials.token, ca: credentials.ca ?? endpoint.ca, pin: credentials.pin ?? endpoint.pin,
       computerId: computer?.computerId ?? newId(), computerName: computer?.computerName };
   }
 

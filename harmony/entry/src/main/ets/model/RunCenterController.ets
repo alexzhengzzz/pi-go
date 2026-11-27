@@ -38,6 +38,7 @@ export interface RunCenterHost {
   scheduleComputerName: (computer: Companion) => string;
   saveSetting: (key: string, value: string | boolean) => Promise<void>;
   openNotifiedSession: (target: Companion, id: string, pendingId: string, eventId: string) => Promise<boolean>;
+  openAlertForAi?: (target: Companion, run: RunEvent) => Promise<boolean>;
   showScheduleInbox: () => void;
   dismissKeyboard: () => void;
   getUIContext: () => UIContext;
@@ -249,8 +250,10 @@ export class RunCenterController {
       this.state.inboxRuns = this.state.inboxRuns.filter((row: InboxRun): boolean => row.address !== computer.address).concat(rows);
       for (const row of rows) {
         if (row.unread) {
+          const watchDetail = row.run.status === 'alert' && row.run.body ?
+            `${row.run.title ?? ''}\n${row.run.body}` : (row.run.title ?? '');
           this.queueWatchReminder(`inbox:${row.run.id}`, runStatus(row.run.status), row.computer,
-            row.run.title ?? '', row.run.finishedAt);
+            watchDetail, row.run.finishedAt);
         }
       }
       await this.syncPushRegistration(computer, result.pushAvailable === true, result.pushError).catch((): void => {});
@@ -262,7 +265,7 @@ export class RunCenterController {
     if (this.host.visible() || !this.state.runNoticesEnabled || !this.backgroundRunNoticesSince ||
       !run.id || this.seenBackgroundRuns.has(run.id) || this.notifiedBackgroundRuns.has(run.id) ||
       !(run.finishedAt >= this.backgroundRunNoticesSince) ||
-      !['completed', 'failed', 'stopped'].includes(run.status)) return;
+      !['completed', 'failed', 'stopped', 'alert'].includes(run.status)) return;
     const since = this.backgroundRunNoticesSince;
     this.notifiedBackgroundRuns.add(run.id);
     try {
@@ -272,14 +275,18 @@ export class RunCenterController {
         return;
       }
       const messageId = runNotificationId(run.id);
-      const title = run.status === 'completed' ? 'OK' : runStatus(run.status);
+      const isAlert = run.status === 'alert';
+      const title = isAlert ? runNotificationText(run.title ?? '工作区提醒') :
+        (run.status === 'completed' ? 'OK' : runStatus(run.status));
+      const text = isAlert ? runNotificationText(run.body ?? run.source ?? '收到一条工作区提醒') :
+        runNotificationText(run.title ?? '');
       await notificationManager.publish({
         label: messageId,
         appMessageId: messageId,
         notificationSlotType: notificationManager.SlotType.SERVICE_INFORMATION,
         content: {
           notificationContentType: notificationManager.ContentType.NOTIFICATION_CONTENT_BASIC_TEXT,
-          normal: { title: title, text: runNotificationText(run.title ?? '') }
+          normal: { title: title, text: text }
         }
       });
       if (this.backgroundRunNoticesSince === since &&
@@ -365,11 +372,13 @@ export class RunCenterController {
       }
     }
     const dismissed = new Set<string>(this.dismissedInboxRuns);
+    const alertDeletions: InboxRun[] = [];
     for (const row of this.state.inboxRuns) {
       if (row.run.status === 'waiting') continue;
       const sessionKey = this.inboxSessionKey(row);
       if (selected.has(row.run.id) || (sessionKey && dismissedSessions.has(sessionKey))) {
         dismissed.add(row.run.id);
+        if (row.run.status === 'alert') alertDeletions.push(row);
       }
     }
     this.state.inboxCleaning = true;
@@ -378,6 +387,12 @@ export class RunCenterController {
       this.dismissedInboxRuns = dismissed;
       this.state.inboxRuns = this.state.inboxRuns.filter((row: InboxRun): boolean =>
         row.run.status === 'waiting' || !dismissed.has(row.run.id));
+      for (const row of alertDeletions) {
+        const computer = this.host.computers().find((item: Companion): boolean => item.address === row.address && validCompanion(item));
+        if (computer) {
+          void this.host.request('/alerts/delete', { id: row.run.id }, this.host.scheduleEndpoint(computer)).catch((): void => {});
+        }
+      }
       return true;
     } catch {
       this.host.getUIContext().getPromptAction().showToast({ message: '暂时无法保存删除记录，请重试。' });
@@ -456,6 +471,16 @@ export class RunCenterController {
   }
 
   async openInboxRun(row: InboxRun): Promise<void> {
+    if (row.run.status === 'alert') {
+      if (!row.run.cwd || !this.host.openAlertForAi) {
+        this.markRunRead(row.run.id);
+        return;
+      }
+      const target = this.host.computers().find((item: Companion): boolean => item.address === row.address && validCompanion(item));
+      if (!target || !await this.host.openAlertForAi(target, row.run)) return;
+      this.markRunRead(row.run.id);
+      return;
+    }
     const target = this.host.computers().find((item: Companion): boolean => item.address === row.address && validCompanion(item));
     if (!target || !await this.host.openNotifiedSession(target, row.run.sessionId, row.run.pendingId ?? '', row.run.id)) return;
     this.markRunRead(row.run.id);

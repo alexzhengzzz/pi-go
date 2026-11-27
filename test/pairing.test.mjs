@@ -18,15 +18,19 @@ import { localLanAddress } from '../host/bridge/lan-tls.mjs';
 const project = fileURLToPath(new URL('../', import.meta.url));
 const helper = fileURLToPath(new URL('../host/bridge/pairing-control.mjs', import.meta.url));
 
-test('phone accepts pairing bundles only in the matching network mode', async () => {
+test('phone accepts pairing bundles and compact QR codes only in the matching network mode', async () => {
   const pairingSource = await readFile(new URL('../harmony/entry/src/main/ets/PairingCode.ets', import.meta.url), 'utf8');
   const declaration = (name) => {
     const start = pairingSource.indexOf(`function ${name}(`);
     assert.ok(start >= 0, `function ${name} not found in PairingCode.ets`);
     return pairingSource.slice(start, pairingSource.indexOf('\n}', start) + 2);
   };
-  const source = ['validSecureAddress', 'decodePairingBundle'].map(declaration).join('\n');
-  const decode = new Function('util', stripTypeScriptTypes(source) + '\nreturn decodePairingBundle;')({
+  const source = ['validSecureHostUrl', 'normalizeSecureUrl', 'pinMatchesPrefix', 'validSecureAddress', 'decodePairingBundle']
+    .map(declaration).join('\n');
+  const { decodePairingBundle: decode, normalizeSecureUrl: normalize, pinMatchesPrefix } = new Function(
+    'util',
+    stripTypeScriptTypes(source) + '\nreturn { decodePairingBundle, normalizeSecureUrl, pinMatchesPrefix };'
+  )({
     Base64Helper: class { decodeSync(value) { return Buffer.from(value, 'base64'); } },
     TextDecoder: class { decodeWithStream(bytes) { return bytes.toString('utf8'); } },
   });
@@ -40,6 +44,21 @@ test('phone accepts pairing bundles only in the matching network mode', async ()
   assert.equal(decode(remote, true).url, 'https://93.184.216.34:8443');
   assert.throws(() => decode(lan, true), /invalid_bundle/);
   assert.throws(() => decode(remote, false), /invalid_bundle/);
+
+  const compactLan = 'pigo://l/192.168.1.99:18981/482915/AAAAAAAAAAAAAAAA';
+  const compactRemote = 'pigo://r/93.184.216.34:8443/654321/BBBBBBBBBBBBBBBB';
+  assert.deepEqual(decode(compactLan, false), {
+    url: 'https://192.168.1.99:18981', ticket: '482915', pinPrefix: 'AAAAAAAAAAAAAAAA', transport: undefined,
+  });
+  assert.deepEqual(decode(compactRemote, true), {
+    url: 'https://93.184.216.34:8443', ticket: '654321', pinPrefix: 'BBBBBBBBBBBBBBBB', transport: 'remote',
+  });
+  assert.throws(() => decode(compactLan, true), /invalid_bundle/);
+  assert.throws(() => decode(compactRemote, false), /invalid_bundle/);
+  assert.equal(normalize('192.168.1.99', false), 'https://192.168.1.99:18981');
+  assert.equal(normalize('93.184.216.34:8443', true), 'https://93.184.216.34:8443');
+  assert.equal(pinMatchesPrefix('A'.repeat(43) + '=', 'AAAAAAAAAAAAAAAA'), true);
+  assert.equal(pinMatchesPrefix('B'.repeat(43) + '=', 'AAAAAAAAAAAAAAAA'), false);
 });
 
 function gui(input, env) {
@@ -121,6 +140,8 @@ async function verifyRemote(context, { session, pid, env, lan, outside }) {
   context.after(() => gui({ action: 'stop', ...setup }, env).catch(() => {}));
   await assert.rejects(gui({ action: 'pair', ...setup, publicIP: '127.0.0.1' }, env), /公网 IPv4/);
   const pair = await gui({ action: 'pair', ...setup }, env);
+  assert.match(pair.code, /^\d{6}$/);
+  assert.match(pair.qr, new RegExp(`^pigo://r/${publicIP.replaceAll('.', '\\.')}:8443/${pair.code}/[A-Za-z0-9_-]{16}$`));
   const config = JSON.parse(Buffer.from(pair.bundle, 'base64url'));
   assert.equal(config.transport, 'remote');
   assert.equal(config.url, `https://${publicIP}:8443`);
@@ -134,8 +155,10 @@ async function verifyRemote(context, { session, pid, env, lan, outside }) {
   assert.equal((await tlsRequest(endpoint, '/health', undefined, undefined, { ...options, headers: {} })).status, 403);
   assert.equal((await call('/health')).status, 401);
   assert.equal((await call('/sessions')).status, 401);
-  const paired = await call('/pair', { ticket: config.ticket });
+  const paired = await call('/pair', { ticket: pair.code });
   assert.equal(paired.status, 200);
+  assert.equal(paired.data.ca, config.ca);
+  assert.equal(paired.data.pin, config.pin);
   const { token } = paired.data;
   assert.equal((await call('/health', undefined, token)).status, 200);
   assert.equal((await tlsRequest(endpoint, '/sessions', undefined, token, { ...options,
@@ -336,7 +359,7 @@ test('desktop GUI USB pairing hands the one-time ticket to the phone over hdc', 
   assert.equal(pair.bridge.transport, 'usb');
   assert.equal(pair.bridge.computerAccess, true);
   assert.equal(pair.usbTarget, usb);
-  assert.match(pair.code, /^\d{8}$/);
+  assert.match(pair.code, /^\d{6}$/);
   assert.equal(pair.warning, undefined);
   const log = await readFile(env.HDC_LOG, 'utf8');
   assert.ok(log.includes(`-t ${usb} rport ${endpoint} ${endpoint}`));
@@ -355,7 +378,7 @@ test('desktop GUI USB pairing hands the one-time ticket to the phone over hdc', 
   assert.equal(reconnect.code, undefined);
   assert.doesNotMatch((await readFile(env.HDC_LOG, 'utf8')).slice(log.length), /--ps ticket/);
   const failed = await gui({ ...input, action: 'pair' }, { ...env, HDC_FAIL_START: '1', HDC_FORWARD: `${usb} ${endpoint} ${endpoint} [Reverse]` });
-  assert.match(failed.code, /^\d{8}$/);
+  assert.match(failed.code, /^\d{6}$/);
   assert.match(failed.warning, /无法自动打开手机 Pi Go/);
   assert.equal((await usbPair(port, delivered)).status, 401);
   const finalLog = await readFile(env.HDC_LOG, 'utf8');
@@ -400,6 +423,9 @@ test('desktop GUI starts LAN pairing, exposes no ticket over HTTP, and revokes t
   assert.equal(pair.bridge.paired, false);
   assert.equal(pair.bridge.computerAccess, true);
   assert.ok(pair.bridge.expiresAt > Date.now());
+  assert.match(pair.code, /^\d{6}$/);
+  assert.match(pair.qr, new RegExp(`^pigo://l/${host.replaceAll('.', '\\.')}:${port}/${pair.code}/[A-Za-z0-9_-]{16}$`));
+  assert.ok(pair.qr.length < 80, 'compact QR payload must stay short');
   const config = JSON.parse(Buffer.from(pair.bundle, 'base64url').toString());
   assert.equal(config.url, `https://${host}:${port}`);
   const paired = await promisify(execFile)(process.execPath, ['--input-type=module', '-e', `

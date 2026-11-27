@@ -143,7 +143,8 @@ export class PiGoPageStore {
   sessionPaneDragStart: number = 0;
   @Trace expandedSpaces: string[] = [];
   @Trace offlineDismissed: boolean = false;
-  @Trace activeTab: string = 'tasks';
+  @Trace activeTab: string = 'inbox';
+  @Trace inboxSelecting: boolean = false;
   @Trace minePage: string = '';
   @Trace addingComputer: boolean = false;
   @Trace themeId: string = 'sakura';
@@ -196,6 +197,7 @@ export class PiGoPageStore {
     }
     if (this.voiceComposer.state.recording || this.voiceComposer.state.voicePreparing || this.voiceComposer.state.voiceFinishing) { this.voiceComposer.resetVoice(); return true; }
     if (this.scheduleController.state.schedulePage) { this.scheduleController.backFromSchedule(); return true; }
+    if (this.activeTab === 'inbox' && this.inboxSelecting) { this.inboxSelecting = false; return true; }
     if (this.toolCmd.state.showToolDetails) { this.toolCmd.closeToolDetails(); return true; }
     if (this.toolCmd.state.showModelMenu) { this.toolCmd.state.showModelMenu = false; return true; }
     if (this.sessionActions.creation.showNewSpace) { this.closeNewSpace(); return true; }
@@ -232,7 +234,7 @@ export class PiGoPageStore {
     if (context) this.runCenter.attachWatch(context as common.UIAbilityContext);
     this.restoreChain = this.restore();
     void this.restoreChain.then(() => {
-      if (!this.isPaired && this.activeTab === 'tasks') this.openComputers();
+      if (!this.isPaired && (this.activeTab === 'inbox' || this.activeTab === 'tasks')) this.openComputers();
       void this.consumeLaunchTicket();
     });
   }
@@ -316,7 +318,7 @@ export class PiGoPageStore {
       if (!saved || epoch !== this.session.epoch) return;
       this.computers = this.connection.restoreComputers(saved.computers, (): string => util.generateRandomUUID());
       const active = this.computers.find((record: Companion): boolean => record.address === saved.active);
-      if (active) this.activateComputer(active);
+      if (active) this.activateComputer(active, true);
     } catch { this.session.status = '无法读取已有配对，请重新连接。'; }
     finally { this.loading = false; }
   }
@@ -394,7 +396,7 @@ export class PiGoPageStore {
     }
   }
 
-  activateComputer(record: Companion): void {
+  activateComputer(record: Companion, initialRestore: boolean = false): void {
     const usb = validUsb(record.address);
     this.scheduleController.resetScheduleJobs();
     this.session.epoch += 1;
@@ -413,15 +415,16 @@ export class PiGoPageStore {
     this.pairingComputerId = '';
     this.addingComputer = false;
     this.restoringComputer = undefined;
-    this.activeTab = 'tasks';
+    this.activeTab = initialRestore ? 'inbox' : 'tasks';
     this.minePage = '';
     this.session.status = '';
     this.session.noSession = '正在加载该电脑的会话…';
-    this.showSessions = this.windowWidth < SPLIT_WINDOW_WIDTH;
+    this.showSessions = initialRestore ? false : this.windowWidth < SPLIT_WINDOW_WIDTH;
     this.resetCatalog();
     this.session.reachable = false;
     this.isPaired = true;
     this.scheduleController.queueScheduleSync(true);
+    if (initialRestore) this.runCenter.queueRunSync(0);
     this.streamSync.schedule(0);
     this.streamSync.stopStream();
   }
@@ -468,6 +471,7 @@ export class PiGoPageStore {
       markRunRead: (id: string): void => this.runCenter.markRunRead(id),
       showScheduleInbox: (): void => this.showScheduleInbox(),
       selectRootTab: (tab: string): boolean => this.selectRootTab(tab),
+      openWorkspaceFiles: (): boolean => this.openWorkspaceFiles(),
       openNewSession: (): void => this.openNewSession()
     };
   }
@@ -503,6 +507,8 @@ export class PiGoPageStore {
       saveSetting: (key: string, value: string | boolean): Promise<void> => this.saveSetting(key, value),
       openNotifiedSession: (target: Companion, id: string, pendingId: string, eventId: string): Promise<boolean> =>
         this.openNotifiedSession(target, id, pendingId, eventId),
+      openAlertForAi: (target: Companion, run: RunEvent): Promise<boolean> =>
+        this.openAlertForAi(target, run),
       showScheduleInbox: (): void => this.showScheduleInbox(),
       dismissKeyboard: (): void => this.dismissKeyboard(),
       getUIContext: (): UIContext => this.getUIContext(),
@@ -536,6 +542,7 @@ export class PiGoPageStore {
     this.activeTab = 'tasks';
     this.showFiles = false;
     this.session.showSettings = false;
+    this.inboxSelecting = false;
     this.showSessions = false;
     const key = this.streamSync.draftKey(id);
     if (pendingId) {
@@ -569,6 +576,27 @@ export class PiGoPageStore {
         this.scheduleController.state.schedulePage = '';
       }
     }
+    return true;
+  }
+
+  async openAlertForAi(target: Companion, run: RunEvent): Promise<boolean> {
+    if (this.session.busy || this.session.openingSession || !run.cwd) return false;
+    if (target.address !== this.base) this.chooseComputer(target);
+    if (!this.isPaired || this.base !== target.address) return false;
+    if (!await this.sessionActions.requestAction('/new', { cwd: run.cwd })) {
+      this.scheduleController.state.scheduleError = this.session.status || '暂时无法在该工作区创建会话，请检查来源电脑。';
+      return false;
+    }
+    this.activeTab = 'tasks';
+    this.showFiles = false;
+    this.session.showSettings = false;
+    this.inboxSelecting = false;
+    this.showSessions = false;
+    this.scheduleController.state.schedulePage = '';
+    const prompt = run.suggestedPrompt?.trim() ||
+      `请结合当前工作区，分析这条提醒：\n${run.title ?? '工作区提醒'}${run.body ? '\n' + run.body : ''}`;
+    this.session.draft = prompt;
+    this.streamSync.rememberDraft(this.session.currentId);
     return true;
   }
 
@@ -620,9 +648,12 @@ export class PiGoPageStore {
   showScheduleInbox(): void {
     this.dismissKeyboard();
     this.scheduleController.state.scheduleBanner = undefined;
-    this.scheduleController.state.schedulePage = 'inbox';
+    this.scheduleController.state.schedulePage = '';
+    this.scheduleController.state.scheduleAlert = undefined;
+    this.selectRootTab('inbox');
     this.scheduleController.queueScheduleSync(true);
     this.runCenter.queueRunSync(0);
+    void this.loadSessionStatus();
   }
 
   async openScheduledSession(message: RunMessage): Promise<void> {
@@ -754,10 +785,13 @@ export class PiGoPageStore {
       getUIContext: (): UIContext => this.getUIContext(),
       restoreOnlineNotice: (): void => { this.offlineDismissed = false; },
       refreshVisibleCatalog: (connected: boolean): void => this.refreshVisibleCatalog(connected),
+      hasBackgroundTasks: (): boolean => this.backgroundActive() || this.activeTab === 'pending',
       sessionDeleted: (id: string): void => this.sessionDeleted(id),
       showTextPreview: (cwd: string, path: string, text: string): void => this.fileController.showTextPreview(cwd, path, text),
-      observeRun: (id: string, title: string, active: boolean, stopped: boolean = false): void =>
-        this.runCenter.observeRun(id, title, active, stopped),
+      observeRun: (id: string, title: string, active: boolean, stopped: boolean = false): void => {
+        if (!active) this.clearFinishedRunningSession(id);
+        this.runCenter.observeRun(id, title, active, stopped);
+      },
       requestPermissionAfterDispatch: (): void => this.runCenter.requestPermissionAfterDispatch(),
       publishLiveActivity: (snapshot?: LiveActivitySnapshot): void =>
         liveActivity.sync(snapshot, this.getUIContext?.()?.getHostContext?.() as common.UIAbilityContext | undefined)
@@ -828,6 +862,7 @@ export class PiGoPageStore {
   }
 
   sessionDeleted(id: string): void {
+    this.clearFinishedRunningSession(id);
     this.sessions = this.sessions.filter((row: SessionRow): boolean => row.id !== id);
     this.chatState.deleteTranscriptCache(this.streamSync.draftKey(id));
     if (this.session.currentId === id) {
@@ -863,9 +898,9 @@ export class PiGoPageStore {
     this.session.busy = true;
     this.session.status = '';
     try {
-      const token = await this.connection.pair(pairing,
+      const credentials = await this.connection.pair(pairing,
         (path: string, input: Payload, endpoint: BridgeEndpoint): Promise<BridgeReply> => this.request(path, input, endpoint));
-      const record = this.connection.pairedComputer(pairing.endpoint, token, this.computers, this.pairingComputerId,
+      const record = this.connection.pairedComputer(pairing.endpoint, credentials, this.computers, this.pairingComputerId,
         (): string => util.generateRandomUUID());
       if (!this.isPaired || this.base !== base) this.forgetDrafts(base);
       this.computers = [record, ...this.computers.filter((item: Companion): boolean => item.address !== base)];
@@ -879,19 +914,24 @@ export class PiGoPageStore {
         this.accountSync.updateCloudComputer(base, validUsb(base) ? 'usb' : connectionLabel(record) === '公网' ? 'remote' : 'lan');
       }
     } catch (error) {
-      this.session.status = error instanceof BridgeFailure && error.status === 401 ? '票据已经失效，请在电脑上重新生成。' :
-        this.pairingMode !== 'usb' ? '无法建立安全连接。请检查网络、Pi Go 服务和配对包。' : '无法连接电脑，请确认 USB 转发和 Pi Go 桥接服务。';
+      this.session.status = error instanceof BridgeFailure && error.status === 401 ? '配对码已经失效，请在电脑上重新生成。' :
+        this.pairingMode !== 'usb' ? '无法建立安全连接。请检查网络、电脑地址和配对码。' : '无法连接电脑，请确认 USB 转发和 Pi Go 桥接服务。';
     } finally { this.session.busy = false; }
   }
 
   selectPairingMode(mode: string): void {
     if (mode === this.pairingMode) return;
     this.pairingMode = mode;
-    if (mode === 'usb' && !validUsb(this.address)) this.address = USB_ADDRESS;
+    if (mode === 'usb') {
+      if (!validUsb(this.address)) this.address = USB_ADDRESS;
+    } else if (validUsb(this.address)) {
+      this.address = '';
+    }
     this.session.status = '';
     this.pairingBundle = '';
     this.lanCandidates = [];
     this.ticket = '';
+    if (mode === 'lan') void this.findLanCompanions();
   }
 
   async scanPairingBundle(): Promise<void> {
@@ -899,18 +939,22 @@ export class PiGoPageStore {
     if (!context || this.session.busy) return;
     this.session.busy = true;
     this.session.status = '';
+    let scanned = false;
     try {
       const result = await scanBarcode.startScanForResult(context, {
         scanTypes: [scanCore.ScanType.QR_CODE], enableMultiMode: false, enableAlbum: true
       });
       const bundle = decodePairingBundle(result.originalValue, this.pairingMode === 'remote');
       this.pairingBundle = result.originalValue;
-      this.session.status = `已导入 ${bundle.url}。确认是自己的电脑后，点「配对并连接」。`;
+      this.address = bundle.url;
+      this.ticket = /^\d{6}$/.test(bundle.ticket) ? bundle.ticket : '';
+      scanned = true;
     } catch {
-      this.session.status = this.pairingMode === 'remote' ? '未导入公网配对包，请扫描 Pi Go.app「公网」二维码。' :
-        '未导入局域网配对包，请扫描 Pi Go.app「局域网扫码」二维码。';
+      this.session.status = this.pairingMode === 'remote' ? '未识别公网配对码，请扫描 Pi Go.app「公网」二维码。' :
+        '未识别局域网配对码，请扫描 Pi Go.app「局域网」二维码。';
     }
     finally { this.session.busy = false; }
+    if (scanned) await this.pair();
   }
 
   async findLanCompanions(): Promise<void> {
@@ -920,8 +964,11 @@ export class PiGoPageStore {
     this.session.status = '';
     try {
       this.lanCandidates = await this.connection.discover();
-      if (!this.lanCandidates.length) this.session.status = '未发现 Pi Go。可直接扫码或粘贴配对包。';
-    } catch { this.session.status = '发现不可用，可直接导入配对包。'; }
+      if (this.lanCandidates.length === 1 && (!this.address || validUsb(this.address))) {
+        this.address = this.lanCandidates[0];
+      }
+      if (!this.lanCandidates.length) this.session.status = '未发现电脑，请确认在同一 Wi-Fi，或手动输入电脑地址。';
+    } catch { this.session.status = '自动发现不可用，可手动输入电脑地址或扫码。'; }
     finally { this.session.busy = false; }
   }
 
@@ -987,6 +1034,7 @@ export class PiGoPageStore {
     this.workspaces = [];
     this.resetCatalog();
     this.isPaired = false;
+    this.session.idle = true;
     this.session.runId = '';
     this.session.queued = false;
     this.session.acceptsImage = false;
@@ -1031,26 +1079,41 @@ export class PiGoPageStore {
     this.chatState.forgetDrafts(address);
   }
 
+  clearFinishedRunningSession(id: string): void {
+    if (!id) return;
+    if (this.runningSessionIds.includes(id)) {
+      this.runningSessionIds = this.runningSessionIds.filter((item: string): boolean => item !== id);
+    }
+    if (this.runningSessions.some((row: RunningRow): boolean => row.id === id)) {
+      this.runningSessions = this.runningSessions.filter((row: RunningRow): boolean => row.id !== id);
+    }
+  }
+
   async loadSessionStatus(): Promise<void> {
     if (!this.session.reachable || this.sessionStatusLoading) return;
     const epoch = this.session.epoch;
     const selected = this.session.currentId;
+    const liveRevision = this.session.liveRevision;
     this.sessionStatusLoading = true;
     try {
       const result = await this.request('/sessions/status');
-      if (epoch === this.session.epoch) this.applyRunningStatus(result, selected);
+      if (epoch === this.session.epoch) this.applyRunningStatus(result, selected, liveRevision);
     } catch {
       if (epoch === this.session.epoch) this.applyRunningStatus(undefined);
     } finally { this.sessionStatusLoading = false; }
   }
 
-  applyRunningStatus(result?: BridgeReply, selected: string = this.session.currentId): void {
-    const rows = (result?.runningSessions ?? []).filter((row: RunningRow): boolean => !!row?.id);
+  applyRunningStatus(result?: BridgeReply, selected: string = this.session.currentId, liveRevision?: number): void {
+    const settledCurrent = !!selected && selected === this.session.currentId &&
+      liveRevision !== undefined && liveRevision !== this.session.liveRevision &&
+      this.session.idle && !this.session.queued;
+    const rows = (result?.runningSessions ?? []).filter((row: RunningRow): boolean => !!row?.id && (!settledCurrent || row.id !== selected));
     this.runningSessions = rows;
     for (const row of rows) {
       if (row.id !== this.session.currentId) this.updateCachedSessionTitle(row.id, row.name);
     }
-    const ids = rows.map((row: RunningRow): string => row.id).concat(result?.runningSessionIds ?? []);
+    const ids = rows.map((row: RunningRow): string => row.id)
+      .concat((result?.runningSessionIds ?? []).filter((id: string): boolean => !settledCurrent || id !== selected));
     this.runningSessionIds = ids.filter((id: string, index: number): boolean => ids.indexOf(id) === index);
     if (result?.idleSessionIds) {
       for (const row of this.backgroundRunning()) {
@@ -1063,6 +1126,7 @@ export class PiGoPageStore {
   observeSessionRun(session: SessionState): void {
     // A dispatched prompt can make the session busy before Pi starts a run.
     if (!session.idle && !session.runId && !session.queued) return;
+    if (session.idle && !session.queued) this.clearFinishedRunningSession(session.id);
     const title = session.name || this.sessions.find((row: SessionRow): boolean => row.id === session.id)?.name ||
       (session.id === this.session.currentId ? this.chatTitle() : '任务');
     this.runCenter.observeRun(session.id, title, !session.idle || session.queued === true);
@@ -1120,6 +1184,59 @@ export class PiGoPageStore {
 
   runningTaskCount(): number {
     return this.session.reachable ? this.allRunningRows().length + this.standaloneScheduleRuns().length : 0;
+  }
+
+  inboxBadgeCount(): number {
+    const unreadRuns = this.runCenter.displayedInboxRuns().filter((item: InboxRun): boolean =>
+      item.unread || item.run.status === 'waiting').length;
+    const unreadSchedules = this.scheduleController.state.scheduleMessages.filter((item: RunMessage): boolean =>
+      !item.dismissed && item.unread).length;
+    return unreadRuns + unreadSchedules;
+  }
+
+  markAllInboxRead(): void {
+    for (const row of this.runCenter.displayedInboxRuns()) {
+      if (row.unread) this.runCenter.markRunRead(row.run.id);
+    }
+    const sources = new Map<string, string[]>();
+    for (const message of this.scheduleController.state.scheduleMessages) {
+      if (!message.unread) continue;
+      const list = sources.get(message.source) ?? [];
+      list.push(message.run.id);
+      sources.set(message.source, list);
+    }
+    if (sources.size > 0) {
+      this.scheduleController.state.scheduleMessages = this.scheduleController.state.scheduleMessages.map((item: RunMessage): RunMessage =>
+        item.unread ? { key: item.key, source: item.source, address: item.address, computer: item.computer, run: item.run, unread: false, dismissed: item.dismissed } : item);
+      sources.forEach((ids: string[], source: string) => {
+        void this.saveSetting(`schedule_read_${source}`, JSON.stringify(ids.slice(0, 80))).catch(() => {});
+      });
+    }
+    this.publishWidgets();
+  }
+
+  inboxHeaderMenu(): MenuElement[] {
+    const items: MenuElement[] = [
+      {
+        value: '刷新动态',
+        action: () => {
+          this.scheduleController.queueScheduleSync(true);
+          this.runCenter.queueRunSync(0);
+          void this.loadSessionStatus();
+        }
+      }
+    ];
+    if (this.inboxBadgeCount() > 0) {
+      items.push({
+        value: '全部标为已读',
+        action: () => { this.markAllInboxRead(); }
+      });
+    }
+    items.push({
+      value: this.inboxSelecting ? '退出批量管理' : '批量管理',
+      action: () => { this.inboxSelecting = !this.inboxSelecting; }
+    });
+    return items;
   }
 
   // Fine-grained state for pills and badges: streaming / waiting / queued.
@@ -1272,6 +1389,21 @@ export class PiGoPageStore {
     };
   }
 
+  openWorkspaceFiles(): boolean {
+    this.dismissKeyboard();
+    if (this.session.busy) return false;
+    if (!this.session.reachable || !this.session.workspaceCwd) {
+      this.session.status = '请先连接电脑并打开一个会话。';
+      return false;
+    }
+    this.activeTab = 'tasks';
+    this.session.showSettings = false;
+    this.showFiles = true;
+    this.session.status = '';
+    this.fileController.showDirectory(this.session.workspaceCwd);
+    return true;
+  }
+
   fileBack(): void {
     if (this.session.busy || this.session.openingSession) return;
     this.showFiles = false;
@@ -1312,6 +1444,12 @@ export class PiGoPageStore {
   chatHeaderMenu(): MenuElement[] {
     const items: MenuElement[] = [];
     if (this.session.currentId && !this.session.noSession && this.activeTab === 'tasks') {
+      if (this.session.workspaceCwd) {
+        items.push({
+          value: '工作区文件',
+          action: () => { this.openWorkspaceFiles(); }
+        });
+      }
       items.push({
         value: '分享会话',
         action: () => { void this.shareController.shareCurrentSession('session-settings'); }
@@ -1780,6 +1918,7 @@ export class PiGoPageStore {
     this.restoringComputer = undefined;
     this.pairingComputerId = id;
     this.addingComputer = true;
+    if (this.pairingMode === 'lan') void this.findLanCompanions();
   }
 
   saveComputerName(id: string): void {
@@ -2037,9 +2176,9 @@ export class PiGoPageStore {
   }
 
   tabSymbol(tab: string, selected: boolean): Resource {
+    if (tab === 'inbox') return $r('sys.symbol.bell');
     if (tab === 'tasks') return selected ? $r('sys.symbol.message_fill') : $r('sys.symbol.message');
     if (tab === 'pending') return selected ? $r('sys.symbol.play_circle_fill') : $r('sys.symbol.play_circle');
-    if (tab === 'files') return selected ? $r('sys.symbol.folder_fill') : $r('sys.symbol.folder');
     return selected ? $r('sys.symbol.person_fill') : $r('sys.symbol.person');
   }
 
@@ -2048,7 +2187,7 @@ export class PiGoPageStore {
   }
 
   rootTabs(): string[] {
-    return this.isPaired ? ['tasks', 'pending', 'files', 'mine'] : ['tasks', 'mine'];
+    return this.isPaired ? ['inbox', 'tasks', 'pending', 'mine'] : ['inbox', 'mine'];
   }
 
   activeTabIndex(): number {
@@ -2063,19 +2202,9 @@ export class PiGoPageStore {
       this.session.status = '请先保存或放弃文件修改。';
       return false;
     }
-    if (tab === 'files') {
-      if (!this.session.reachable || !this.session.workspaceCwd) {
-        this.session.status = '请先连接电脑并打开一个任务。';
-        return false;
-      }
-      if (this.activeTab === 'files' && this.showFiles) return true;
-      this.showFiles = true;
-      this.session.status = '';
-      this.fileController.showDirectory(this.session.workspaceCwd);
-    } else {
-      this.showFiles = false;
-      this.session.showSettings = false;
-    }
+    this.showFiles = false;
+    this.session.showSettings = false;
+    if (tab !== 'inbox') this.inboxSelecting = false;
     if (tab === 'mine' && this.minePage) {
       this.mineBack();
       this.minePage = '';
@@ -2090,16 +2219,23 @@ export class PiGoPageStore {
       this.removeTarget = '';
     }
     this.activeTab = tab;
-    if (tab === 'pending') void this.scheduleController.loadScheduleJobs();
+    if (tab === 'inbox') {
+      this.scheduleController.queueScheduleSync(true);
+      this.runCenter.queueRunSync(0);
+      void this.loadSessionStatus();
+    } else if (tab === 'pending') {
+      void this.loadSessionStatus();
+      void this.scheduleController.loadScheduleJobs();
+    }
     return true;
   }
 
   showRootBottomTabs(): boolean {
     if (this.loading) return false;
     if (this.activeTab === 'mine' && this.minePage) return false;
-    if (this.session.showSettings) return false;
+    if (this.session.showSettings || this.showFiles) return false;
     if (!this.keyboardHeight) return true;
-    return this.isPaired && this.activeTab !== 'mine' && (this.activeTab !== 'tasks' || this.showFiles);
+    return this.isPaired && this.activeTab !== 'mine' && this.activeTab !== 'tasks';
   }
 
   confirmDeleteSchedule(job: ScheduleJob): void {

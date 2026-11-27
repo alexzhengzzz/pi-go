@@ -1,6 +1,6 @@
 # Pi Go daemon
 
-Pi Go 的常驻宿主。它通过统一的 `AgentProvider` 注册表启动并管理 Pi CLI（RPC）、Codex CLI（`codex app-server`）和 Antigravity（`agy acp`）会话，供手机打开历史、新建会话、管理工作区和应答扩展交互。
+Pi Go 是个人电脑 AI Agent 与后台任务的常驻宿主及移动指挥台。daemon 通过统一的 `AgentProvider` 注册表启动并管理 Pi CLI（RPC）、Codex CLI（`codex app-server`）和 Antigravity（`agy acp`）会话，负责定时任务调度与本机事件推送，供手机在「动态」页统一收取汇报并在需要时一键拉起会话介入。
 
 ```
 鸿蒙手机 ──HTTP(S)/SSE── broker.mjs ── w-*.sock ── Pi 扩展 (phase0.ts)
@@ -57,7 +57,23 @@ daemon 托管的 RPC 会话沿用 Pi CLI 的用户配置。可通过 `PIGO_PI_AR
 
 Mac 恢复后，默认跳过已错过的运行。设置补跑窗口后，窗口内最多补最近的一次，后续触发仍按原计划。中途重启的运行标记为中断，可从计划手动再运行。遇到需要输入或确认的扩展交互时，定时运行结束并记录原因。
 
-手机在前台收取已配对电脑的运行结果，切换聊天电脑时仍可在顶部收件箱查看。App 回到前台会尝试补收。任务在 Mac 端保存成功后生效。
+手机在前台收取已配对电脑的运行结果，在底部「动态」页统一查看。App 回到前台会尝试补收。任务在 Mac 端保存成功后生效。
+
+## 工作区提醒（本地事件推送）
+
+任何本机脚本或后台服务都可以通过 `host/scripts/pigo-notify.mjs`（或本机 Unix socket 的 `POST /alerts/emit`）向 Pi Go 发送通用提醒，零 LLM token 即可到达手机收件箱、Push Kit 后台通知和已连接的华为手表：
+
+```sh
+node host/scripts/pigo-notify.mjs \
+  --source my-watcher \
+  --title "监控命中" \
+  --body "关键指标已触发阈值" \
+  --dedupe "rule-1-20261127" \
+  --cwd "/path/to/workspace" \
+  --prompt "结合当前工作区分析这次触发的原因"
+```
+
+绑定了已共享工作区（`--cwd`）的提醒，在手机收件箱中点开即可一键新建该工作区的 AI 会话并预填提示词；不带 `--cwd` 则作为全局提醒仅展示与推送。
 
 ## 测试
 

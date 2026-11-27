@@ -262,6 +262,7 @@ async function hostContext() {
   return { socket, profile, granted: [...new Set(granted)], workspaces, revision: workspaceReply?.data?.revision,
     canCreateWorkspace: computerAccess && health.canCreateWorkspace === true,
     schedules: health.schedules === true,
+    alerts: health.alerts === true,
     agents: Array.isArray(health.agents) ? health.agents : [{ id: 'pi', label: 'Pi', installed: true }] };
 }
 
@@ -345,6 +346,27 @@ async function runInbox(live, context, sessionId) {
   return [...pending.filter(Boolean), ...latestBySession];
 }
 
+async function daemonAlerts(context) {
+  if (!context.socket || !context.alerts) return [];
+  const reply = await localRequest(context.socket, 'POST', '/alerts/sync', {
+    paths: context.granted
+  }, 1500).catch(() => undefined);
+  const list = reply?.status === 200 && Array.isArray(reply.data?.alerts) ? reply.data.alerts : [];
+  return list.map((alert) => ({
+    id: alert.id,
+    sessionId: '',
+    cwd: alert.cwd || '',
+    title: alert.title,
+    ...(alert.body ? { body: alert.body } : {}),
+    ...(alert.source ? { source: alert.source } : {}),
+    ...(alert.severity ? { severity: alert.severity } : {}),
+    ...(alert.suggestedPrompt ? { suggestedPrompt: alert.suggestedPrompt } : {}),
+    ...(Array.isArray(alert.artifacts) && alert.artifacts.length ? { artifacts: alert.artifacts } : {}),
+    status: 'alert',
+    finishedAt: alert.createdAt,
+  }));
+}
+
 async function pollRunPush() {
   const paired = bearer;
   const identity = paired?.toString('hex');
@@ -353,6 +375,8 @@ async function pollRunPush() {
   try {
     const context = await hostContext();
     const rows = await runInbox(registry.workers(), context);
+    const alerts = await daemonAlerts(context);
+    rows.push(...alerts);
     if (context.schedules && context.granted.length) {
       const reply = await localRequest(context.socket, 'POST', '/schedules/sync', {
         paths: context.granted, knownRuns: [], includeJobs: false
@@ -537,7 +561,7 @@ const publicHandler = async (request, response) => {
       chosen = false;
       selectionVersion += 1;
       for (const client of streams) remote ? client.response.destroy() : client.upstream?.destroy();
-      return reply(response, 200, { token });
+      return reply(response, 200, tls ? { token, ca: tls.cert, pin: tls.pin } : { token });
     }
     if (!authenticated) return error(response, 401, 'unpaired');
     if (remote && !acceptRemoteRequest(response)) return;
@@ -566,10 +590,25 @@ const publicHandler = async (request, response) => {
         return text === undefined ? error(response, 404, 'diff_not_found') : reply(response, 200, { text });
       }
       if (route === 'GET /runs/inbox') {
-        return reply(response, 200, { runEvents: rows.slice(0, 80).map(({ files, checks, screenshots, ...row }) => row),
+        const alerts = await daemonAlerts(context);
+        if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
+        const combined = [...rows.map(({ files, checks, screenshots, ...row }) => row), ...alerts]
+          .sort((a, b) => Number(b.status === 'waiting') - Number(a.status === 'waiting') || (b.finishedAt ?? 0) - (a.finishedAt ?? 0));
+        return reply(response, 200, { runEvents: combined.slice(0, 80),
           pushAvailable: Boolean(runPush.account), ...(runPush.lastError ? { pushError: runPush.lastError } : {}) });
       }
       return reply(response, 200, { runEvents: rows.slice(0, 50) });
+    }
+    if (route === 'POST /alerts/delete') {
+      const input = await body(request, 2048);
+      if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
+      const context = await hostContext();
+      if (!context.socket || !context.alerts) return reply(response, 200, { deleted: false });
+      const result = await localRequest(context.socket, 'POST', '/alerts/delete', {
+        id: input?.id, paths: context.granted
+      }).catch(() => undefined);
+      if (!matches(request.headers.authorization, bearer)) return error(response, 401, 'unpaired');
+      return result ? reply(response, result.status, result.data) : error(response, 409, 'desktop_handoff_unconfirmed');
     }
     if (route === 'POST /schedules/sync' || route === 'POST /schedules/update') {
       return await scheduleRequest(request, response, path);

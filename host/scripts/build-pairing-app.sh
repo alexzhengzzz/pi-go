@@ -15,6 +15,7 @@ cp "$host_root"/agents/*.mjs "$resources/agents/"
 cp "$host_root"/agents/codex/*.mjs "$resources/agents/codex/"
 cp "$host_root"/agents/agy/*.mjs "$resources/agents/agy/"
 cp "$host_root/scripts/run-remote-tunnel.py" "$resources/scripts/"
+cp "$host_root/scripts/pigo-notify.mjs" "$resources/scripts/"
 # Existing LaunchAgents use Resources/desktop, while daemon imports use ../bridge.
 ln -sfn desktop "$resources/bridge"
 print -r -- "$node_path" > "$resources/node-path"
